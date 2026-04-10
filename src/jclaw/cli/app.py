@@ -90,6 +90,8 @@ def init_config(path: Path) -> int:
 def doctor(config: Config) -> int:
     problems: list[str] = []
 
+    print(f"config path: {config.config_path}")
+
     if not config.telegram.bot_token:
         problems.append("telegram.bot_token is missing")
     if not config.provider.base_url:
@@ -116,6 +118,8 @@ def doctor(config: Config) -> int:
             status = client.health_check()
             client.close()
             print(f"provider status: {status}")
+            if status != "ok":
+                problems.append(f"provider check failed: {status}")
         except Exception as exc:  # noqa: BLE001
             problems.append(f"provider check failed: {exc}")
 

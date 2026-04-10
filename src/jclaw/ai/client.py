@@ -20,13 +20,9 @@ class OpenAICompatibleClient:
         if not self.config.base_url or not self.config.model:
             raise RuntimeError("provider.base_url and provider.model must be configured before chatting")
 
-        headers = {"Content-Type": "application/json"}
-        if self.config.api_key:
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
-
         response = self._client.post(
             f"{self.config.base_url.rstrip('/')}/chat/completions",
-            headers=headers,
+            headers=self._headers(),
             json={
                 "model": self.config.model,
                 "messages": list(messages),
@@ -50,8 +46,16 @@ class OpenAICompatibleClient:
     def health_check(self) -> str:
         if not self.config.base_url:
             return "provider.base_url is missing"
-        response = self._client.get(f"{self.config.base_url.rstrip('/')}/models")
+        response = self._client.get(
+            f"{self.config.base_url.rstrip('/')}/models",
+            headers=self._headers(),
+        )
         if response.is_success:
             return "ok"
         return f"provider returned HTTP {response.status_code}"
 
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.config.api_key:
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
+        return headers
