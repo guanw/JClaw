@@ -6,6 +6,7 @@ import re
 
 from playwright.sync_api import BrowserContext, Error, Page, Playwright, TimeoutError, sync_playwright
 
+from jclaw.core.defaults import BROWSER_SLOW_MO_MS, BROWSER_VIEWPORT_HEIGHT, BROWSER_VIEWPORT_WIDTH
 from jclaw.tools.browser.models import Target
 from jclaw.tools.browser.session import BrowserSessionStore
 
@@ -37,9 +38,9 @@ class PlaywrightBrowserDriver:
         *,
         channel: str = "chromium",
         headless: bool = False,
-        slow_mo_ms: int = 0,
-        viewport_width: int = 1440,
-        viewport_height: int = 960,
+        slow_mo_ms: int = BROWSER_SLOW_MO_MS,
+        viewport_width: int = BROWSER_VIEWPORT_WIDTH,
+        viewport_height: int = BROWSER_VIEWPORT_HEIGHT,
     ) -> None:
         self.session_store = session_store
         self.channel = channel

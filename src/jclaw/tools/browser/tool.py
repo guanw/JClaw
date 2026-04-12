@@ -8,6 +8,14 @@ import re
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from typing import Any, Callable
 
+from jclaw.core.defaults import (
+    BROWSER_CHANNEL,
+    BROWSER_MAX_OBJECTIVE_STEPS,
+    BROWSER_MAX_RESEARCH_SOURCES,
+    BROWSER_SLOW_MO_MS,
+    BROWSER_VIEWPORT_HEIGHT,
+    BROWSER_VIEWPORT_WIDTH,
+)
 from jclaw.tools.base import ToolContext, ToolResult
 from jclaw.tools.browser.artifacts import BrowserArtifactStore
 from jclaw.tools.browser.desktop_driver import DesktopBrowserDriver
@@ -35,19 +43,27 @@ class BrowserTool:
         self.artifacts = BrowserArtifactStore(root / "artifacts")
         self.playwright = PlaywrightBrowserDriver(
             self.sessions,
-            channel=str(options.get("channel", "chromium")) if options else "chromium",
+            channel=str(options.get("channel", BROWSER_CHANNEL)) if options else BROWSER_CHANNEL,
             headless=bool(options.get("headless", False)) if options else False,
-            slow_mo_ms=int(options.get("slow_mo_ms", 0)) if options else 0,
-            viewport_width=int(options.get("viewport_width", 1440)) if options else 1440,
-            viewport_height=int(options.get("viewport_height", 960)) if options else 960,
+            slow_mo_ms=int(options.get("slow_mo_ms", BROWSER_SLOW_MO_MS)) if options else BROWSER_SLOW_MO_MS,
+            viewport_width=int(options.get("viewport_width", BROWSER_VIEWPORT_WIDTH)) if options else BROWSER_VIEWPORT_WIDTH,
+            viewport_height=int(options.get("viewport_height", BROWSER_VIEWPORT_HEIGHT)) if options else BROWSER_VIEWPORT_HEIGHT,
         )
         self.desktop = DesktopBrowserDriver()
         self.planner = BrowserPlanner()
         self._chat_sessions: dict[str, str] = {}
         self._choose_link = choose_link
         self._choose_next_action = choose_next_action
-        self.max_objective_steps = int(options.get("max_objective_steps", 5)) if options else 5
-        self.max_research_sources = int(options.get("max_research_sources", 3)) if options else 3
+        self.max_objective_steps = (
+            int(options.get("max_objective_steps", BROWSER_MAX_OBJECTIVE_STEPS))
+            if options
+            else BROWSER_MAX_OBJECTIVE_STEPS
+        )
+        self.max_research_sources = (
+            int(options.get("max_research_sources", BROWSER_MAX_RESEARCH_SOURCES))
+            if options
+            else BROWSER_MAX_RESEARCH_SOURCES
+        )
 
     def close(self) -> None:
         self.playwright.close()

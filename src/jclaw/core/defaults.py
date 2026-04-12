@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+APP_NAME = "JClaw"
+
+PROVIDER_MAX_TOKENS = 350
+PROVIDER_TEMPERATURE = 0.2
+PROVIDER_TIMEOUT_SECONDS = 60.0
+PROVIDER_SYSTEM_PROMPT_FILES = (
+    "SOUL.md",
+    "IDENTITY.md",
+    "BOOTSTRAP.md",
+    "CLAUDE.md",
+)
+
+TELEGRAM_BASE_URL = "https://api.telegram.org/bot"
+TELEGRAM_POLL_TIMEOUT_SECONDS = 20
+
+DAEMON_LAUNCHD_LABEL = "com.jclaw.daemon"
+DAEMON_IDLE_SLEEP_SECONDS = 2.0
+
+MEMORY_MAX_CONTEXT_MESSAGES = 6
+MEMORY_MAX_MEMORY_ITEMS = 4
+
+BROWSER_ENABLED = True
+BROWSER_HEADLESS = False
+BROWSER_CHANNEL = "chromium"
+BROWSER_SLOW_MO_MS = 0
+BROWSER_VIEWPORT_WIDTH = 1440
+BROWSER_VIEWPORT_HEIGHT = 960
+BROWSER_MAX_OBJECTIVE_STEPS = 5
+BROWSER_MAX_RESEARCH_SOURCES = 3
+
+WORKSPACE_ENABLED = True
+WORKSPACE_MAX_STEPS = 4
+WORKSPACE_SHELL_TIMEOUT_SECONDS = 20
+WORKSPACE_SHELL_OUTPUT_CHARS = 8000
+WORKSPACE_MAX_PREPARED_DIFF_BYTES = 24000
+WORKSPACE_MAX_FILES_PER_CHANGE = 6
+WORKSPACE_MAX_PATH_ENTRIES = 50
+WORKSPACE_MAX_INTERNAL_READ_BYTES = 20000
+WORKSPACE_ALLOWED_SHELL_BINARIES = (
+    "bash",
+    "cat",
+    "git",
+    "head",
+    "ls",
+    "make",
+    "node",
+    "npm",
+    "npx",
+    "pwd",
+    "pytest",
+    "python",
+    "python3",
+    "rg",
+    "sed",
+    "sh",
+    "tail",
+    "uv",
+    "wc",
+    "zsh",
+)
+WORKSPACE_BLOCKED_SHELL_TOKENS = (
+    "curl",
+    "ftp",
+    "http://",
+    "https://",
+    "nc",
+    "ncat",
+    "open",
+    "osascript",
+    "ping",
+    "scp",
+    "sftp",
+    "ssh",
+    "sudo",
+    "telnet",
+    "wget",
+)
+WORKSPACE_BLOCKED_GIT_SUBCOMMANDS = (
+    "clone",
+    "fetch",
+    "pull",
+    "push",
+    "remote",
+)
+
+KNOWLEDGE_ENABLED = False
+KNOWLEDGE_MAX_FILE_READ_BYTES = 20000
+KNOWLEDGE_MAX_FOLDER_SCAN_FILES = 40

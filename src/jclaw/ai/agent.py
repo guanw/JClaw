@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 import re
 from typing import Any
 
@@ -12,7 +13,9 @@ from jclaw.core.db import Database, MemoryRecord
 from jclaw.core.scheduler import next_run_at, parse_schedule, to_utc_iso
 from jclaw.tools.base import ToolContext, ToolResult
 from jclaw.tools.browser.tool import BrowserTool
+from jclaw.tools.knowledge.tool import KnowledgeTool
 from jclaw.tools.registry import ToolRegistry
+from jclaw.tools.workspace.tool import WorkspaceTool
 
 
 LOGGER = logging.getLogger(__name__)
@@ -42,6 +45,26 @@ class AssistantAgent:
                     choose_next_action=self._choose_browser_next_action_via_llm,
                 )
             )
+        if config.workspace.enabled:
+            self.tools.register(
+                WorkspaceTool(
+                    self.db,
+                    config.daemon.state_dir / "tools" / "workspace",
+                    config.repo_root,
+                    draft_change=self._draft_workspace_change_via_llm,
+                    options={
+                        "max_steps": config.workspace.max_steps,
+                        "shell_timeout_seconds": config.workspace.shell_timeout_seconds,
+                        "shell_output_chars": config.workspace.shell_output_chars,
+                        "max_prepared_diff_bytes": config.workspace.max_prepared_diff_bytes,
+                        "max_files_per_change": config.workspace.max_files_per_change,
+                        "max_path_entries": config.workspace.max_path_entries,
+                        "max_internal_read_bytes": config.workspace.max_internal_read_bytes,
+                    },
+                )
+            )
+        if config.knowledge.enabled:
+            self.tools.register(KnowledgeTool())
 
     def handle_text(self, chat_id: str, text: str, *, user_name: str = "") -> str:
         command_reply = self._handle_command(chat_id, text)
@@ -117,6 +140,16 @@ class AssistantAgent:
             return self._memory(chat_id)
         if command in {"/cron", "cron"}:
             return self._cron(chat_id, remainder)
+        if command in {"/approve", "approve"}:
+            return self._approve(chat_id, remainder)
+        if command in {"/deny", "deny"}:
+            return self._deny(chat_id, remainder)
+        if command in {"/grants", "grants"}:
+            return self._grants()
+        if command in {"/revoke", "revoke"}:
+            return self._revoke(remainder)
+        if command in {"/abort", "abort"}:
+            return self._abort(chat_id, remainder)
         return None
 
     def _remember(self, chat_id: str, remainder: str) -> str:
@@ -190,8 +223,103 @@ class AssistantAgent:
             "/cron add every 30m | remind me to stretch\n"
             "/cron add daily 09:00 | ask for my standup update\n"
             "/cron list\n"
-            "/cron remove 1"
+            "/cron remove 1\n"
+            "/approve req_123\n"
+            "/deny req_123\n"
+            "/grants\n"
+            "/revoke 1\n"
+            "/abort req_123"
         )
+
+    def _approve(self, chat_id: str, remainder: str) -> str:
+        request_id = remainder.strip()
+        if not request_id:
+            return "Usage: /approve req_123"
+        request = self.db.get_approval_request(request_id)
+        if request is None or request.chat_id != chat_id:
+            return "Approval request not found."
+        if request.status != "pending":
+            return f"Approval request {request_id} is already {request.status}."
+        if request.kind == "grant":
+            grant = self.db.upsert_grant(request.root_path, request.capabilities, chat_id)
+            self.db.update_approval_request_status(request_id, "approved")
+            grant_message = (
+                f"Granted {', '.join(grant.capabilities)} access for {grant.root_path}. "
+                f"Grant id: {grant.id}"
+            )
+            continuation = request.payload.get("continuation", {})
+            if not isinstance(continuation, dict):
+                return grant_message
+            tool = str(continuation.get("tool", "")).strip()
+            action = str(continuation.get("action", "")).strip()
+            params = continuation.get("params", {})
+            if tool != "workspace" or not action or not isinstance(params, dict):
+                return grant_message
+            result = self.tools.invoke(
+                tool,
+                action,
+                params,
+                ToolContext(chat_id=chat_id, user_id="approval"),
+            )
+            return f"{grant_message}\n\n{self._format_tool_result(result)}"
+        action_map = {
+            "file_mutation": "apply_change_request",
+            "git_mutation": "apply_git_request",
+            "shell_mutation": "apply_shell_request",
+        }
+        action = action_map.get(request.kind)
+        if action is None:
+            return f"Approval request kind '{request.kind}' is not supported."
+        result = self.tools.invoke(
+            "workspace",
+            action,
+            {"request_id": request_id},
+            ToolContext(chat_id=chat_id, user_id="approval"),
+        )
+        return self._format_tool_result(result)
+
+    def _deny(self, chat_id: str, remainder: str) -> str:
+        request_id = remainder.strip()
+        if not request_id:
+            return "Usage: /deny req_123"
+        request = self.db.get_approval_request(request_id)
+        if request is None or request.chat_id != chat_id:
+            return "Approval request not found."
+        if request.status != "pending":
+            return f"Approval request {request_id} is already {request.status}."
+        self.db.update_approval_request_status(request_id, "denied")
+        return f"Denied request {request_id}."
+
+    def _grants(self) -> str:
+        grants = self.db.list_grants(active_only=True)
+        if not grants:
+            return "No active grants."
+        lines = [f"{grant.id}. {grant.root_path} [{', '.join(grant.capabilities)}]" for grant in grants]
+        return "Active grants:\n" + "\n".join(lines)
+
+    def _revoke(self, remainder: str) -> str:
+        token = remainder.strip()
+        if not token.isdigit():
+            return "Usage: /revoke 1"
+        revoked = self.db.revoke_grant(int(token))
+        if revoked:
+            return "Grant revoked."
+        return "Grant not found."
+
+    def _abort(self, chat_id: str, remainder: str) -> str:
+        request_id = remainder.strip()
+        if not request_id:
+            return "Usage: /abort req_123"
+        request = self.db.get_approval_request(request_id)
+        if request is None or request.chat_id != chat_id:
+            return "Request not found."
+        result = self.tools.invoke(
+            "workspace",
+            "abort_request",
+            {"request_id": request_id},
+            ToolContext(chat_id=chat_id, user_id="abort"),
+        )
+        return self._format_tool_result(result)
 
     def _handle_tool_request(self, chat_id: str, text: str, *, user_name: str) -> str | None:
         decision = self._decide_tool_use(chat_id, text, user_name=user_name)
@@ -217,16 +345,25 @@ class AssistantAgent:
         router_prompt = (
             "You are the JClaw tool router. Decide whether the user's latest message should use one tool.\n"
             "Use tools when they are clearly better than a direct model-only answer.\n"
-            "Prefer tools for browsing websites, checking live information, reading pages, or interacting with web content.\n"
+            "Prefer tools for browsing websites, checking live information, interacting with web content, inspecting local workspaces, preparing file/code changes, checking git state, or previewing local shell commands.\n"
             "Return strict JSON only. No markdown.\n"
             "Schema:\n"
             '{"use_tool": boolean, "tool": string, "action": string, "params": object, "reason": string}\n'
             "If no tool is needed, return {\"use_tool\": false, \"tool\": \"\", \"action\": \"\", \"params\": {}, \"reason\": \"...\"}.\n"
+            "Do not choose tools whose description says implemented=false or scaffold_only=true.\n"
             "If using the browser tool:\n"
             '- use "open_url" when the user clearly wants a page opened\n'
             '- use "read_page" when they want the current page read\n'
             '- use "search_web" when the user wants current web results for a query\n'
             '- use "run_objective" for multi-step browsing after opening/searching\n'
+            "If using the workspace tool:\n"
+            f'- use "inspect_root" for listing or checking local paths, defaulting to the repo root {self.config.repo_root}\n'
+            f'- when the user refers to common Mac folders like Documents, Desktop, Downloads, Pictures, or Library, prefer paths under the local home directory {Path.home()}\n'
+            '- use "prepare_change" for local file or code modifications\n'
+            '- use "git_status" when the user wants local git state\n'
+            '- use "prepare_git_action" for local git mutations such as stage, restore, or commit\n'
+            '- use "prepare_shell_action" for local non-interactive commands in an approved root\n'
+            "Important: workspace mutation actions are preview-only until the user approves them with a command.\n"
             "Important: search_web and run_objective both execute real browser actions. Do not invent unsupported actions.\n"
             "- Include only parameters needed for the action.\n"
             f"Available tools: {json.dumps(available_tools, ensure_ascii=True)}"
@@ -267,7 +404,10 @@ class AssistantAgent:
         result: ToolResult,
     ) -> str:
         tool_result_text = self._format_tool_result(result)
-        if result.data.get("implemented") is False:
+        if decision["tool"] == "workspace":
+            LOGGER.info("workspace tool result returned directly to avoid hallucinated summaries")
+            return tool_result_text
+        if result.data.get("implemented") is False or result.needs_confirmation:
             LOGGER.info("tool result is scaffold-only; returning raw tool result to avoid overclaiming")
             return tool_result_text
         messages = self._build_messages(chat_id, user_text=text, user_name=user_name)
@@ -304,8 +444,54 @@ class AssistantAgent:
             lines.append(f"URL: {data['url']}")
         if "title" in data and data["title"]:
             lines.append(f"Title: {data['title']}")
+        if "root_path" in data and data["root_path"]:
+            lines.append(f"Root: {data['root_path']}")
+        if "target_path" in data and data["target_path"]:
+            lines.append(f"Target: {data['target_path']}")
+        if "exists" in data:
+            lines.append(f"Exists: {data['exists']}")
+        if "kind" in data and data["kind"]:
+            lines.append(f"Kind: {data['kind']}")
+        if "entry_count" in data and data["entry_count"] and data.get("kind") == "directory":
+            lines.append(f"Total entries: {data['entry_count']}")
         if "text" in data and data["text"]:
             lines.append(f"Text: {str(data['text'])[:800]}")
+        if "request_id" in data and data["request_id"]:
+            lines.append(f"Request: {data['request_id']}")
+        if "request_kind" in data and data["request_kind"]:
+            lines.append(f"Request kind: {data['request_kind']}")
+        if "capabilities" in data and data["capabilities"]:
+            lines.append(f"Capabilities: {', '.join(str(item) for item in data['capabilities'])}")
+        if "entries" in data and data["entries"]:
+            lines.append("Entries:")
+            for entry in data["entries"][:10]:
+                lines.append(f"- {entry['kind']}: {entry['name']}")
+            if data.get("entries_truncated"):
+                shown = len(data["entries"])
+                total = data.get("entry_count", shown)
+                lines.append(f"Shown {shown} of {total} entries.")
+        elif data.get("kind") == "directory":
+            lines.append("Entries: none")
+        if "touched_files" in data and data["touched_files"]:
+            lines.append("Touched files:")
+            for file_path in data["touched_files"][:10]:
+                lines.append(f"- {file_path}")
+        if "diff_preview" in data and data["diff_preview"]:
+            lines.append(f"Diff preview:\n{str(data['diff_preview'])[:1500]}")
+        if "command" in data and data["command"]:
+            lines.append(f"Command: {data['command']}")
+        if "preview" in data and data["preview"]:
+            lines.append(f"Preview: {data['preview']}")
+        if "status" in data and data["status"]:
+            lines.append(f"Git status:\n{str(data['status'])[:1200]}")
+        if "diff_stat" in data and data["diff_stat"]:
+            lines.append(f"Git diff:\n{str(data['diff_stat'])[:1200]}")
+        if "stdout" in data and data["stdout"]:
+            lines.append(f"Stdout:\n{str(data['stdout'])[:1200]}")
+        if "stderr" in data and data["stderr"]:
+            lines.append(f"Stderr:\n{str(data['stderr'])[:1200]}")
+        if "output" in data and data["output"]:
+            lines.append(f"Output:\n{str(data['output'])[:1200]}")
         if "sources" in data and data["sources"]:
             lines.append("Sources:")
             for source in data["sources"][:4]:
@@ -486,3 +672,34 @@ class AssistantAgent:
             if item.get("id") == chosen_id and str(item.get("href", "")).startswith("http"):
                 return {"status": "follow", "url": str(item["href"]), "reason": str(parsed.get("reason", ""))}
         return None
+
+    def _draft_workspace_change_via_llm(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        files = payload.get("files", [])
+        if not isinstance(files, list) or not files:
+            return None
+        prompt = (
+            "You are JClaw's workspace change planner.\n"
+            "You are given an objective and a bounded set of candidate files from a local workspace.\n"
+            "Draft file edits using only the provided files. Do not invent extra files.\n"
+            "Return strict JSON only with schema:\n"
+            '{"summary": string, "edits": [{"path": string, "reason": string, "new_content": string}]}\n'
+            "Use the provided relative file paths exactly.\n"
+            "If no safe or useful change can be prepared, return an empty edits list."
+        )
+        raw = self.llm.chat(
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=True)},
+            ]
+        )
+        LOGGER.info("workspace change planner raw response: %s", raw)
+        parsed = self._parse_json_object(raw)
+        if not parsed:
+            return None
+        edits = parsed.get("edits", [])
+        if not isinstance(edits, list):
+            return None
+        return {
+            "summary": str(parsed.get("summary", "Prepared workspace change.")),
+            "edits": edits,
+        }

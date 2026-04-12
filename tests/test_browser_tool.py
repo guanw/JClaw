@@ -132,3 +132,136 @@ def test_run_objective_keeps_session_when_requested(tmp_path) -> None:
         ToolContext(chat_id="chat-keep"),
     )
     assert len(tool.sessions.list_sessions()) == 1
+
+
+def test_run_objective_feedback_loop_follows_until_complete(tmp_path) -> None:
+    tool = _stub_browser(
+        BrowserTool(
+            tmp_path,
+            choose_next_action=lambda objective, page_data, sources: (
+                {"status": "follow", "url": "https://example.com/source-1", "reason": "Need one concrete source."}
+                if not sources
+                else {"status": "complete", "url": None, "reason": "Enough evidence gathered."}
+            ),
+        )
+    )
+
+    visited_urls: list[str] = []
+    page_reads = {
+        "https://html.duckduckgo.com/html/?q=test": {
+            "session_id": "sess_fake",
+            "tab_id": "tab_1",
+            "url": "https://html.duckduckgo.com/html/?q=test",
+            "title": "search",
+            "page_kind": "search_results",
+            "text": "search results",
+            "elements": [{"id": "e1", "role": "link", "text": "Source 1", "href": "https://example.com/source-1", "area": "main", "clickable": True}],
+            "links": [{"text": "Source 1", "href": "https://example.com/source-1"}],
+            "forms": [],
+            "mode": "desktop",
+        },
+        "https://example.com/source-1": {
+            "session_id": "sess_fake",
+            "tab_id": "tab_1",
+            "url": "https://example.com/source-1",
+            "title": "source 1",
+            "page_kind": "article",
+            "text": "source content",
+            "elements": [],
+            "links": [],
+            "forms": [],
+            "mode": "desktop",
+        },
+    }
+
+    def fake_open_url(params, ctx):  # noqa: ANN001
+        url = params["url"]
+        visited_urls.append(url)
+        return tool._open_url_original(params, ctx)
+
+    def fake_read_page(params, ctx):  # noqa: ANN001
+        return type(
+            "FakeResult",
+            (),
+            {"ok": True, "summary": "read", "data": page_reads[visited_urls[-1]]},
+        )()
+
+    tool._open_url_original = tool._open_url  # type: ignore[attr-defined]  # noqa: SLF001
+    tool._open_url = fake_open_url  # type: ignore[method-assign]  # noqa: SLF001
+    tool._read_page = fake_read_page  # type: ignore[method-assign]  # noqa: SLF001
+
+    result = tool.invoke(
+        "run_objective",
+        {"objective": "test", "start_url": "https://html.duckduckgo.com/html/?q=test"},
+        ToolContext(chat_id="chat-loop"),
+    )
+
+    assert result.data["research_complete"] is True
+    assert result.data["termination_reason"] == "controller_complete"
+    assert result.data["sources"] == [
+        {
+            "url": "https://example.com/source-1",
+            "title": "source 1",
+            "text": "source content",
+        }
+    ]
+    assert visited_urls == [
+        "https://html.duckduckgo.com/html/?q=test",
+        "https://example.com/source-1",
+    ]
+
+
+def test_run_objective_stops_when_controller_sees_no_meaningful_progress(tmp_path) -> None:
+    tool = _stub_browser(
+        BrowserTool(
+            tmp_path,
+            choose_next_action=lambda objective, page_data, sources: {
+                "status": "stop",
+                "url": None,
+                "reason": "No meaningful result pages were found.",
+            },
+        )
+    )
+
+    page_reads = {
+        "https://html.duckduckgo.com/html/?q=test": {
+            "session_id": "sess_fake",
+            "tab_id": "tab_1",
+            "url": "https://html.duckduckgo.com/html/?q=test",
+            "title": "search",
+            "page_kind": "search_results",
+            "text": "search results",
+            "elements": [],
+            "links": [],
+            "forms": [],
+            "mode": "desktop",
+        }
+    }
+    visited_urls: list[str] = []
+
+    def fake_open_url(params, ctx):  # noqa: ANN001
+        url = params["url"]
+        visited_urls.append(url)
+        return tool._open_url_original(params, ctx)
+
+    def fake_read_page(params, ctx):  # noqa: ANN001
+        return type(
+            "FakeResult",
+            (),
+            {"ok": True, "summary": "read", "data": page_reads[visited_urls[-1]]},
+        )()
+
+    tool._open_url_original = tool._open_url  # type: ignore[attr-defined]  # noqa: SLF001
+    tool._open_url = fake_open_url  # type: ignore[method-assign]  # noqa: SLF001
+    tool._read_page = fake_read_page  # type: ignore[method-assign]  # noqa: SLF001
+
+    result = tool.invoke(
+        "run_objective",
+        {"objective": "test", "start_url": "https://html.duckduckgo.com/html/?q=test"},
+        ToolContext(chat_id="chat-stop"),
+    )
+
+    assert result.data["research_complete"] is False
+    assert result.data["termination_reason"] == "controller_stop"
+    assert result.data["sources"] == []
+    assert visited_urls == ["https://html.duckduckgo.com/html/?q=test"]
