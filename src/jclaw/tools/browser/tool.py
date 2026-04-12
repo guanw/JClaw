@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from typing import Any, Callable
 
 from jclaw.tools.base import ToolContext, ToolResult
@@ -26,6 +26,7 @@ class BrowserTool:
         base_dir: str | Path,
         options: dict[str, Any] | None = None,
         choose_link: Callable[[str, dict[str, Any]], str | None] | None = None,
+        choose_next_action: Callable[[str, dict[str, Any], list[dict[str, str]]], dict[str, Any] | None] | None = None,
     ) -> None:
         root = Path(base_dir)
         root.mkdir(parents=True, exist_ok=True)
@@ -44,6 +45,9 @@ class BrowserTool:
         self.planner = BrowserPlanner()
         self._chat_sessions: dict[str, str] = {}
         self._choose_link = choose_link
+        self._choose_next_action = choose_next_action
+        self.max_objective_steps = int(options.get("max_objective_steps", 5)) if options else 5
+        self.max_research_sources = int(options.get("max_research_sources", 3)) if options else 3
 
     def close(self) -> None:
         self.playwright.close()
@@ -255,7 +259,8 @@ class BrowserTool:
     def _run_objective(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
         objective = str(params.get("objective", "")).strip()
-        max_steps = max(1, min(int(params.get("max_steps", 3)), 6))
+        max_steps = max(1, min(int(params.get("max_steps", self.max_objective_steps)), 8))
+        max_sources = max(1, min(int(params.get("max_sources", self.max_research_sources)), 5))
         target_url = str(params.get("start_url", "")).strip()
         if not target_url:
             url_match = re.search(r"https?://\S+", objective)
@@ -291,8 +296,30 @@ class BrowserTool:
         )
 
         current_read = read_result
-        for _ in range(max_steps - 1):
-            next_url = self._choose_follow_up_url(objective, current_read.data)
+        sources: list[dict[str, str]] = []
+        visited_urls = {self._normalize_url(str(current_read.data.get("url", "")))}
+        recorded_source_urls: set[str] = set()
+
+        def record_source(page_data: dict[str, Any]) -> None:
+            source_url = self._normalize_url(str(page_data.get("url", "")).strip())
+            if not source_url or source_url in recorded_source_urls:
+                return
+            recorded_source_urls.add(source_url)
+            sources.append(
+                {
+                    "url": source_url,
+                    "title": str(page_data.get("title", ""))[:200],
+                    "text": str(page_data.get("text", ""))[:700],
+                }
+            )
+
+        if current_read.data.get("page_kind") != "search_results":
+            record_source(current_read.data)
+
+        termination_reason = "step_budget_exhausted"
+        for _ in range(max(0, max_steps - 1)):
+            decision = self._decide_next_action(objective, current_read.data, sources)
+            chosen_url = self._normalize_url(str(decision.get("url", ""))) if decision else ""
             self._trace_event(
                 "follow_up_choice",
                 ctx=ctx,
@@ -301,22 +328,36 @@ class BrowserTool:
                     "objective": objective,
                     "current_url": current_read.data.get("url", ""),
                     "candidate_elements": current_read.data.get("elements", [])[:12],
-                    "chosen_url": next_url,
+                    "decision": decision,
+                    "chosen_url": chosen_url or None,
                 },
             )
-            if not next_url or next_url == current_read.data.get("url"):
+            if not decision:
+                termination_reason = "no_decision"
                 break
-            follow_open = self._open_url({"session_id": session.session_id, "url": next_url}, ctx)
+            status = str(decision.get("status", "stop"))
+            if status == "complete":
+                termination_reason = "controller_complete"
+                break
+            if status == "stop":
+                termination_reason = "controller_stop"
+                break
+            if not chosen_url or chosen_url in visited_urls:
+                termination_reason = "no_meaningful_next_url"
+                break
+            visited_urls.add(chosen_url)
+            follow_open = self._open_url({"session_id": session.session_id, "url": chosen_url}, ctx)
             executed_steps.append(
                 {
                     "action": "open_url",
-                    "params": {"url": next_url},
-                    "reason": "Follow a likely relevant result.",
+                    "params": {"url": chosen_url},
+                    "reason": str(decision.get("reason", "Follow a likely relevant result.")),
                     "url": follow_open.data.get("url", ""),
                     "title": follow_open.data.get("title", ""),
                 }
             )
             current_read = self._read_page({"session_id": session.session_id}, ctx)
+            record_source(current_read.data)
             executed_steps.append(
                 {
                     "action": "read_page",
@@ -326,18 +367,24 @@ class BrowserTool:
                     "title": current_read.data.get("title", ""),
                 }
             )
-            break
+            if len(sources) >= max_sources:
+                termination_reason = "source_budget_reached"
+                break
 
-        observation = {"session_id": session.session_id, "url": current_read.data.get("url", target_url)}
-        step = self.planner.next_step(objective, observation, history=executed_steps)
         result = ToolResult(
             ok=True,
-            summary="Executed browser objective and captured the latest page.",
+            summary=(
+                f"Executed browser objective and captured {len(sources)} source page"
+                f"{'' if len(sources) == 1 else 's'}."
+            ),
             data={
                 "session_id": session.session_id,
                 "objective": objective,
-                "steps": executed_steps + [{"action": step.action, "params": step.params, "reason": step.reason}],
+                "steps": executed_steps,
+                "sources": sources,
                 "implemented": True,
+                "research_complete": bool(sources),
+                "termination_reason": termination_reason,
                 **current_read.data,
                 "mode": self._driver(params).mode,
             },
@@ -394,10 +441,19 @@ class BrowserTool:
             handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
 
     def _choose_follow_up_url(self, objective: str, page_data: dict[str, Any]) -> str | None:
+        ranked_urls = self._rank_follow_up_urls(objective, page_data)
+        return ranked_urls[0] if ranked_urls else None
+
+    def _rank_follow_up_urls(self, objective: str, page_data: dict[str, Any]) -> list[str]:
+        urls: list[str] = []
         llm_choice = self._choose_follow_up_url_via_llm(objective, page_data)
         if llm_choice:
-            return llm_choice
-        return self._pick_follow_up_url(objective, page_data)
+            urls.append(self._normalize_url(llm_choice))
+        fallback = self._pick_follow_up_urls(objective, page_data)
+        for item in fallback:
+            if item not in urls:
+                urls.append(item)
+        return urls
 
     def _choose_follow_up_url_via_llm(self, objective: str, page_data: dict[str, Any]) -> str | None:
         if self._choose_link is None:
@@ -408,15 +464,19 @@ class BrowserTool:
             return None
 
     def _pick_follow_up_url(self, objective: str, page_data: dict[str, Any]) -> str | None:
+        ranked = self._pick_follow_up_urls(objective, page_data)
+        return ranked[0] if ranked else None
+
+    def _pick_follow_up_urls(self, objective: str, page_data: dict[str, Any]) -> list[str]:
         current_url = str(page_data.get("url", ""))
         candidates = self._extract_candidate_elements(page_data)
         if not candidates:
-            return None
+            return []
 
         objective_terms = {term for term in re.findall(r"[a-z0-9]+", objective.lower()) if len(term) > 2}
         scored_links: list[tuple[int, str, str]] = []
         for item in candidates:
-            href = str(item.get("href", "")).strip()
+            href = self._normalize_url(str(item.get("href", "")).strip())
             text = str(item.get("text", "")).lower()
             if not href.startswith("http"):
                 continue
@@ -435,9 +495,31 @@ class BrowserTool:
             if score:
                 scored_links.append((score, href, text))
         scored_links.sort(key=lambda item: item[0], reverse=True)
-        if scored_links:
-            return scored_links[0][1]
-        return None
+        return [item[1] for item in scored_links]
+
+    def _decide_next_action(self, objective: str, page_data: dict[str, Any], sources: list[dict[str, str]]) -> dict[str, Any]:
+        llm_decision = self._decide_next_action_via_llm(objective, page_data, sources)
+        if llm_decision:
+            return llm_decision
+        next_url = self._choose_follow_up_url(objective, page_data)
+        if next_url:
+            return {"status": "follow", "url": next_url, "reason": "Fallback selected the most relevant candidate URL."}
+        if sources:
+            return {"status": "complete", "url": None, "reason": "Fallback found enough source material to stop."}
+        return {"status": "stop", "url": None, "reason": "Fallback found no meaningful next action."}
+
+    def _decide_next_action_via_llm(
+        self,
+        objective: str,
+        page_data: dict[str, Any],
+        sources: list[dict[str, str]],
+    ) -> dict[str, Any] | None:
+        if self._choose_next_action is None:
+            return None
+        try:
+            return self._choose_next_action(objective, page_data, sources)
+        except Exception:  # noqa: BLE001
+            return None
 
     def _extract_candidate_elements(self, page_data: dict[str, Any]) -> list[dict[str, Any]]:
         elements = page_data.get("elements", [])
@@ -448,16 +530,41 @@ class BrowserTool:
                     continue
                 if item.get("role") != "link":
                     continue
-                href = str(item.get("href", "")).strip()
+                href = self._normalize_url(str(item.get("href", "")).strip())
                 if not href:
                     continue
-                candidates.append(item)
+                normalized = dict(item)
+                normalized["href"] = href
+                candidates.append(normalized)
             if candidates:
                 return candidates
         links = page_data.get("links", [])
         if isinstance(links, list):
-            return [item for item in links if isinstance(item, dict)]
+            normalized_links = []
+            for item in links:
+                if not isinstance(item, dict):
+                    continue
+                href = self._normalize_url(str(item.get("href", "")).strip())
+                if not href:
+                    continue
+                normalized = dict(item)
+                normalized["href"] = href
+                normalized_links.append(normalized)
+            return normalized_links
         return []
+
+    def _normalize_url(self, href: str) -> str:
+        value = href.strip()
+        if not value:
+            return ""
+        if value.startswith("//"):
+            value = f"https:{value}"
+        parsed = urlparse(value)
+        if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+            target = parse_qs(parsed.query).get("uddg", [""])[0]
+            if target:
+                return unquote(target).strip()
+        return value
 
     def _is_junk_link(self, href: str, text: str, current_url: str) -> bool:
         lowered_href = href.lower()

@@ -86,6 +86,8 @@ class BrowserConfig:
     slow_mo_ms: int = 0
     viewport_width: int = 1440
     viewport_height: int = 960
+    max_objective_steps: int = 5
+    max_research_sources: int = 3
 
 
 @dataclass(slots=True)
@@ -145,6 +147,8 @@ channel = "chromium"
 slow_mo_ms = 0
 viewport_width = 1440
 viewport_height = 960
+max_objective_steps = 5
+max_research_sources = 3
 """
 
 
@@ -198,6 +202,8 @@ def load_config(path: str | Path | None = None) -> Config:
         slow_mo_ms=int(browser_data.get("slow_mo_ms", 0)),
         viewport_width=int(browser_data.get("viewport_width", 1440)),
         viewport_height=int(browser_data.get("viewport_height", 960)),
+        max_objective_steps=int(browser_data.get("max_objective_steps", 5)),
+        max_research_sources=int(browser_data.get("max_research_sources", 3)),
     )
 
     config = Config(

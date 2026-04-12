@@ -35,8 +35,11 @@ class AssistantAgent:
                         "slow_mo_ms": config.browser.slow_mo_ms,
                         "viewport_width": config.browser.viewport_width,
                         "viewport_height": config.browser.viewport_height,
+                        "max_objective_steps": config.browser.max_objective_steps,
+                        "max_research_sources": config.browser.max_research_sources,
                     },
                     choose_link=self._choose_browser_link_via_llm,
+                    choose_next_action=self._choose_browser_next_action_via_llm,
                 )
             )
 
@@ -303,8 +306,16 @@ class AssistantAgent:
             lines.append(f"Title: {data['title']}")
         if "text" in data and data["text"]:
             lines.append(f"Text: {str(data['text'])[:800]}")
+        if "sources" in data and data["sources"]:
+            lines.append("Sources:")
+            for source in data["sources"][:4]:
+                title = str(source.get("title", "")).strip() or "Untitled"
+                url = str(source.get("url", "")).strip()
+                lines.append(f"- {title}: {url}")
+        if "termination_reason" in data and data["termination_reason"]:
+            lines.append(f"Termination: {data['termination_reason']}")
         if "steps" in data and data["steps"]:
-            lines.append("Planned steps:")
+            lines.append("Executed steps:")
             for step in data["steps"][:5]:
                 lines.append(f"- {step['action']}: {step.get('reason', '')}".strip())
         if "sessions" in data:
@@ -397,4 +408,81 @@ class AssistantAgent:
             if item.get("id") == chosen_id:
                 href = str(item.get("href", "")).strip()
                 return href if href.startswith("http") else None
+        return None
+
+    def _choose_browser_next_action_via_llm(
+        self,
+        objective: str,
+        page_data: dict[str, Any],
+        sources: list[dict[str, str]],
+    ) -> dict[str, Any] | None:
+        elements = page_data.get("elements", [])
+        if not isinstance(elements, list):
+            return None
+
+        compact_elements: list[dict[str, Any]] = []
+        for item in elements[:20]:
+            if not isinstance(item, dict):
+                continue
+            href = str(item.get("href", "")).strip()
+            role = str(item.get("role", "")).strip()
+            text = str(item.get("text", "")).strip()
+            compact_elements.append(
+                {
+                    "id": str(item.get("id", "")),
+                    "role": role,
+                    "text": text[:180],
+                    "href": href,
+                    "area": str(item.get("area", "")),
+                    "clickable": bool(item.get("clickable", False)),
+                    "score_hint": item.get("score_hint", 0),
+                }
+            )
+
+        controller_prompt = (
+            "You are JClaw's browser controller.\n"
+            "Decide whether the current browser mission is complete, should continue by following one visible link, or should stop because no meaningful progress is likely.\n"
+            "Use only the provided page observation and gathered sources.\n"
+            "Prefer COMPLETE only when there is enough concrete information to answer the objective.\n"
+            "Prefer STOP when the page is low-signal, repetitive, blocked, or unlikely to add value.\n"
+            "Prefer FOLLOW when a visible link is likely to materially improve the answer.\n"
+            "Avoid describing future actions as completed work.\n"
+            "Return strict JSON only with schema:\n"
+            '{"status":"follow|complete|stop","chosen_element_id":string|null,"reason":string}\n'
+            "If status is follow, chosen_element_id must identify one visible link element from the snapshot.\n"
+            "If no meaningful link should be followed, return complete or stop."
+        )
+        payload = {
+            "objective": objective,
+            "current_page": {
+                "url": page_data.get("url", ""),
+                "title": page_data.get("title", ""),
+                "page_kind": page_data.get("page_kind", ""),
+                "text_preview": str(page_data.get("text", ""))[:1200],
+            },
+            "sources": sources[-3:],
+            "elements": compact_elements,
+        }
+        raw = self.llm.chat(
+            [
+                {"role": "system", "content": controller_prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=True)},
+            ]
+        )
+        LOGGER.info("browser controller raw response: %s", raw)
+        parsed = self._parse_json_object(raw)
+        if not parsed:
+            return None
+        status = str(parsed.get("status", "")).strip().lower()
+        if status not in {"follow", "complete", "stop"}:
+            return None
+        chosen_element_id = parsed.get("chosen_element_id")
+        if status != "follow":
+            return {"status": status, "url": None, "reason": str(parsed.get("reason", ""))}
+        chosen_id = None if chosen_element_id in (None, "", "null") else str(chosen_element_id).strip()
+        if not chosen_id:
+            return None
+        for item in compact_elements:
+            if item.get("id") == chosen_id and str(item.get("href", "")).startswith("http"):
+                return {"status": "follow", "url": str(item["href"]), "reason": str(parsed.get("reason", ""))}
         return None

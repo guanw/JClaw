@@ -94,6 +94,14 @@ def test_extract_candidate_elements_falls_back_to_links(tmp_path) -> None:
     assert candidates[0]["href"] == "https://example.com/news"
 
 
+def test_normalize_duckduckgo_redirect_url(tmp_path) -> None:
+    tool = _stub_browser(BrowserTool(tmp_path))
+    href = tool._normalize_url(  # noqa: SLF001
+        "//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.reuters.com%2Fmarkets%2Fus%2F&rut=abc"
+    )
+    assert href == "https://www.reuters.com/markets/us/"
+
+
 def test_run_objective_auto_closes_ephemeral_session(tmp_path) -> None:
     tool = _stub_browser(BrowserTool(tmp_path))
     result = tool.invoke(
