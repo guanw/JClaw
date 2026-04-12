@@ -79,11 +79,22 @@ class MemoryConfig:
 
 
 @dataclass(slots=True)
+class BrowserConfig:
+    enabled: bool = True
+    headless: bool = False
+    channel: str = "chromium"
+    slow_mo_ms: int = 0
+    viewport_width: int = 1440
+    viewport_height: int = 960
+
+
+@dataclass(slots=True)
 class Config:
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     daemon: DaemonConfig = field(default_factory=DaemonConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    browser: BrowserConfig = field(default_factory=BrowserConfig)
     config_path: Path = field(default_factory=default_config_path)
     repo_root: Path = field(default_factory=repo_root)
 
@@ -126,6 +137,14 @@ idle_sleep_seconds = 2.0
 [memory]
 max_context_messages = 6
 max_memory_items = 4
+
+[browser]
+enabled = true
+headless = false
+channel = "chromium"
+slow_mo_ms = 0
+viewport_width = 1440
+viewport_height = 960
 """
 
 
@@ -140,6 +159,7 @@ def load_config(path: str | Path | None = None) -> Config:
     telegram_data = data.get("telegram", {})
     daemon_data = data.get("daemon", {})
     memory_data = data.get("memory", {})
+    browser_data = data.get("browser", {})
 
     provider = ProviderConfig(
         api_key=str(os.environ.get("JCLAW_API_KEY", provider_data.get("api_key", ""))),
@@ -171,12 +191,21 @@ def load_config(path: str | Path | None = None) -> Config:
         max_context_messages=int(memory_data.get("max_context_messages", 6)),
         max_memory_items=int(memory_data.get("max_memory_items", 4)),
     )
+    browser = BrowserConfig(
+        enabled=bool(browser_data.get("enabled", True)),
+        headless=bool(browser_data.get("headless", False)),
+        channel=str(browser_data.get("channel", "chromium")),
+        slow_mo_ms=int(browser_data.get("slow_mo_ms", 0)),
+        viewport_width=int(browser_data.get("viewport_width", 1440)),
+        viewport_height=int(browser_data.get("viewport_height", 960)),
+    )
 
     config = Config(
         provider=provider,
         telegram=telegram,
         daemon=daemon,
         memory=memory,
+        browser=browser,
         config_path=config_path,
         repo_root=repo_root(),
     )

@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+import json
+import logging
+import re
+from typing import Any
+
 from jclaw.ai.client import OpenAICompatibleClient
 from jclaw.ai.prompts import load_system_prompt
 from jclaw.core.config import Config
 from jclaw.core.db import Database, MemoryRecord
 from jclaw.core.scheduler import next_run_at, parse_schedule, to_utc_iso
+from jclaw.tools.base import ToolContext, ToolResult
+from jclaw.tools.browser.tool import BrowserTool
+from jclaw.tools.registry import ToolRegistry
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class AssistantAgent:
@@ -13,6 +24,20 @@ class AssistantAgent:
         self.db = db
         self.llm = llm
         self.system_prompt = load_system_prompt(config.provider.system_prompt_files)
+        self.tools = ToolRegistry()
+        if config.browser.enabled:
+            self.tools.register(
+                BrowserTool(
+                    config.daemon.state_dir / "tools" / "browser",
+                    options={
+                        "channel": config.browser.channel,
+                        "headless": config.browser.headless,
+                        "slow_mo_ms": config.browser.slow_mo_ms,
+                        "viewport_width": config.browser.viewport_width,
+                        "viewport_height": config.browser.viewport_height,
+                    },
+                )
+            )
 
     def handle_text(self, chat_id: str, text: str, *, user_name: str = "") -> str:
         command_reply = self._handle_command(chat_id, text)
@@ -22,6 +47,12 @@ class AssistantAgent:
             return command_reply
 
         self.db.store_message(chat_id, "user", text)
+
+        tool_reply = self._handle_tool_request(chat_id, text, user_name=user_name)
+        if tool_reply is not None:
+            self.db.store_message(chat_id, "assistant", tool_reply)
+            return tool_reply
+
         messages = self._build_messages(chat_id, user_text=text, user_name=user_name)
         reply = self.llm.chat(messages)
         self.db.store_message(chat_id, "assistant", reply)
@@ -157,3 +188,144 @@ class AssistantAgent:
             "/cron list\n"
             "/cron remove 1"
         )
+
+    def _handle_tool_request(self, chat_id: str, text: str, *, user_name: str) -> str | None:
+        decision = self._decide_tool_use(chat_id, text, user_name=user_name)
+        if decision is None:
+            return None
+        result = self.tools.invoke(
+            str(decision["tool"]),
+            str(decision["action"]),
+            dict(decision["params"]),
+            ToolContext(chat_id=chat_id, user_id=user_name),
+        )
+        return self._compose_tool_reply(chat_id, text, user_name=user_name, decision=decision, result=result)
+
+    def _decide_tool_use(self, chat_id: str, text: str, *, user_name: str) -> dict[str, Any] | None:
+        available_tools = self.tools.list_tools()
+        if not available_tools:
+            return None
+
+        recent_history = [
+            {"role": item.role, "content": item.content}
+            for item in self.db.recent_messages(chat_id, 4)
+        ]
+        router_prompt = (
+            "You are the JClaw tool router. Decide whether the user's latest message should use one tool.\n"
+            "Use tools when they are clearly better than a direct model-only answer.\n"
+            "Prefer tools for browsing websites, checking live information, reading pages, or interacting with web content.\n"
+            "Return strict JSON only. No markdown.\n"
+            "Schema:\n"
+            '{"use_tool": boolean, "tool": string, "action": string, "params": object, "reason": string}\n'
+            "If no tool is needed, return {\"use_tool\": false, \"tool\": \"\", \"action\": \"\", \"params\": {}, \"reason\": \"...\"}.\n"
+            "If using the browser tool:\n"
+            '- use "open_url" when the user clearly wants a page opened\n'
+            '- use "read_page" when they want the current page read\n'
+            '- use "search_web" when the user wants current web results for a query\n'
+            '- use "run_objective" for multi-step browsing after opening/searching\n'
+            "Important: search_web and run_objective both execute real browser actions. Do not invent unsupported actions.\n"
+            "- Include only parameters needed for the action.\n"
+            f"Available tools: {json.dumps(available_tools, ensure_ascii=True)}"
+        )
+        messages = [{"role": "system", "content": router_prompt}]
+        messages.extend(recent_history)
+        messages.append(
+            {
+                "role": "user",
+                "content": f"User name: {user_name or 'unknown'}\nLatest message: {text}",
+            }
+        )
+        raw = self.llm.chat(messages)
+        LOGGER.info("tool router raw response: %s", raw)
+        decision = self._parse_json_object(raw)
+        if not decision or not isinstance(decision, dict):
+            LOGGER.info("tool router returned unparsable response; using normal chat fallback")
+            return None
+        if not decision.get("use_tool"):
+            LOGGER.info("tool router declined tool use: %s", decision.get("reason", ""))
+            return None
+        tool = str(decision.get("tool", "")).strip()
+        action = str(decision.get("action", "")).strip()
+        params = decision.get("params", {})
+        if not tool or not action or not isinstance(params, dict):
+            LOGGER.info("tool router returned incomplete tool decision: %s", decision)
+            return None
+        LOGGER.info("tool router selected tool=%s action=%s reason=%s", tool, action, decision.get("reason", ""))
+        return {"tool": tool, "action": action, "params": params, "reason": str(decision.get("reason", ""))}
+
+    def _compose_tool_reply(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        user_name: str,
+        decision: dict[str, Any],
+        result: ToolResult,
+    ) -> str:
+        tool_result_text = self._format_tool_result(result)
+        if result.data.get("implemented") is False:
+            LOGGER.info("tool result is scaffold-only; returning raw tool result to avoid overclaiming")
+            return tool_result_text
+        messages = self._build_messages(chat_id, user_text=text, user_name=user_name)
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "A tool has already been executed. Use the tool result to answer the user naturally.\n"
+                    "Do not invent tool results. Be concise. Mention limits if the tool result is only partial.\n"
+                    "Never claim that you searched a site, verified facts, clicked anything, or completed browsing steps unless the tool result explicitly shows it."
+                ),
+            }
+        )
+        messages.append(
+            {
+                "role": "assistant",
+                "content": (
+                    f"Tool used: {decision['tool']}\n"
+                    f"Action: {decision['action']}\n"
+                    f"Reason: {decision.get('reason', '')}\n"
+                    f"Tool result:\n{tool_result_text}"
+                ),
+            }
+        )
+        try:
+            return self.llm.chat(messages)
+        except Exception:  # noqa: BLE001
+            return tool_result_text
+
+    def _format_tool_result(self, result: ToolResult) -> str:
+        lines = [result.summary]
+        data = result.data
+        if "url" in data and data["url"]:
+            lines.append(f"URL: {data['url']}")
+        if "title" in data and data["title"]:
+            lines.append(f"Title: {data['title']}")
+        if "text" in data and data["text"]:
+            lines.append(f"Text: {str(data['text'])[:800]}")
+        if "steps" in data and data["steps"]:
+            lines.append("Planned steps:")
+            for step in data["steps"][:5]:
+                lines.append(f"- {step['action']}: {step.get('reason', '')}".strip())
+        if "sessions" in data:
+            lines.append(f"Sessions: {len(data['sessions'])}")
+        return "\n".join(lines)
+
+    def _parse_json_object(self, text: str) -> dict[str, Any] | None:
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+        try:
+            parsed = json.loads(cleaned)
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            pass
+
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None

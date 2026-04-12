@@ -10,6 +10,14 @@ class DummyLLM:
         return "stubbed"
 
 
+class SequenceLLM:
+    def __init__(self, responses) -> None:  # noqa: ANN001
+        self._responses = iter(responses)
+
+    def chat(self, messages):  # noqa: ANN001
+        return next(self._responses)
+
+
 def test_command_flow(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),
@@ -33,3 +41,64 @@ def test_command_flow(tmp_path) -> None:
     assert "1." in agent.handle_text("chat-1", "/cron list")
     db.close()
 
+
+def test_llm_selected_tool_routes_to_browser(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"use_tool": true, "tool": "browser", "action": "run_objective", "params": {"objective": "open example.com", "start_url": "https://example.com"}, "reason": "The user wants browser help."}',
+                "I opened the requested page and captured it.",
+            ]
+        ),
+    )
+
+    reply = agent.handle_text("chat-1", "please open example.com for me")
+    assert "opened" in reply.lower()
+    db.close()
+
+
+def test_llm_can_decline_tool_and_fall_back_to_chat(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"use_tool": false, "tool": "", "action": "", "params": {}, "reason": "No tool needed."}',
+                "Normal chat reply.",
+            ]
+        ),
+    )
+
+    reply = agent.handle_text("chat-1", "say hello")
+    assert reply == "Normal chat reply."
+    db.close()

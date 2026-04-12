@@ -10,7 +10,6 @@ from jclaw.core.config import TelegramConfig
 
 LOGGER = logging.getLogger(__name__)
 
-
 class TelegramBotChannel:
     def __init__(self, config: TelegramConfig) -> None:
         self.config = config
