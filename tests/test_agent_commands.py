@@ -63,6 +63,7 @@ def test_llm_selected_tool_routes_to_browser(tmp_path) -> None:
         SequenceLLM(
             [
                 '{"use_tool": true, "tool": "browser", "action": "run_objective", "params": {"objective": "open example.com", "start_url": "https://example.com"}, "reason": "The user wants browser help."}',
+                '{"chosen_element_id": null, "reason": "The current page is already the intended destination."}',
                 "I opened the requested page and captured it.",
             ]
         ),
@@ -70,6 +71,44 @@ def test_llm_selected_tool_routes_to_browser(tmp_path) -> None:
 
     reply = agent.handle_text("chat-1", "please open example.com for me")
     assert "opened" in reply.lower()
+    db.close()
+
+
+def test_choose_browser_link_uses_inspected_elements(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(['{"chosen_element_id": "e2", "reason": "This is the relevant article."}']),
+    )
+
+    href = agent._choose_browser_link_via_llm(  # noqa: SLF001
+        "latest deepseek news",
+        {
+            "url": "https://html.duckduckgo.com/html/?q=latest+deepseek+news",
+            "title": "search results",
+            "page_kind": "search_results",
+            "text": "search results for deepseek news",
+            "elements": [
+                {"id": "e1", "role": "link", "text": "Settings", "href": "https://duckduckgo.com/settings", "area": "nav", "clickable": True},
+                {"id": "e2", "role": "link", "text": "DeepSeek launches new model", "href": "https://example.com/deepseek-news", "area": "main", "clickable": True},
+            ],
+        },
+    )
+    assert href == "https://example.com/deepseek-news"
     db.close()
 
 

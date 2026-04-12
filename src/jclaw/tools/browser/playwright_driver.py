@@ -15,6 +15,19 @@ def _clean_text(value: str, *, limit: int = 4000) -> str:
     return text[:limit]
 
 
+def _infer_page_kind(url: str, title: str, text: str) -> str:
+    haystack = f"{url} {title} {text[:400]}".lower()
+    if any(token in haystack for token in ("search results", "/search", "?q=", "duckduckgo", "google", "bing")):
+        return "search_results"
+    if any(token in haystack for token in ("sign in", "log in", "login", "password")):
+        return "auth"
+    if any(token in haystack for token in ("checkout", "cart", "buy now")):
+        return "commerce"
+    if any(token in haystack for token in ("article", "blog", "news", "report", "press release")):
+        return "article"
+    return "page"
+
+
 class PlaywrightBrowserDriver:
     mode = "playwright"
 
@@ -113,14 +126,13 @@ class PlaywrightBrowserDriver:
         visible_text = _clean_text(
             page.locator("body").inner_text(timeout=5000) if page.locator("body").count() else ""
         )
-        links = page.evaluate(
-            """
-            () => Array.from(document.querySelectorAll('a'))
-              .slice(0, 20)
-              .map((a) => ({text: (a.innerText || a.textContent || '').trim(), href: a.href || ''}))
-              .filter((item) => item.text || item.href)
-            """
-        )
+        page_kind = _infer_page_kind(page.url, title, visible_text)
+        elements = self._extract_elements(page, page_kind=page_kind)
+        links = [
+            {"id": item["id"], "text": item["text"], "href": item["href"], "area": item["area"]}
+            for item in elements
+            if item.get("role") == "link" and item.get("href")
+        ]
         forms = page.evaluate(
             """
             () => Array.from(document.forms).slice(0, 10).map((form, index) => ({
@@ -138,11 +150,123 @@ class PlaywrightBrowserDriver:
             "tab_id": session.current_tab_id,
             "url": page.url,
             "title": title,
+            "page_kind": page_kind,
             "text": visible_text,
+            "elements": elements,
             "links": links,
             "forms": forms,
             "mode": self.mode,
         }
+
+    def _extract_elements(self, page: Page, *, page_kind: str) -> list[dict[str, Any]]:
+        elements = page.evaluate(
+            """
+            ({ pageKind }) => {
+              const normalize = (value, limit = 220) => {
+                const text = (value || '').replace(/\\s+/g, ' ').trim();
+                return text.slice(0, limit);
+              };
+              const classifyArea = (node) => {
+                if (!node || !node.closest) return 'body';
+                if (node.closest('main, article, [role="main"]')) return 'main';
+                if (node.closest('nav, [role="navigation"]')) return 'nav';
+                if (node.closest('header, [role="banner"]')) return 'header';
+                if (node.closest('footer, [role="contentinfo"]')) return 'footer';
+                if (node.closest('aside, [role="complementary"]')) return 'aside';
+                if (node.closest('form')) return 'form';
+                if (node.closest('dialog, [role="dialog"], [aria-modal="true"]')) return 'modal';
+                return 'body';
+              };
+              const inferRole = (node) => {
+                const explicit = (node.getAttribute('role') || '').trim().toLowerCase();
+                if (explicit) return explicit;
+                const tag = node.tagName.toLowerCase();
+                if (tag === 'a') return 'link';
+                if (tag === 'button') return 'button';
+                if (tag === 'input') return node.type === 'search' ? 'searchbox' : 'textbox';
+                if (tag === 'textarea') return 'textbox';
+                if (tag === 'select') return 'combobox';
+                if (/^h[1-6]$/.test(tag)) return 'heading';
+                if (tag === 'summary') return 'button';
+                return tag;
+              };
+              const inferText = (node) => {
+                const tag = node.tagName.toLowerCase();
+                return normalize(
+                  node.getAttribute('aria-label') ||
+                  node.getAttribute('title') ||
+                  (tag === 'input' ? (node.value || node.placeholder || node.name) : '') ||
+                  node.innerText ||
+                  node.textContent ||
+                  node.getAttribute('alt') ||
+                  ''
+                );
+              };
+              const selectorHint = (node) => {
+                const tag = node.tagName.toLowerCase();
+                if (node.id) return `${tag}#${node.id}`;
+                const name = node.getAttribute('name');
+                if (name) return `${tag}[name="${name}"]`;
+                const href = node.getAttribute('href');
+                if (href) return `${tag}[href]`;
+                return tag;
+              };
+              const visible = (node) => {
+                const style = window.getComputedStyle(node);
+                if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+                if (node.getAttribute('aria-hidden') === 'true') return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+              };
+              const candidates = Array.from(
+                document.querySelectorAll('a[href], button, input, textarea, select, summary, [role], h1, h2, h3')
+              );
+              const seen = new Set();
+              const items = [];
+              for (const node of candidates) {
+                if (!(node instanceof HTMLElement)) continue;
+                if (!visible(node)) continue;
+                const role = inferRole(node);
+                const href = normalize(node.getAttribute('href') || node.href || '', 500);
+                const text = inferText(node);
+                const clickable = ['link', 'button', 'menuitem', 'option', 'tab'].includes(role)
+                  || Boolean(href)
+                  || node.tagName.toLowerCase() === 'summary';
+                if (!text && !href && !clickable) continue;
+                const area = classifyArea(node);
+                const key = `${role}|${text}|${href}|${area}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                const rect = node.getBoundingClientRect();
+                let scoreHint = 0;
+                if (area === 'main') scoreHint += 0.35;
+                else if (area === 'nav' || area === 'footer') scoreHint -= 0.25;
+                if (role === 'link') scoreHint += 0.25;
+                if (pageKind === 'search_results' && area === 'main') scoreHint += 0.15;
+                if (text.length > 18) scoreHint += 0.1;
+                items.push({
+                  id: `e${items.length + 1}`,
+                  role,
+                  text,
+                  href,
+                  area,
+                  clickable,
+                  visible: true,
+                  selector_hint: selectorHint(node),
+                  score_hint: Number(scoreHint.toFixed(2)),
+                  y: Math.round(rect.top),
+                });
+              }
+              items.sort((a, b) => {
+                if (b.score_hint !== a.score_hint) return b.score_hint - a.score_hint;
+                return a.y - b.y;
+              });
+              return items.slice(0, 40).map(({ y, ...item }) => item);
+            }
+            """,
+            {"pageKind": page_kind},
+        )
+        return elements if isinstance(elements, list) else []
 
     def screenshot(self, session_id: str, *, full_page: bool, path: str) -> dict[str, Any]:
         page = self._get_or_create_page(session_id)

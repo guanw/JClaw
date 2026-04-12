@@ -36,6 +36,7 @@ class AssistantAgent:
                         "viewport_width": config.browser.viewport_width,
                         "viewport_height": config.browser.viewport_height,
                     },
+                    choose_link=self._choose_browser_link_via_llm,
                 )
             )
 
@@ -329,3 +330,71 @@ class AssistantAgent:
             return parsed if isinstance(parsed, dict) else None
         except json.JSONDecodeError:
             return None
+
+    def _choose_browser_link_via_llm(self, objective: str, page_data: dict[str, Any]) -> str | None:
+        elements = page_data.get("elements", [])
+        if not isinstance(elements, list) or not elements:
+            return None
+
+        compact_elements: list[dict[str, Any]] = []
+        for item in elements[:20]:
+            if not isinstance(item, dict):
+                continue
+            href = str(item.get("href", "")).strip()
+            role = str(item.get("role", "")).strip()
+            text = str(item.get("text", "")).strip()
+            if role != "link":
+                continue
+            if not href.startswith("http"):
+                continue
+            compact_elements.append(
+                {
+                    "id": str(item.get("id", "")),
+                    "role": role,
+                    "text": text[:200],
+                    "href": href,
+                    "area": str(item.get("area", "")),
+                    "clickable": bool(item.get("clickable", False)),
+                    "score_hint": item.get("score_hint", 0),
+                }
+            )
+        if not compact_elements:
+            return None
+
+        chooser_prompt = (
+            "You are helping JClaw choose the next browser link to follow.\n"
+            "You are given a user objective and a compact inspected-elements snapshot from the current page.\n"
+            "Choose the single best link element that most likely advances the user's objective.\n"
+            "Avoid search-engine homepages, settings, privacy/help pages, app-store links, download/install pages, and obvious ads.\n"
+            "Prefer result/article/documentation/news pages that directly match the user's request.\n"
+            "Return strict JSON only with schema:\n"
+            '{"chosen_element_id": string | null, "reason": string}\n'
+            "Use null if none of the elements look useful."
+        )
+        chooser_payload = {
+            "objective": objective,
+            "page_url": page_data.get("url", ""),
+            "page_title": page_data.get("title", ""),
+            "page_kind": page_data.get("page_kind", ""),
+            "page_text_preview": str(page_data.get("text", ""))[:800],
+            "elements": compact_elements,
+        }
+        raw = self.llm.chat(
+            [
+                {"role": "system", "content": chooser_prompt},
+                {"role": "user", "content": json.dumps(chooser_payload, ensure_ascii=True)},
+            ]
+        )
+        LOGGER.info("browser link chooser raw response: %s", raw)
+        parsed = self._parse_json_object(raw)
+        if not parsed:
+            return None
+        chosen_element_id = parsed.get("chosen_element_id")
+        if chosen_element_id in (None, "", "null"):
+            return None
+        chosen_id = str(chosen_element_id).strip()
+        for item in compact_elements:
+            if item.get("id") == chosen_id:
+                href = str(item.get("href", "")).strip()
+                return href if href.startswith("http") else None
+        return None

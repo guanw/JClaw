@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import re
 from urllib.parse import quote_plus
-from typing import Any
+from typing import Any, Callable
 
 from jclaw.tools.base import ToolContext, ToolResult
 from jclaw.tools.browser.artifacts import BrowserArtifactStore
@@ -21,7 +21,12 @@ from jclaw.tools.browser.session import BrowserSessionStore
 class BrowserTool:
     name = "browser"
 
-    def __init__(self, base_dir: str | Path, options: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        base_dir: str | Path,
+        options: dict[str, Any] | None = None,
+        choose_link: Callable[[str, dict[str, Any]], str | None] | None = None,
+    ) -> None:
         root = Path(base_dir)
         root.mkdir(parents=True, exist_ok=True)
         self.root = root
@@ -38,6 +43,7 @@ class BrowserTool:
         self.desktop = DesktopBrowserDriver()
         self.planner = BrowserPlanner()
         self._chat_sessions: dict[str, str] = {}
+        self._choose_link = choose_link
 
     def close(self) -> None:
         self.playwright.close()
@@ -121,6 +127,27 @@ class BrowserTool:
         self._chat_sessions[ctx.chat_id] = session.session_id
         return session
 
+    def _should_auto_close_session(self, params: dict[str, Any]) -> bool:
+        if bool(params.get("keep_session", False)):
+            return False
+        if params.get("session_id"):
+            return False
+        return True
+
+    def _cleanup_session_if_needed(self, session_id: str, *, ctx: ToolContext, action: str, params: dict[str, Any]) -> None:
+        if not self._should_auto_close_session(params):
+            return
+        try:
+            self._close_session({"session_id": session_id}, ctx)
+        except Exception as exc:  # noqa: BLE001
+            self._trace_event(
+                "session_cleanup_error",
+                ctx=ctx,
+                action=action,
+                params={"session_id": session_id, **params},
+                error=str(exc),
+            )
+
     def _target(self, params: dict[str, Any]) -> Target:
         raw = params.get("target", {})
         if isinstance(raw, Target):
@@ -149,16 +176,17 @@ class BrowserTool:
                 summary="Search query is empty.",
                 data={"query": query, "results": [], "implemented": True},
             )
-        return self._run_objective(
-            {
-                "objective": query,
-                "start_url": f"https://duckduckgo.com/?q={quote_plus(query)}&ia=web",
-                "max_steps": params.get("max_steps", 3),
-                "visible": params.get("visible", True),
-                "allow_desktop_fallback": params.get("allow_desktop_fallback", True),
-            },
-            ctx,
-        )
+        objective_params = {
+            "objective": query,
+            "start_url": f"https://html.duckduckgo.com/html/?q={quote_plus(query)}",
+            "max_steps": params.get("max_steps", 3),
+            "visible": params.get("visible", True),
+            "allow_desktop_fallback": params.get("allow_desktop_fallback", True),
+            "keep_session": params.get("keep_session", False),
+        }
+        if params.get("session_id"):
+            objective_params["session_id"] = params["session_id"]
+        return self._run_objective(objective_params, ctx)
 
     def _read_page(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -234,7 +262,7 @@ class BrowserTool:
             if url_match:
                 target_url = url_match.group(0)
             elif objective:
-                target_url = f"https://duckduckgo.com/?q={quote_plus(objective)}&ia=web"
+                target_url = f"https://html.duckduckgo.com/html/?q={quote_plus(objective)}"
             else:
                 target_url = "about:blank"
 
@@ -264,7 +292,18 @@ class BrowserTool:
 
         current_read = read_result
         for _ in range(max_steps - 1):
-            next_url = self._pick_follow_up_url(objective, current_read.data)
+            next_url = self._choose_follow_up_url(objective, current_read.data)
+            self._trace_event(
+                "follow_up_choice",
+                ctx=ctx,
+                action="run_objective",
+                params={
+                    "objective": objective,
+                    "current_url": current_read.data.get("url", ""),
+                    "candidate_elements": current_read.data.get("elements", [])[:12],
+                    "chosen_url": next_url,
+                },
+            )
             if not next_url or next_url == current_read.data.get("url"):
                 break
             follow_open = self._open_url({"session_id": session.session_id, "url": next_url}, ctx)
@@ -291,7 +330,7 @@ class BrowserTool:
 
         observation = {"session_id": session.session_id, "url": current_read.data.get("url", target_url)}
         step = self.planner.next_step(objective, observation, history=executed_steps)
-        return ToolResult(
+        result = ToolResult(
             ok=True,
             summary="Executed browser objective and captured the latest page.",
             data={
@@ -303,10 +342,14 @@ class BrowserTool:
                 "mode": self._driver(params).mode,
             },
         )
+        self._cleanup_session_if_needed(session.session_id, ctx=ctx, action="run_objective", params=params)
+        return result
 
     def _close_session(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session_id = str(params["session_id"])
-        self.playwright.close_session(session_id)
+        close_session = getattr(self.playwright, "close_session", None)
+        if callable(close_session):
+            close_session(session_id)
         self.sessions.close_session(session_id)
         for chat_id, mapped_session_id in list(self._chat_sessions.items()):
             if mapped_session_id == session_id:
@@ -350,33 +393,132 @@ class BrowserTool:
         with (self.root / "events.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
 
-    def _pick_follow_up_url(self, objective: str, page_data: dict[str, Any]) -> str | None:
-        current_url = str(page_data.get("url", ""))
-        links = page_data.get("links", [])
-        if not isinstance(links, list) or not links:
+    def _choose_follow_up_url(self, objective: str, page_data: dict[str, Any]) -> str | None:
+        llm_choice = self._choose_follow_up_url_via_llm(objective, page_data)
+        if llm_choice:
+            return llm_choice
+        return self._pick_follow_up_url(objective, page_data)
+
+    def _choose_follow_up_url_via_llm(self, objective: str, page_data: dict[str, Any]) -> str | None:
+        if self._choose_link is None:
+            return None
+        try:
+            return self._choose_link(objective, page_data)
+        except Exception:  # noqa: BLE001
             return None
 
-        if "duckduckgo.com" in current_url:
-            for item in links:
-                href = str(item.get("href", "")).strip()
-                if not href.startswith("http"):
-                    continue
-                if "duckduckgo.com" in href:
-                    continue
-                return href
+    def _pick_follow_up_url(self, objective: str, page_data: dict[str, Any]) -> str | None:
+        current_url = str(page_data.get("url", ""))
+        candidates = self._extract_candidate_elements(page_data)
+        if not candidates:
+            return None
 
         objective_terms = {term for term in re.findall(r"[a-z0-9]+", objective.lower()) if len(term) > 2}
-        scored_links: list[tuple[int, str]] = []
-        for item in links:
+        scored_links: list[tuple[int, str, str]] = []
+        for item in candidates:
             href = str(item.get("href", "")).strip()
             text = str(item.get("text", "")).lower()
             if not href.startswith("http"):
                 continue
+            if self._is_junk_link(href, text, current_url):
+                continue
             haystack = f"{text} {href}".lower()
             score = sum(1 for term in objective_terms if term in haystack)
+            if str(item.get("area", "")) == "main":
+                score += 2
+            if bool(item.get("clickable", False)):
+                score += 1
+            if self._looks_like_article_or_result(href, text):
+                score += 2
+            if "news" in haystack or "blog" in haystack or "article" in haystack:
+                score += 1
             if score:
-                scored_links.append((score, href))
-        scored_links.sort(reverse=True)
+                scored_links.append((score, href, text))
+        scored_links.sort(key=lambda item: item[0], reverse=True)
         if scored_links:
             return scored_links[0][1]
         return None
+
+    def _extract_candidate_elements(self, page_data: dict[str, Any]) -> list[dict[str, Any]]:
+        elements = page_data.get("elements", [])
+        if isinstance(elements, list) and elements:
+            candidates = []
+            for item in elements:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("role") != "link":
+                    continue
+                href = str(item.get("href", "")).strip()
+                if not href:
+                    continue
+                candidates.append(item)
+            if candidates:
+                return candidates
+        links = page_data.get("links", [])
+        if isinstance(links, list):
+            return [item for item in links if isinstance(item, dict)]
+        return []
+
+    def _is_junk_link(self, href: str, text: str, current_url: str) -> bool:
+        lowered_href = href.lower()
+        lowered_text = text.lower()
+
+        blocked_domains = (
+            "duckduckgo.com",
+            "google.com",
+            "bing.com",
+            "search.yahoo.com",
+            "apps.apple.com",
+            "itunes.apple.com",
+            "play.google.com",
+        )
+        if any(domain in lowered_href for domain in blocked_domains):
+            return True
+
+        blocked_tokens = (
+            "privacy",
+            "terms",
+            "settings",
+            "login",
+            "sign in",
+            "sign-in",
+            "signup",
+            "sign up",
+            "advertis",
+            "sponsored",
+            "ad choice",
+            "support",
+            "help",
+            "install",
+            "download app",
+            "duckduckgo browser",
+            "duck ai",
+            "vpn",
+        )
+        haystack = f"{lowered_text} {lowered_href}"
+        if any(token in haystack for token in blocked_tokens):
+            return True
+
+        if current_url and lowered_href.rstrip("/") == current_url.lower().rstrip("/"):
+            return True
+
+        return False
+
+    def _looks_like_article_or_result(self, href: str, text: str) -> bool:
+        lowered_href = href.lower()
+        lowered_text = text.lower()
+        positive_tokens = (
+            "/news",
+            "/article",
+            "/blog",
+            "/posts",
+            "/story",
+            "news",
+            "article",
+            "announces",
+            "launches",
+            "update",
+            "report",
+        )
+        haystack = f"{lowered_text} {lowered_href}"
+        return any(token in haystack for token in positive_tokens)

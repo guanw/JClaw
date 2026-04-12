@@ -30,3 +30,15 @@ class BrowserObservation:
     mode: str = "playwright"
     metadata: dict[str, Any] = field(default_factory=dict)
 
+
+@dataclass(slots=True)
+class InspectedElement:
+    id: str
+    role: str
+    text: str = ""
+    href: str = ""
+    area: str = "body"
+    clickable: bool = False
+    visible: bool = True
+    selector_hint: str = ""
+    score_hint: float = 0.0

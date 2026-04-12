@@ -30,7 +30,17 @@ class DesktopBrowserDriver:
         }
 
     def read_page(self, session_id: str) -> dict[str, Any]:
-        return {"session_id": session_id, "url": "", "title": "", "text": "", "mode": self.mode}
+        return {
+            "session_id": session_id,
+            "url": "",
+            "title": "",
+            "text": "",
+            "page_kind": "unknown",
+            "elements": [],
+            "links": [],
+            "forms": [],
+            "mode": self.mode,
+        }
 
     def screenshot(self, session_id: str, *, full_page: bool) -> dict[str, Any]:
         return {"session_id": session_id, "full_page": full_page, "mode": self.mode}
