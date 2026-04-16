@@ -44,6 +44,7 @@ class KnowledgeTool:
         *,
         summarize_documents: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
         answer_question: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+        analyze_image: Callable[[Path], dict[str, object] | None] | None = None,
         options: dict[str, Any] | None = None,
     ) -> None:
         self.db = db
@@ -53,6 +54,7 @@ class KnowledgeTool:
         self.home_dir = Path.home().expanduser().resolve()
         self._summarize_documents = summarize_documents
         self._answer_question = answer_question
+        self._analyze_image = analyze_image
         options = options or {}
         self.max_file_read_bytes = int(options.get("max_file_read_bytes", KNOWLEDGE_MAX_FILE_READ_BYTES))
         self.max_folder_scan_files = int(options.get("max_folder_scan_files", KNOWLEDGE_MAX_FOLDER_SCAN_FILES))
@@ -60,20 +62,77 @@ class KnowledgeTool:
         self.max_total_chunks = int(options.get("max_total_chunks", KNOWLEDGE_MAX_TOTAL_CHUNKS))
         self.text_preview_chars = int(options.get("text_preview_chars", KNOWLEDGE_TEXT_PREVIEW_CHARS))
         self.max_answer_citations = int(options.get("max_answer_citations", KNOWLEDGE_MAX_ANSWER_CITATIONS))
-        self.registry = KnowledgeReaderRegistry()
+        self.registry = KnowledgeReaderRegistry(analyze_image=self._analyze_image)
 
     def describe(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "actions": [
-                "analyze_paths",
-                "summarize_folder",
-                "answer_from_paths",
-            ],
+            "description": "Read approved local files and answer questions from grounded extracted content with citations.",
+            "actions": {
+                "analyze_paths": {
+                    "description": "Extract and inventory readable content from paths.",
+                    "use_when": ["you need a diagnostic inventory of readable files, not the final user answer"],
+                },
+                "summarize_folder": {
+                    "description": "Summarize readable files inside a folder.",
+                    "use_when": ["the user asks to summarize a folder or the readable files in it"],
+                },
+                "answer_from_paths": {
+                    "description": "Answer a question from local file contents with citations.",
+                    "use_when": ["the user asks a question about local files, documents, notes, code, PDFs, or images"],
+                },
+            },
             "implemented": True,
             "grounded": True,
             "read_only": True,
+            "supported_suffixes": [
+                ".txt",
+                ".md",
+                ".py",
+                ".js",
+                ".ts",
+                ".json",
+                ".yaml",
+                ".yml",
+                ".toml",
+                ".csv",
+                ".pdf",
+                ".png",
+                ".jpg",
+                ".jpeg",
+            ],
+            "supports_followup": True,
         }
+
+    def format_result(self, action: str, result: ToolResult) -> str:
+        lines = [result.summary]
+        data = result.data
+        if "grounded" in data:
+            lines.append(f"Grounded: {data['grounded']}")
+        if "partial" in data:
+            lines.append(f"Partial: {data['partial']}")
+        if data.get("answer"):
+            lines.append(f"Answer:\n{str(data['answer'])[:2000]}")
+        if data.get("summary_text"):
+            lines.append(f"Summary:\n{str(data['summary_text'])[:2000]}")
+        if data.get("unsupported_files") and (data.get("partial") or not data.get("answer") and not data.get("summary_text")):
+            lines.append("Unsupported files:")
+            for item in data["unsupported_files"][:10]:
+                lines.append(f"- {item['path']}: {item['reason']}")
+        if action == "analyze_paths" and data.get("supported_files"):
+            lines.append("Supported files:")
+            for item in data["supported_files"][:10]:
+                lines.append(f"- {item['path']}")
+        if (action == "analyze_paths" or data.get("partial") or data.get("scan_truncated")) and data.get("scanned_files"):
+            lines.append(f"Scanned files: {data['scanned_files']}")
+        if action == "analyze_paths" or data.get("scan_truncated") or data.get("partial"):
+            if "scan_truncated" in data:
+                lines.append(f"Scan truncated: {data['scan_truncated']}")
+        if data.get("citations"):
+            lines.append("Citations:")
+            for item in data["citations"][:6]:
+                lines.append(f"- {item['path']} [{item['chunk_id']}]")
+        return "\n".join(lines)
 
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handlers = {
@@ -289,9 +348,10 @@ class KnowledgeTool:
     ) -> dict[str, Any]:
         chunks = self._chunk_documents(documents)
         supported_files = []
-        for document in documents:
+        for index, document in enumerate(documents, start=1):
             supported_files.append(
                 {
+                    "order": index,
                     "path": document.path,
                     "title": document.title,
                     "file_type": document.file_type,
@@ -434,7 +494,7 @@ class KnowledgeTool:
         if not requested_path.exists() or not requested_path.is_dir():
             return []
         files: list[Path] = []
-        for path in requested_path.rglob("*"):
+        for path in sorted(requested_path.rglob("*"), key=lambda item: str(item).lower()):
             if len(files) >= self.max_folder_scan_files:
                 break
             if any(part.startswith(".") and part not in {".github"} for part in path.parts):

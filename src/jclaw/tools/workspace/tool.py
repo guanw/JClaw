@@ -72,20 +72,91 @@ class WorkspaceTool:
     def describe(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "actions": [
-                "inspect_root",
-                "prepare_change",
-                "apply_change_request",
-                "git_status",
-                "prepare_git_action",
-                "apply_git_request",
-                "prepare_shell_action",
-                "apply_shell_request",
-                "abort_request",
-            ],
+            "description": "Inspect approved local paths and prepare or apply bounded local mutations such as file edits, local git actions, and local shell commands.",
+            "actions": {
+                "inspect_root": {
+                    "description": "Inspect a local path or list a directory.",
+                    "use_when": ["the user wants to inspect, list, or verify local paths on the machine"],
+                },
+                "prepare_change": {
+                    "description": "Prepare a preview for local file or code changes.",
+                    "use_when": ["the user wants to modify local files or code"],
+                },
+                "apply_change_request": {"description": "Apply a previously approved file change request."},
+                "git_status": {
+                    "description": "Read local git status and diff summary.",
+                    "use_when": ["the user wants local repository status without mutation"],
+                },
+                "prepare_git_action": {
+                    "description": "Prepare a preview for local git mutations such as add, restore, or commit.",
+                },
+                "apply_git_request": {"description": "Apply a previously approved git mutation request."},
+                "prepare_shell_action": {
+                    "description": "Prepare a preview for a bounded non-interactive shell command in an approved root.",
+                },
+                "apply_shell_request": {"description": "Apply a previously approved shell request."},
+                "abort_request": {"description": "Abort a pending workspace approval request."},
+            },
             "dangerous": True,
             "preview_required": True,
+            "path_resolution": {
+                "repo_root": str(self.repo_root),
+                "home_dir": str(self.home_dir),
+                "common_home_aliases": sorted(self.COMMON_HOME_FOLDERS),
+            },
+            "supports_followup": True,
         }
+
+    def format_result(self, action: str, result: ToolResult) -> str:
+        lines = [result.summary]
+        data = result.data
+        if data.get("root_path"):
+            lines.append(f"Root: {data['root_path']}")
+        if data.get("target_path"):
+            lines.append(f"Target: {data['target_path']}")
+        if "exists" in data:
+            lines.append(f"Exists: {data['exists']}")
+        if data.get("kind"):
+            lines.append(f"Kind: {data['kind']}")
+        if data.get("entry_count") and data.get("kind") == "directory":
+            lines.append(f"Total entries: {data['entry_count']}")
+        if data.get("request_id"):
+            lines.append(f"Request: {data['request_id']}")
+        if data.get("request_kind"):
+            lines.append(f"Request kind: {data['request_kind']}")
+        if data.get("capabilities"):
+            lines.append(f"Capabilities: {', '.join(str(item) for item in data['capabilities'])}")
+        if data.get("entries"):
+            lines.append("Entries:")
+            for entry in data["entries"][:10]:
+                lines.append(f"- {entry['kind']}: {entry['name']}")
+            if data.get("entries_truncated"):
+                shown = len(data["entries"])
+                total = data.get("entry_count", shown)
+                lines.append(f"Shown {shown} of {total} entries.")
+        elif data.get("kind") == "directory":
+            lines.append("Entries: none")
+        if data.get("touched_files"):
+            lines.append("Touched files:")
+            for file_path in data["touched_files"][:10]:
+                lines.append(f"- {file_path}")
+        if data.get("diff_preview"):
+            lines.append(f"Diff preview:\n{str(data['diff_preview'])[:1500]}")
+        if data.get("command"):
+            lines.append(f"Command: {data['command']}")
+        if data.get("preview"):
+            lines.append(f"Preview: {data['preview']}")
+        if data.get("status"):
+            lines.append(f"Git status:\n{str(data['status'])[:1200]}")
+        if data.get("diff_stat"):
+            lines.append(f"Git diff:\n{str(data['diff_stat'])[:1200]}")
+        if data.get("stdout"):
+            lines.append(f"Stdout:\n{str(data['stdout'])[:1200]}")
+        if data.get("stderr"):
+            lines.append(f"Stderr:\n{str(data['stderr'])[:1200]}")
+        if data.get("output"):
+            lines.append(f"Output:\n{str(data['output'])[:1200]}")
+        return "\n".join(lines)
 
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handlers = {

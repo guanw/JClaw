@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import json
+from typing import Any
 
 import httpx
 
@@ -17,6 +18,9 @@ class OpenAICompatibleClient:
         self._client.close()
 
     def chat(self, messages: Sequence[dict[str, str]]) -> str:
+        return self.chat_content(messages)
+
+    def chat_content(self, messages: Sequence[dict[str, Any]]) -> str:
         if not self.config.base_url or not self.config.model:
             raise RuntimeError("provider.base_url and provider.model must be configured before chatting")
 

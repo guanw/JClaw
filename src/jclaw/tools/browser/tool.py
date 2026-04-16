@@ -71,22 +71,62 @@ class BrowserTool:
     def describe(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "actions": [
-                "open_url",
-                "search_web",
-                "read_page",
-                "click",
-                "type",
-                "scroll",
-                "wait_for",
-                "screenshot",
-                "extract",
-                "run_objective",
-                "close_session",
-                "list_sessions",
-                "permissions",
-            ],
+            "description": "Browse the web, inspect current pages, interact with websites, and run bounded multi-step browser objectives.",
+            "actions": {
+                "open_url": {
+                    "description": "Open a specific URL in a browser session.",
+                    "use_when": ["the user explicitly wants a page opened or navigated to"],
+                },
+                "search_web": {
+                    "description": "Run a web search query through the browser tool.",
+                    "use_when": ["the user wants current web results or news for a query"],
+                },
+                "read_page": {
+                    "description": "Read the current page state from the active session.",
+                    "use_when": ["the user wants to inspect or summarize the page that is already open"],
+                },
+                "click": {"description": "Click a target on the current page."},
+                "type": {"description": "Type into a page input or form control."},
+                "scroll": {"description": "Scroll the current page."},
+                "wait_for": {"description": "Wait for an element or page condition."},
+                "screenshot": {"description": "Capture a screenshot of the current page."},
+                "extract": {"description": "Extract structured fields from the current page."},
+                "run_objective": {
+                    "description": "Execute a bounded multi-step browser objective.",
+                    "use_when": ["the task needs several browser actions before answering"],
+                },
+                "close_session": {"description": "Close an existing browser session."},
+                "list_sessions": {"description": "List active browser sessions."},
+                "permissions": {"description": "Inspect browser-related local permission state."},
+            },
+            "read_only_by_default": False,
+            "supports_followup": True,
         }
+
+    def format_result(self, action: str, result: ToolResult) -> str:
+        lines = [result.summary]
+        data = result.data
+        if data.get("url"):
+            lines.append(f"URL: {data['url']}")
+        if data.get("title"):
+            lines.append(f"Title: {data['title']}")
+        if data.get("text"):
+            lines.append(f"Text: {str(data['text'])[:800]}")
+        if data.get("sources"):
+            lines.append("Sources:")
+            for source in data["sources"][:4]:
+                title = str(source.get("title", "")).strip() or "Untitled"
+                url = str(source.get("url", "")).strip()
+                lines.append(f"- {title}: {url}")
+        if data.get("termination_reason"):
+            lines.append(f"Termination: {data['termination_reason']}")
+        if data.get("steps"):
+            lines.append("Executed steps:")
+            for step in data["steps"][:5]:
+                lines.append(f"- {step['action']}: {step.get('reason', '')}".strip())
+        if "sessions" in data:
+            lines.append(f"Sessions: {len(data['sessions'])}")
+        return "\n".join(lines)
 
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handlers = {

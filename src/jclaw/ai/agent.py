@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import base64
+import mimetypes
 from pathlib import Path
 import re
 from typing import Any
@@ -10,6 +12,7 @@ from jclaw.ai.client import OpenAICompatibleClient
 from jclaw.ai.prompts import load_system_prompt
 from jclaw.core.config import Config
 from jclaw.core.db import Database, MemoryRecord
+from jclaw.core.defaults import AGENT_MAX_TOOL_STEPS
 from jclaw.core.scheduler import next_run_at, parse_schedule, to_utc_iso
 from jclaw.tools.base import ToolContext, ToolResult
 from jclaw.tools.browser.tool import BrowserTool
@@ -71,6 +74,7 @@ class AssistantAgent:
                     config.repo_root,
                     summarize_documents=self._summarize_knowledge_documents_via_llm,
                     answer_question=self._answer_from_knowledge_documents_via_llm,
+                    analyze_image=self._analyze_knowledge_image_via_llm,
                     options={
                         "max_file_read_bytes": config.knowledge.max_file_read_bytes,
                         "max_folder_scan_files": config.knowledge.max_folder_scan_files,
@@ -277,7 +281,8 @@ class AssistantAgent:
                 params,
                 ToolContext(chat_id=chat_id, user_id="approval"),
             )
-            return f"{grant_message}\n\n{self._format_tool_result(result)}"
+            formatted = self.tools.get(tool).format_result(action, result)
+            return f"{grant_message}\n\n{formatted}"
         action_map = {
             "file_mutation": "apply_change_request",
             "git_mutation": "apply_git_request",
@@ -292,7 +297,7 @@ class AssistantAgent:
             {"request_id": request_id},
             ToolContext(chat_id=chat_id, user_id="approval"),
         )
-        return self._format_tool_result(result)
+        return self.tools.get("workspace").format_result(action, result)
 
     def _deny(self, chat_id: str, remainder: str) -> str:
         request_id = remainder.strip()
@@ -338,82 +343,245 @@ class AssistantAgent:
         return self._format_tool_result(result)
 
     def _handle_tool_request(self, chat_id: str, text: str, *, user_name: str) -> str | None:
-        decision = self._decide_tool_use(chat_id, text, user_name=user_name)
+        return self._run_tool_loop(chat_id, text, user_name=user_name)
+
+    def _run_tool_loop(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        user_name: str,
+    ) -> str | None:
+        decision = self._decide_next_tool_step(chat_id, text, user_name=user_name, steps=[])
         if decision is None:
             return None
-        result = self.tools.invoke(
-            str(decision["tool"]),
-            str(decision["action"]),
-            dict(decision["params"]),
-            ToolContext(chat_id=chat_id, user_id=user_name),
-        )
-        return self._compose_tool_reply(chat_id, text, user_name=user_name, decision=decision, result=result)
+        if decision.get("status") in {"complete", "stop"}:
+            LOGGER.info("initial tool planner declined tool use: %s", decision.get("reason", ""))
+            return None
+        steps: list[dict[str, Any]] = []
+        seen_signatures: set[str] = set()
+        for _ in range(AGENT_MAX_TOOL_STEPS):
+            signature = json.dumps(
+                {
+                    "tool": decision["tool"],
+                    "action": decision["action"],
+                    "params": decision["params"],
+                },
+                sort_keys=True,
+                ensure_ascii=True,
+            )
+            if signature in seen_signatures:
+                LOGGER.info("tool loop detected repeated step; stopping")
+                return "Stopped because the tool plan repeated without making progress."
+            seen_signatures.add(signature)
 
-    def _decide_tool_use(self, chat_id: str, text: str, *, user_name: str) -> dict[str, Any] | None:
+            result = self.tools.invoke(
+                str(decision["tool"]),
+                str(decision["action"]),
+                dict(decision["params"]),
+                ToolContext(chat_id=chat_id, user_id=user_name),
+            )
+            steps.append(
+                {
+                    "tool": decision["tool"],
+                    "action": decision["action"],
+                    "params": dict(decision["params"]),
+                    "reason": decision.get("reason", ""),
+                    "result": result,
+                }
+            )
+            if result.needs_confirmation or result.data.get("implemented") is False:
+                return self._compose_tool_reply(
+                    chat_id,
+                    text,
+                    user_name=user_name,
+                    decision=decision,
+                    result=result,
+                )
+
+            next_decision = self._decide_next_tool_step(
+                chat_id,
+                text,
+                user_name=user_name,
+                steps=steps,
+            )
+            if next_decision is None:
+                LOGGER.info("tool continuation returned no usable decision; stopping with latest result")
+                return self._compose_tool_reply(
+                    chat_id,
+                    text,
+                    user_name=user_name,
+                    decision=decision,
+                    result=result,
+                )
+            if next_decision.get("status") in {"complete", "stop"}:
+                return self._compose_tool_reply(
+                    chat_id,
+                    text,
+                    user_name=user_name,
+                    decision=decision,
+                    result=result,
+                )
+            decision = {
+                "tool": next_decision["tool"],
+                "action": next_decision["action"],
+                "params": next_decision["params"],
+                "reason": next_decision.get("reason", ""),
+            }
+        last = steps[-1]
+        return self._compose_tool_reply(
+            chat_id,
+            text,
+            user_name=user_name,
+            decision={"tool": last["tool"], "action": last["action"], "reason": last["reason"], "params": last["params"]},
+            result=last["result"],
+        )
+
+    def _decide_next_tool_step(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        user_name: str,
+        steps: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
         available_tools = self.tools.list_tools()
         if not available_tools:
             return None
 
+        step_summaries = []
+        for index, step in enumerate(steps, start=1):
+            step_summaries.append(
+                {
+                    "step": index,
+                    "tool": step["tool"],
+                    "action": step["action"],
+                    "reason": step["reason"],
+                    "result": self._tool_result_for_planner(step["result"]),
+                }
+            )
         recent_history = [
             {"role": item.role, "content": item.content}
             for item in self.db.recent_messages(chat_id, 4)
         ]
-        router_prompt = (
-            "You are the JClaw tool router. Decide whether the user's latest message should use one tool.\n"
-            "Use tools when they are clearly better than a direct model-only answer.\n"
-            "Prefer tools for browsing websites, checking live information, interacting with web content, inspecting local workspaces, preparing file/code changes, checking git state, or previewing local shell commands.\n"
-            "Return strict JSON only. No markdown.\n"
+        prompt = (
+            "You are JClaw's tool step planner.\n"
+            "Given the original user request and completed tool steps, decide whether the task should stop, is complete, or should continue with exactly one tool step.\n"
+            "You are the only tool-planning gate for both the initial step and later continuation.\n"
+            "If there are no completed steps yet, decide whether any tool should be used at all.\n"
+            "Evaluate the request against the actual observed tool outputs.\n"
+            "Use continue only when another tool call materially advances the user's request.\n"
+            "Use complete when the user's objective has already been satisfied by the latest tool output or when no tool is needed because the task can be answered directly without tools.\n"
+            "Use stop when progress is blocked, evidence is insufficient to continue safely, or another tool call is unlikely to help.\n"
+            "Do not require any hardcoded tool-specific rules from the caller; rely on the tool catalog and prior step results.\n"
+            "Keep params minimal and choose only one next tool step.\n"
+            "Return strict JSON only.\n"
             "Schema:\n"
-            '{"use_tool": boolean, "tool": string, "action": string, "params": object, "reason": string}\n'
-            "If no tool is needed, return {\"use_tool\": false, \"tool\": \"\", \"action\": \"\", \"params\": {}, \"reason\": \"...\"}.\n"
-            "Do not choose tools whose description says implemented=false or scaffold_only=true.\n"
-            "If using the browser tool:\n"
-            '- use "open_url" when the user clearly wants a page opened\n'
-            '- use "read_page" when they want the current page read\n'
-            '- use "search_web" when the user wants current web results for a query\n'
-            '- use "run_objective" for multi-step browsing after opening/searching\n'
-            "If using the workspace tool:\n"
-            f'- use "inspect_root" for listing or checking local paths, defaulting to the repo root {self.config.repo_root}\n'
-            f'- when the user refers to common Mac folders like Documents, Desktop, Downloads, Pictures, or Library, prefer paths under the local home directory {Path.home()}\n'
-            '- use "prepare_change" for local file or code modifications\n'
-            '- use "git_status" when the user wants local git state\n'
-            '- use "prepare_git_action" for local git mutations such as stage, restore, or commit\n'
-            '- use "prepare_shell_action" for local non-interactive commands in an approved root\n'
-            "If using the knowledge tool:\n"
-            '- use "analyze_paths" to inspect readable file contents from local paths\n'
-            '- use "summarize_folder" to summarize a folder of readable files\n'
-            '- use "answer_from_paths" when the user asks a question about local files, notes, code, or configs\n'
-            "Important: workspace mutation actions are preview-only until the user approves them with a command.\n"
-            "Important: knowledge is read-only and grounded in extracted local file content.\n"
-            "Important: search_web and run_objective both execute real browser actions. Do not invent unsupported actions.\n"
-            "- Include only parameters needed for the action.\n"
-            f"Available tools: {json.dumps(available_tools, ensure_ascii=True)}"
+            '{"status":"continue|complete|stop","tool":string,"action":string,"params":object,"reason":string}\n'
+            "If status is complete or stop, tool/action may be empty and params should be {}.\n"
+            f"Tool catalog: {self._tool_catalog_for_prompt(available_tools)}"
         )
-        messages = [{"role": "system", "content": router_prompt}]
-        messages.extend(recent_history)
-        messages.append(
-            {
-                "role": "user",
-                "content": f"User name: {user_name or 'unknown'}\nLatest message: {text}",
-            }
+        raw = self.llm.chat(
+            [
+                {"role": "system", "content": prompt},
+                *recent_history,
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "user_name": user_name or "unknown",
+                            "request": text,
+                            "steps": step_summaries,
+                        },
+                        ensure_ascii=True,
+                    ),
+                },
+            ]
         )
-        raw = self.llm.chat(messages)
-        LOGGER.info("tool router raw response: %s", raw)
-        decision = self._parse_json_object(raw)
-        if not decision or not isinstance(decision, dict):
-            LOGGER.info("tool router returned unparsable response; using normal chat fallback")
+        if step_summaries:
+            LOGGER.info("tool continuation raw response: %s", raw)
+        else:
+            LOGGER.info("tool initial planner raw response: %s", raw)
+        parsed = self._parse_json_object(raw)
+        if not parsed:
             return None
-        if not decision.get("use_tool"):
-            LOGGER.info("tool router declined tool use: %s", decision.get("reason", ""))
+        status = str(parsed.get("status", "")).strip().lower()
+        if status not in {"continue", "complete", "stop"}:
             return None
-        tool = str(decision.get("tool", "")).strip()
-        action = str(decision.get("action", "")).strip()
-        params = decision.get("params", {})
+        if status != "continue":
+            return {"status": status, "reason": str(parsed.get("reason", "")).strip()}
+        tool = str(parsed.get("tool", "")).strip()
+        action = str(parsed.get("action", "")).strip()
+        params = parsed.get("params", {})
         if not tool or not action or not isinstance(params, dict):
-            LOGGER.info("tool router returned incomplete tool decision: %s", decision)
             return None
-        LOGGER.info("tool router selected tool=%s action=%s reason=%s", tool, action, decision.get("reason", ""))
-        return {"tool": tool, "action": action, "params": params, "reason": str(decision.get("reason", ""))}
+        if step_summaries:
+            LOGGER.info("tool continuation selected tool=%s action=%s reason=%s", tool, action, parsed.get("reason", ""))
+        else:
+            LOGGER.info("tool initial planner selected tool=%s action=%s reason=%s", tool, action, parsed.get("reason", ""))
+        return {
+            "status": "continue",
+            "tool": tool,
+            "action": action,
+            "params": params,
+            "reason": str(parsed.get("reason", "")).strip(),
+        }
+
+    def _tool_result_for_planner(self, result: ToolResult) -> dict[str, Any]:
+        data = result.data
+        planner_data: dict[str, Any] = {
+            "summary": result.summary,
+            "needs_confirmation": result.needs_confirmation,
+            "implemented": data.get("implemented", True),
+        }
+        for key in (
+            "root_path",
+            "target_path",
+            "exists",
+            "kind",
+            "entry_count",
+            "entries_truncated",
+            "supported_files",
+            "unsupported_files",
+            "grounded",
+            "partial",
+            "answer",
+            "summary_text",
+            "request_id",
+            "request_kind",
+        ):
+            if key in data:
+                planner_data[key] = data[key]
+        if "entries" in data:
+            planner_data["entries"] = data["entries"][:10]
+        if "citations" in data:
+            planner_data["citations"] = data["citations"][:4]
+        return planner_data
+
+    def _tool_catalog_for_prompt(self, available_tools: list[dict[str, Any]]) -> str:
+        catalog: list[dict[str, Any]] = []
+        for tool in available_tools:
+            entry: dict[str, Any] = {
+                "name": tool.get("name", ""),
+                "description": tool.get("description", ""),
+            }
+            if "actions" in tool:
+                entry["actions"] = tool["actions"]
+            for key in (
+                "implemented",
+                "scaffold_only",
+                "dangerous",
+                "preview_required",
+                "read_only",
+                "grounded",
+                "supports_followup",
+                "path_resolution",
+                "supported_suffixes",
+            ):
+                if key in tool:
+                    entry[key] = tool[key]
+            catalog.append(entry)
+        return json.dumps(catalog, ensure_ascii=True)
 
     def _compose_tool_reply(
         self,
@@ -424,7 +592,8 @@ class AssistantAgent:
         decision: dict[str, Any],
         result: ToolResult,
     ) -> str:
-        tool_result_text = self._format_tool_result(result)
+        tool = self.tools.get(str(decision["tool"]))
+        tool_result_text = tool.format_result(str(decision["action"]), result)
         if decision["tool"] in {"workspace", "knowledge"}:
             LOGGER.info("%s tool result returned directly to avoid hallucinated summaries", decision["tool"])
             return tool_result_text
@@ -457,101 +626,6 @@ class AssistantAgent:
             return self.llm.chat(messages)
         except Exception:  # noqa: BLE001
             return tool_result_text
-
-    def _format_tool_result(self, result: ToolResult) -> str:
-        lines = [result.summary]
-        data = result.data
-        if "url" in data and data["url"]:
-            lines.append(f"URL: {data['url']}")
-        if "title" in data and data["title"]:
-            lines.append(f"Title: {data['title']}")
-        if "root_path" in data and data["root_path"]:
-            lines.append(f"Root: {data['root_path']}")
-        if "target_path" in data and data["target_path"]:
-            lines.append(f"Target: {data['target_path']}")
-        if "exists" in data:
-            lines.append(f"Exists: {data['exists']}")
-        if "kind" in data and data["kind"]:
-            lines.append(f"Kind: {data['kind']}")
-        if "entry_count" in data and data["entry_count"] and data.get("kind") == "directory":
-            lines.append(f"Total entries: {data['entry_count']}")
-        if "grounded" in data:
-            lines.append(f"Grounded: {data['grounded']}")
-        if "partial" in data:
-            lines.append(f"Partial: {data['partial']}")
-        if "text" in data and data["text"]:
-            lines.append(f"Text: {str(data['text'])[:800]}")
-        if "answer" in data and data["answer"]:
-            lines.append(f"Answer:\n{str(data['answer'])[:2000]}")
-        if "summary_text" in data and data["summary_text"]:
-            lines.append(f"Summary:\n{str(data['summary_text'])[:2000]}")
-        if "request_id" in data and data["request_id"]:
-            lines.append(f"Request: {data['request_id']}")
-        if "request_kind" in data and data["request_kind"]:
-            lines.append(f"Request kind: {data['request_kind']}")
-        if "capabilities" in data and data["capabilities"]:
-            lines.append(f"Capabilities: {', '.join(str(item) for item in data['capabilities'])}")
-        if "entries" in data and data["entries"]:
-            lines.append("Entries:")
-            for entry in data["entries"][:10]:
-                lines.append(f"- {entry['kind']}: {entry['name']}")
-            if data.get("entries_truncated"):
-                shown = len(data["entries"])
-                total = data.get("entry_count", shown)
-                lines.append(f"Shown {shown} of {total} entries.")
-        elif data.get("kind") == "directory":
-            lines.append("Entries: none")
-        if "touched_files" in data and data["touched_files"]:
-            lines.append("Touched files:")
-            for file_path in data["touched_files"][:10]:
-                lines.append(f"- {file_path}")
-        if "supported_files" in data and data["supported_files"]:
-            lines.append("Supported files:")
-            for item in data["supported_files"][:10]:
-                lines.append(f"- {item['path']}")
-        if "unsupported_files" in data and data["unsupported_files"]:
-            lines.append("Unsupported files:")
-            for item in data["unsupported_files"][:10]:
-                lines.append(f"- {item['path']}: {item['reason']}")
-        if "scanned_files" in data and data["scanned_files"]:
-            lines.append(f"Scanned files: {data['scanned_files']}")
-        if "scan_truncated" in data:
-            lines.append(f"Scan truncated: {data['scan_truncated']}")
-        if "citations" in data and data["citations"]:
-            lines.append("Citations:")
-            for item in data["citations"][:6]:
-                lines.append(f"- {item['path']} [{item['chunk_id']}]")
-        if "diff_preview" in data and data["diff_preview"]:
-            lines.append(f"Diff preview:\n{str(data['diff_preview'])[:1500]}")
-        if "command" in data and data["command"]:
-            lines.append(f"Command: {data['command']}")
-        if "preview" in data and data["preview"]:
-            lines.append(f"Preview: {data['preview']}")
-        if "status" in data and data["status"]:
-            lines.append(f"Git status:\n{str(data['status'])[:1200]}")
-        if "diff_stat" in data and data["diff_stat"]:
-            lines.append(f"Git diff:\n{str(data['diff_stat'])[:1200]}")
-        if "stdout" in data and data["stdout"]:
-            lines.append(f"Stdout:\n{str(data['stdout'])[:1200]}")
-        if "stderr" in data and data["stderr"]:
-            lines.append(f"Stderr:\n{str(data['stderr'])[:1200]}")
-        if "output" in data and data["output"]:
-            lines.append(f"Output:\n{str(data['output'])[:1200]}")
-        if "sources" in data and data["sources"]:
-            lines.append("Sources:")
-            for source in data["sources"][:4]:
-                title = str(source.get("title", "")).strip() or "Untitled"
-                url = str(source.get("url", "")).strip()
-                lines.append(f"- {title}: {url}")
-        if "termination_reason" in data and data["termination_reason"]:
-            lines.append(f"Termination: {data['termination_reason']}")
-        if "steps" in data and data["steps"]:
-            lines.append("Executed steps:")
-            for step in data["steps"][:5]:
-                lines.append(f"- {step['action']}: {step.get('reason', '')}".strip())
-        if "sessions" in data:
-            lines.append(f"Sessions: {len(data['sessions'])}")
-        return "\n".join(lines)
 
     def _parse_json_object(self, text: str) -> dict[str, Any] | None:
         cleaned = text.strip()
@@ -753,62 +827,162 @@ class AssistantAgent:
         chunks = payload.get("chunks", [])
         if not isinstance(chunks, list) or not chunks:
             return None
+        compact_payload = {
+            **payload,
+            "chunks": chunks[:8],
+        }
         prompt = (
             "You are JClaw's knowledge summarizer.\n"
             "Summarize only from the provided local file chunks.\n"
             "Do not invent facts or files. If the evidence is weak, say so.\n"
-            "Return strict JSON only with schema:\n"
+            "Return minified JSON only. Do not use markdown fences.\n"
+            "Keep the summary under 120 words.\n"
+            "Cite at most 3 chunk ids.\n"
+            "Schema:\n"
             '{"summary": string, "cited_chunk_ids": [string]}\n'
             "Only cite chunk ids that appear in the payload."
         )
         raw = self.llm.chat(
             [
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=True)},
+                {"role": "user", "content": json.dumps(compact_payload, ensure_ascii=True)},
             ]
         )
         LOGGER.info("knowledge summarizer raw response: %s", raw)
         parsed = self._parse_json_object(raw)
-        if not parsed:
-            return None
-        cited_chunk_ids = parsed.get("cited_chunk_ids", [])
-        if not isinstance(cited_chunk_ids, list):
-            cited_chunk_ids = []
-        return {
-            "summary": str(parsed.get("summary", "")).strip(),
-            "cited_chunk_ids": [str(item).strip() for item in cited_chunk_ids if str(item).strip()],
-        }
+        return self._coerce_knowledge_summary_response(raw, parsed)
 
     def _answer_from_knowledge_documents_via_llm(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         chunks = payload.get("chunks", [])
         question = str(payload.get("question", "")).strip()
         if not isinstance(chunks, list) or not chunks or not question:
             return None
+        compact_payload = {
+            **payload,
+            "chunks": chunks[:8],
+        }
         prompt = (
             "You are JClaw's grounded knowledge answerer.\n"
             "Answer only from the provided local file chunks.\n"
             "If the evidence is insufficient, say that directly.\n"
             "Do not invent facts, file contents, or citations.\n"
-            "Return strict JSON only with schema:\n"
+            "Return minified JSON only. Do not use markdown fences.\n"
+            "Keep the answer under 120 words.\n"
+            "Cite at most 3 chunk ids.\n"
+            "Schema:\n"
             '{"answer": string, "cited_chunk_ids": [string], "grounded": boolean, "partial": boolean}\n'
             "Only cite chunk ids that appear in the payload."
         )
         raw = self.llm.chat(
             [
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=True)},
+                {"role": "user", "content": json.dumps(compact_payload, ensure_ascii=True)},
             ]
         )
         LOGGER.info("knowledge answerer raw response: %s", raw)
         parsed = self._parse_json_object(raw)
+        return self._coerce_knowledge_answer_response(raw, parsed)
+
+    def _coerce_knowledge_summary_response(
+        self,
+        raw: str,
+        parsed: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if parsed:
+            cited_chunk_ids = parsed.get("cited_chunk_ids", [])
+            if not isinstance(cited_chunk_ids, list):
+                cited_chunk_ids = []
+            return {
+                "summary": str(parsed.get("summary", "")).strip(),
+                "cited_chunk_ids": [str(item).strip() for item in cited_chunk_ids if str(item).strip()][:3],
+            }
+        summary = self._extract_json_string_field(raw, "summary")
+        cited_chunk_ids = self._extract_json_string_list_field(raw, "cited_chunk_ids")
+        if not summary and not cited_chunk_ids:
+            return None
+        return {
+            "summary": summary,
+            "cited_chunk_ids": cited_chunk_ids[:3],
+        }
+
+    def _coerce_knowledge_answer_response(
+        self,
+        raw: str,
+        parsed: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if parsed:
+            cited_chunk_ids = parsed.get("cited_chunk_ids", [])
+            if not isinstance(cited_chunk_ids, list):
+                cited_chunk_ids = []
+            return {
+                "answer": str(parsed.get("answer", "")).strip(),
+                "cited_chunk_ids": [str(item).strip() for item in cited_chunk_ids if str(item).strip()][:3],
+                "grounded": bool(parsed.get("grounded", False)),
+                "partial": bool(parsed.get("partial", True)),
+            }
+        answer = self._extract_json_string_field(raw, "answer")
+        cited_chunk_ids = self._extract_json_string_list_field(raw, "cited_chunk_ids")
+        if not answer and not cited_chunk_ids:
+            return None
+        return {
+            "answer": answer,
+            "cited_chunk_ids": cited_chunk_ids[:3],
+            "grounded": bool(answer),
+            "partial": True,
+        }
+
+    def _extract_json_string_field(self, raw: str, field_name: str) -> str:
+        pattern = rf'"{re.escape(field_name)}"\s*:\s*"((?:[^"\\]|\\.)*)'
+        match = re.search(pattern, raw, flags=re.DOTALL)
+        if not match:
+            return ""
+        value = match.group(1)
+        value = value.replace('\\"', '"').replace("\\n", "\n").replace("\\\\", "\\")
+        return value.strip()
+
+    def _extract_json_string_list_field(self, raw: str, field_name: str) -> list[str]:
+        marker = f'"{field_name}"'
+        start = raw.find(marker)
+        if start == -1:
+            return []
+        bracket_start = raw.find("[", start)
+        if bracket_start == -1:
+            return []
+        chunk = raw[bracket_start:]
+        return re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', chunk)
+
+    def _analyze_knowledge_image_via_llm(self, path: Path) -> dict[str, object] | None:
+        mime_type, _ = mimetypes.guess_type(path.name)
+        mime = mime_type or "image/png"
+        image_bytes = path.read_bytes()
+        data_url = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+        prompt = (
+            "You are JClaw's image understanding helper.\n"
+            "Describe the image and extract any visible text that matters for later file-grounded Q&A.\n"
+            "Be concise and factual. Do not infer beyond the visible content.\n"
+            "Return strict JSON only with schema:\n"
+            '{"text": string, "warnings": [string]}\n'
+        )
+        raw = self.llm.chat_content(
+            [
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Analyze this local image for visible content and text."},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                },
+            ]
+        )
+        LOGGER.info("knowledge image analyzer raw response: %s", raw)
+        parsed = self._parse_json_object(raw)
         if not parsed:
             return None
-        cited_chunk_ids = parsed.get("cited_chunk_ids", [])
-        if not isinstance(cited_chunk_ids, list):
-            cited_chunk_ids = []
+        warnings = parsed.get("warnings", [])
+        if not isinstance(warnings, list):
+            warnings = []
         return {
-            "answer": str(parsed.get("answer", "")).strip(),
-            "cited_chunk_ids": [str(item).strip() for item in cited_chunk_ids if str(item).strip()],
-            "grounded": bool(parsed.get("grounded", False)),
-            "partial": bool(parsed.get("partial", True)),
+            "text": str(parsed.get("text", "")).strip(),
+            "warnings": [str(item).strip() for item in warnings if str(item).strip()],
         }

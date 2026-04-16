@@ -22,6 +22,7 @@ from jclaw.core.defaults import (
     WORKSPACE_SHELL_TIMEOUT_SECONDS,
 )
 from jclaw.core.db import Database
+from jclaw.tools.base import ToolContext, ToolResult
 
 
 class DummyLLM:
@@ -35,6 +36,44 @@ class SequenceLLM:
 
     def chat(self, messages):  # noqa: ANN001
         return next(self._responses)
+
+
+class FakeTool:
+    name = "fake"
+
+    def __init__(self) -> None:
+        self.invocations: list[tuple[str, dict]] = []
+
+    def describe(self) -> dict:
+        return {
+            "name": "fake",
+            "description": "Fake tool used for loop tests.",
+            "implemented": True,
+            "actions": {
+                "step_one": {
+                    "description": "Produce an intermediate result.",
+                    "use_when": ["A first fake step is needed."],
+                },
+                "step_two": {
+                    "description": "Produce the final result.",
+                    "use_when": ["A second fake step is needed."],
+                },
+            },
+        }
+
+    def invoke(self, action: str, params: dict, ctx: ToolContext) -> ToolResult:
+        self.invocations.append((action, dict(params)))
+        if action == "step_one":
+            return ToolResult(ok=True, summary="Completed fake step one.", data={"phase": "intermediate"})
+        if action == "step_two":
+            return ToolResult(ok=True, summary="Completed fake step two.", data={"answer": "final fake answer", "grounded": True})
+        raise AssertionError(f"unexpected action: {action}")
+
+    def format_result(self, action: str, result: ToolResult) -> str:
+        lines = [result.summary]
+        if result.data.get("answer"):
+            lines.append(f"Answer:\n{result.data['answer']}")
+        return "\n".join(lines)
 
 
 def test_command_flow(tmp_path) -> None:
@@ -81,15 +120,16 @@ def test_llm_selected_tool_routes_to_browser(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"use_tool": true, "tool": "browser", "action": "run_objective", "params": {"objective": "open example.com", "start_url": "https://example.com"}, "reason": "The user wants browser help."}',
-                '{"status":"complete","chosen_element_id":null,"reason":"The current page is already the intended destination."}',
+                '{"status":"continue","tool":"browser","action":"run_objective","params":{"objective":"open example.com","start_url":"https://example.com"},"reason":"The user wants browser help."}',
+                '{"status":"complete","tool":"","action":"","params":{},"reason":"The current page is already the intended destination."}',
                 "I opened the requested page and captured it.",
             ]
         ),
     )
 
     reply = agent.handle_text("chat-1", "please open example.com for me")
-    assert "opened" in reply.lower()
+    assert "example.com" in reply.lower()
+    assert "example domain" in reply.lower()
     db.close()
 
 
@@ -194,7 +234,7 @@ def test_llm_can_decline_tool_and_fall_back_to_chat(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"use_tool": false, "tool": "", "action": "", "params": {}, "reason": "No tool needed."}',
+                '{"status":"complete","tool":"","action":"","params":{},"reason":"No tool needed."}',
                 "Normal chat reply.",
             ]
         ),
@@ -278,7 +318,7 @@ def test_workspace_preview_pauses_until_approval(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"use_tool": true, "tool": "workspace", "action": "prepare_change", "params": {"objective": "Update app.py", "path": "app.py"}, "reason": "Local code change requested."}',
+                '{"status":"continue","tool":"workspace","action":"prepare_change","params":{"objective":"Update app.py","path":"app.py"},"reason":"Local code change requested."}',
                 '{"summary":"Update app.py","edits":[{"path":"app.py","reason":"Update greeting","new_content":"print(\\"goodbye\\")\\n"}]}',
             ]
         ),
@@ -325,7 +365,7 @@ def test_workspace_inspect_reply_is_raw_tool_output(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"use_tool": true, "tool": "workspace", "action": "inspect_root", "params": {"path": ".", "objective": "Inspect repo root"}, "reason": "Local workspace inspection requested."}',
+                '{"status":"continue","tool":"workspace","action":"inspect_root","params":{"path":".","objective":"Inspect repo root"},"reason":"Local workspace inspection requested."}',
                 "Hallucinated workspace summary that should never be used.",
             ]
         ),
@@ -365,7 +405,8 @@ def test_workspace_inspect_reply_mentions_truncation(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"use_tool": true, "tool": "workspace", "action": "inspect_root", "params": {"path": ".", "objective": "Inspect repo root"}, "reason": "Local workspace inspection requested."}',
+                '{"status":"continue","tool":"workspace","action":"inspect_root","params":{"path":".","objective":"Inspect repo root"},"reason":"Local workspace inspection requested."}',
+                '{"status":"complete","tool":"","action":"","params":{},"reason":"A plain directory listing satisfies the request."}',
             ]
         ),
     )
@@ -399,7 +440,7 @@ def test_workspace_grant_approval_resumes_inspect_root(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"use_tool": true, "tool": "workspace", "action": "inspect_root", "params": {"path": ".", "objective": "Inspect repo root"}, "reason": "Local workspace inspection requested."}',
+                '{"status":"continue","tool":"workspace","action":"inspect_root","params":{"path":".","objective":"Inspect repo root"},"reason":"Local workspace inspection requested."}',
             ]
         ),
     )
@@ -439,7 +480,7 @@ def test_llm_selected_tool_routes_to_knowledge_and_returns_raw_result(tmp_path) 
         db,
         SequenceLLM(
             [
-                '{"use_tool": true, "tool": "knowledge", "action": "answer_from_paths", "params": {"paths": ["notes.txt"], "question": "Who is the project owner?"}, "reason": "The user is asking about local file contents."}',
+                '{"status":"continue","tool":"knowledge","action":"answer_from_paths","params":{"paths":["notes.txt"],"question":"Who is the project owner?"},"reason":"The user is asking about local file contents."}',
                 '{"answer":"The project owner is guan.","cited_chunk_ids":["notes.txt:1"],"grounded":true,"partial":false}',
                 "Hallucinated post-processing that should not be used.",
             ]
@@ -451,5 +492,121 @@ def test_llm_selected_tool_routes_to_knowledge_and_returns_raw_result(tmp_path) 
     assert "The project owner is guan." in reply
     assert "Citations:" in reply
     assert "notes.txt [notes.txt:1]" in reply
+    assert "Supported files:" not in reply
     assert "Hallucinated post-processing" not in reply
+    db.close()
+
+
+def test_knowledge_summary_recovers_from_truncated_json(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '```json\n{"summary":"The documents concern a real estate transaction.","cited_chunk_ids":["file.pdf:1","file.pdf:2',
+            ]
+        ),
+    )
+
+    result = agent._summarize_knowledge_documents_via_llm(  # noqa: SLF001
+        {
+            "chunks": [
+                {"chunk_id": "file.pdf:1", "path": "/tmp/file.pdf", "text": "sample", "start_offset": 0, "end_offset": 6},
+            ]
+        }
+    )
+    assert result is not None
+    assert result["summary"] == "The documents concern a real estate transaction."
+    db.close()
+
+
+def test_tool_loop_can_chain_workspace_then_knowledge(tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    folder = repo_root / "Desktop" / "819"
+    folder.mkdir(parents=True)
+    (folder / "a-contract.txt").write_text("Purchase price is $1,250,000.\n", encoding="utf-8")
+    (folder / "b-notes.txt").write_text("Secondary note.\n", encoding="utf-8")
+
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=repo_root,
+    )
+    db = Database(config.daemon.db_path)
+    db.upsert_grant(str(repo_root.resolve()), ("read",), "chat-1")
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"status":"continue","tool":"workspace","action":"inspect_root","params":{"path":"Desktop/819","objective":"Inspect Desktop/819"},"reason":"Need to inspect the folder first."}',
+                '{"status":"continue","tool":"knowledge","action":"answer_from_paths","params":{"paths":["Desktop/819"],"question":"Summarize the first file found in this folder."},"reason":"Now answer from the folder contents."}',
+                '{"answer":"The first file says the purchase price is $1,250,000.","cited_chunk_ids":["a-contract.txt:1"],"grounded":true,"partial":false}',
+                '{"status":"complete","tool":"","action":"","params":{},"reason":"The grounded answer satisfies the request."}',
+            ]
+        ),
+    )
+
+    reply = agent.handle_text("chat-1", "summarize the first file you found in Desktop/819 folder")
+    assert "Answer:" in reply
+    assert "purchase price is $1,250,000" in reply
+    assert "a-contract.txt [a-contract.txt:1]" in reply
+    db.close()
+
+
+def test_tool_loop_continuation_is_generic_not_tool_specific(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"status":"continue","tool":"fake","action":"step_one","params":{},"reason":"Need the first fake step."}',
+                '{"status":"continue","tool":"fake","action":"step_two","params":{},"reason":"A second fake step completes the request."}',
+                '{"status":"complete","tool":"","action":"","params":{},"reason":"The objective is complete."}',
+            ]
+        ),
+    )
+    fake_tool = FakeTool()
+    agent.tools.register(fake_tool)
+
+    reply = agent.handle_text("chat-1", "finish the fake task")
+    assert "final fake answer" in reply
+    assert fake_tool.invocations == [("step_one", {}), ("step_two", {})]
     db.close()
