@@ -64,7 +64,23 @@ class AssistantAgent:
                 )
             )
         if config.knowledge.enabled:
-            self.tools.register(KnowledgeTool())
+            self.tools.register(
+                KnowledgeTool(
+                    self.db,
+                    config.daemon.state_dir / "tools" / "knowledge",
+                    config.repo_root,
+                    summarize_documents=self._summarize_knowledge_documents_via_llm,
+                    answer_question=self._answer_from_knowledge_documents_via_llm,
+                    options={
+                        "max_file_read_bytes": config.knowledge.max_file_read_bytes,
+                        "max_folder_scan_files": config.knowledge.max_folder_scan_files,
+                        "max_chunks_per_file": config.knowledge.max_chunks_per_file,
+                        "max_total_chunks": config.knowledge.max_total_chunks,
+                        "text_preview_chars": config.knowledge.text_preview_chars,
+                        "max_answer_citations": config.knowledge.max_answer_citations,
+                    },
+                )
+            )
 
     def handle_text(self, chat_id: str, text: str, *, user_name: str = "") -> str:
         command_reply = self._handle_command(chat_id, text)
@@ -253,7 +269,7 @@ class AssistantAgent:
             tool = str(continuation.get("tool", "")).strip()
             action = str(continuation.get("action", "")).strip()
             params = continuation.get("params", {})
-            if tool != "workspace" or not action or not isinstance(params, dict):
+            if not tool or not action or not isinstance(params, dict):
                 return grant_message
             result = self.tools.invoke(
                 tool,
@@ -363,7 +379,12 @@ class AssistantAgent:
             '- use "git_status" when the user wants local git state\n'
             '- use "prepare_git_action" for local git mutations such as stage, restore, or commit\n'
             '- use "prepare_shell_action" for local non-interactive commands in an approved root\n'
+            "If using the knowledge tool:\n"
+            '- use "analyze_paths" to inspect readable file contents from local paths\n'
+            '- use "summarize_folder" to summarize a folder of readable files\n'
+            '- use "answer_from_paths" when the user asks a question about local files, notes, code, or configs\n'
             "Important: workspace mutation actions are preview-only until the user approves them with a command.\n"
+            "Important: knowledge is read-only and grounded in extracted local file content.\n"
             "Important: search_web and run_objective both execute real browser actions. Do not invent unsupported actions.\n"
             "- Include only parameters needed for the action.\n"
             f"Available tools: {json.dumps(available_tools, ensure_ascii=True)}"
@@ -404,8 +425,8 @@ class AssistantAgent:
         result: ToolResult,
     ) -> str:
         tool_result_text = self._format_tool_result(result)
-        if decision["tool"] == "workspace":
-            LOGGER.info("workspace tool result returned directly to avoid hallucinated summaries")
+        if decision["tool"] in {"workspace", "knowledge"}:
+            LOGGER.info("%s tool result returned directly to avoid hallucinated summaries", decision["tool"])
             return tool_result_text
         if result.data.get("implemented") is False or result.needs_confirmation:
             LOGGER.info("tool result is scaffold-only; returning raw tool result to avoid overclaiming")
@@ -454,8 +475,16 @@ class AssistantAgent:
             lines.append(f"Kind: {data['kind']}")
         if "entry_count" in data and data["entry_count"] and data.get("kind") == "directory":
             lines.append(f"Total entries: {data['entry_count']}")
+        if "grounded" in data:
+            lines.append(f"Grounded: {data['grounded']}")
+        if "partial" in data:
+            lines.append(f"Partial: {data['partial']}")
         if "text" in data and data["text"]:
             lines.append(f"Text: {str(data['text'])[:800]}")
+        if "answer" in data and data["answer"]:
+            lines.append(f"Answer:\n{str(data['answer'])[:2000]}")
+        if "summary_text" in data and data["summary_text"]:
+            lines.append(f"Summary:\n{str(data['summary_text'])[:2000]}")
         if "request_id" in data and data["request_id"]:
             lines.append(f"Request: {data['request_id']}")
         if "request_kind" in data and data["request_kind"]:
@@ -476,6 +505,22 @@ class AssistantAgent:
             lines.append("Touched files:")
             for file_path in data["touched_files"][:10]:
                 lines.append(f"- {file_path}")
+        if "supported_files" in data and data["supported_files"]:
+            lines.append("Supported files:")
+            for item in data["supported_files"][:10]:
+                lines.append(f"- {item['path']}")
+        if "unsupported_files" in data and data["unsupported_files"]:
+            lines.append("Unsupported files:")
+            for item in data["unsupported_files"][:10]:
+                lines.append(f"- {item['path']}: {item['reason']}")
+        if "scanned_files" in data and data["scanned_files"]:
+            lines.append(f"Scanned files: {data['scanned_files']}")
+        if "scan_truncated" in data:
+            lines.append(f"Scan truncated: {data['scan_truncated']}")
+        if "citations" in data and data["citations"]:
+            lines.append("Citations:")
+            for item in data["citations"][:6]:
+                lines.append(f"- {item['path']} [{item['chunk_id']}]")
         if "diff_preview" in data and data["diff_preview"]:
             lines.append(f"Diff preview:\n{str(data['diff_preview'])[:1500]}")
         if "command" in data and data["command"]:
@@ -702,4 +747,68 @@ class AssistantAgent:
         return {
             "summary": str(parsed.get("summary", "Prepared workspace change.")),
             "edits": edits,
+        }
+
+    def _summarize_knowledge_documents_via_llm(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        chunks = payload.get("chunks", [])
+        if not isinstance(chunks, list) or not chunks:
+            return None
+        prompt = (
+            "You are JClaw's knowledge summarizer.\n"
+            "Summarize only from the provided local file chunks.\n"
+            "Do not invent facts or files. If the evidence is weak, say so.\n"
+            "Return strict JSON only with schema:\n"
+            '{"summary": string, "cited_chunk_ids": [string]}\n'
+            "Only cite chunk ids that appear in the payload."
+        )
+        raw = self.llm.chat(
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=True)},
+            ]
+        )
+        LOGGER.info("knowledge summarizer raw response: %s", raw)
+        parsed = self._parse_json_object(raw)
+        if not parsed:
+            return None
+        cited_chunk_ids = parsed.get("cited_chunk_ids", [])
+        if not isinstance(cited_chunk_ids, list):
+            cited_chunk_ids = []
+        return {
+            "summary": str(parsed.get("summary", "")).strip(),
+            "cited_chunk_ids": [str(item).strip() for item in cited_chunk_ids if str(item).strip()],
+        }
+
+    def _answer_from_knowledge_documents_via_llm(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        chunks = payload.get("chunks", [])
+        question = str(payload.get("question", "")).strip()
+        if not isinstance(chunks, list) or not chunks or not question:
+            return None
+        prompt = (
+            "You are JClaw's grounded knowledge answerer.\n"
+            "Answer only from the provided local file chunks.\n"
+            "If the evidence is insufficient, say that directly.\n"
+            "Do not invent facts, file contents, or citations.\n"
+            "Return strict JSON only with schema:\n"
+            '{"answer": string, "cited_chunk_ids": [string], "grounded": boolean, "partial": boolean}\n'
+            "Only cite chunk ids that appear in the payload."
+        )
+        raw = self.llm.chat(
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=True)},
+            ]
+        )
+        LOGGER.info("knowledge answerer raw response: %s", raw)
+        parsed = self._parse_json_object(raw)
+        if not parsed:
+            return None
+        cited_chunk_ids = parsed.get("cited_chunk_ids", [])
+        if not isinstance(cited_chunk_ids, list):
+            cited_chunk_ids = []
+        return {
+            "answer": str(parsed.get("answer", "")).strip(),
+            "cited_chunk_ids": [str(item).strip() for item in cited_chunk_ids if str(item).strip()],
+            "grounded": bool(parsed.get("grounded", False)),
+            "partial": bool(parsed.get("partial", True)),
         }

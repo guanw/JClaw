@@ -7,8 +7,12 @@ from jclaw.core.defaults import (
     BROWSER_MAX_RESEARCH_SOURCES,
     BROWSER_VIEWPORT_HEIGHT,
     BROWSER_VIEWPORT_WIDTH,
+    KNOWLEDGE_MAX_ANSWER_CITATIONS,
+    KNOWLEDGE_MAX_CHUNKS_PER_FILE,
     KNOWLEDGE_MAX_FILE_READ_BYTES,
     KNOWLEDGE_MAX_FOLDER_SCAN_FILES,
+    KNOWLEDGE_MAX_TOTAL_CHUNKS,
+    KNOWLEDGE_TEXT_PREVIEW_CHARS,
     WORKSPACE_MAX_FILES_PER_CHANGE,
     WORKSPACE_MAX_INTERNAL_READ_BYTES,
     WORKSPACE_MAX_PATH_ENTRIES,
@@ -244,6 +248,10 @@ def test_workspace_and_knowledge_defaults_are_centralized(tmp_path) -> None:
     assert config.workspace.max_internal_read_bytes == WORKSPACE_MAX_INTERNAL_READ_BYTES
     assert config.knowledge.max_file_read_bytes == KNOWLEDGE_MAX_FILE_READ_BYTES
     assert config.knowledge.max_folder_scan_files == KNOWLEDGE_MAX_FOLDER_SCAN_FILES
+    assert config.knowledge.max_chunks_per_file == KNOWLEDGE_MAX_CHUNKS_PER_FILE
+    assert config.knowledge.max_total_chunks == KNOWLEDGE_MAX_TOTAL_CHUNKS
+    assert config.knowledge.text_preview_chars == KNOWLEDGE_TEXT_PREVIEW_CHARS
+    assert config.knowledge.max_answer_citations == KNOWLEDGE_MAX_ANSWER_CITATIONS
 
 
 def test_workspace_preview_pauses_until_approval(tmp_path) -> None:
@@ -403,4 +411,45 @@ def test_workspace_grant_approval_resumes_inspect_root(tmp_path) -> None:
     assert "Granted read access" in approval_reply
     assert "Inspected" in approval_reply
     assert "notes.txt" in approval_reply
+    db.close()
+
+
+def test_llm_selected_tool_routes_to_knowledge_and_returns_raw_result(tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    target = repo_root / "notes.txt"
+    target.write_text("Project owner is guan.\n", encoding="utf-8")
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=repo_root,
+    )
+    db = Database(config.daemon.db_path)
+    db.upsert_grant(str(repo_root.resolve()), ("read",), "chat-1")
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"use_tool": true, "tool": "knowledge", "action": "answer_from_paths", "params": {"paths": ["notes.txt"], "question": "Who is the project owner?"}, "reason": "The user is asking about local file contents."}',
+                '{"answer":"The project owner is guan.","cited_chunk_ids":["notes.txt:1"],"grounded":true,"partial":false}',
+                "Hallucinated post-processing that should not be used.",
+            ]
+        ),
+    )
+
+    reply = agent.handle_text("chat-1", "who is the project owner in notes.txt?")
+    assert "Answer:" in reply
+    assert "The project owner is guan." in reply
+    assert "Citations:" in reply
+    assert "notes.txt [notes.txt:1]" in reply
+    assert "Hallucinated post-processing" not in reply
     db.close()

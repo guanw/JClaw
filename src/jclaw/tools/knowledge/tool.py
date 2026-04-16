@@ -1,12 +1,66 @@
 from __future__ import annotations
 
-from typing import Any
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+import re
+from typing import Any, Callable
 
+from jclaw.core.db import Database
+from jclaw.core.defaults import (
+    KNOWLEDGE_MAX_ANSWER_CITATIONS,
+    KNOWLEDGE_MAX_CHUNKS_PER_FILE,
+    KNOWLEDGE_MAX_FILE_READ_BYTES,
+    KNOWLEDGE_MAX_FOLDER_SCAN_FILES,
+    KNOWLEDGE_MAX_TOTAL_CHUNKS,
+    KNOWLEDGE_TEXT_PREVIEW_CHARS,
+)
 from jclaw.tools.base import ToolContext, ToolResult
+from jclaw.tools.knowledge.models import DocumentChunk, ExtractedDocument
+from jclaw.tools.knowledge.registry import KnowledgeReaderRegistry
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class KnowledgeTool:
     name = "knowledge"
+    COMMON_HOME_FOLDERS = {
+        "Desktop",
+        "Documents",
+        "Downloads",
+        "Movies",
+        "Music",
+        "Pictures",
+        "Library",
+    }
+
+    def __init__(
+        self,
+        db: Database,
+        base_dir: str | Path,
+        repo_root: str | Path,
+        *,
+        summarize_documents: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+        answer_question: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> None:
+        self.db = db
+        self.root = Path(base_dir)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.repo_root = Path(repo_root).expanduser().resolve()
+        self.home_dir = Path.home().expanduser().resolve()
+        self._summarize_documents = summarize_documents
+        self._answer_question = answer_question
+        options = options or {}
+        self.max_file_read_bytes = int(options.get("max_file_read_bytes", KNOWLEDGE_MAX_FILE_READ_BYTES))
+        self.max_folder_scan_files = int(options.get("max_folder_scan_files", KNOWLEDGE_MAX_FOLDER_SCAN_FILES))
+        self.max_chunks_per_file = int(options.get("max_chunks_per_file", KNOWLEDGE_MAX_CHUNKS_PER_FILE))
+        self.max_total_chunks = int(options.get("max_total_chunks", KNOWLEDGE_MAX_TOTAL_CHUNKS))
+        self.text_preview_chars = int(options.get("text_preview_chars", KNOWLEDGE_TEXT_PREVIEW_CHARS))
+        self.max_answer_citations = int(options.get("max_answer_citations", KNOWLEDGE_MAX_ANSWER_CITATIONS))
+        self.registry = KnowledgeReaderRegistry()
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -16,19 +70,459 @@ class KnowledgeTool:
                 "summarize_folder",
                 "answer_from_paths",
             ],
-            "implemented": False,
-            "scaffold_only": True,
+            "implemented": True,
+            "grounded": True,
+            "read_only": True,
         }
 
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        if action not in {"analyze_paths", "summarize_folder", "answer_from_paths"}:
+        handlers = {
+            "analyze_paths": self._analyze_paths,
+            "summarize_folder": self._summarize_folder,
+            "answer_from_paths": self._answer_from_paths,
+        }
+        if action not in handlers:
             raise ValueError(f"unsupported knowledge action: {action}")
+        self._trace_event("invoke_start", ctx=ctx, action=action, params=params)
+        try:
+            result = handlers[action](params, ctx)
+        except Exception as exc:  # noqa: BLE001
+            self._trace_event("invoke_error", ctx=ctx, action=action, params=params, error=str(exc))
+            raise
+        self._trace_event(
+            "invoke_finish",
+            ctx=ctx,
+            action=action,
+            params=params,
+            result={"ok": result.ok, "summary": result.summary, "data": result.data},
+        )
+        return result
+
+    def _analyze_paths(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        question = str(params.get("question", "")).strip()
+        requested_paths = self._coerce_paths(params)
+        if not requested_paths:
+            return ToolResult(ok=False, summary="No paths were provided for analysis.", data={})
+        permission = self._ensure_read_grants(
+            requested_paths,
+            ctx=ctx,
+            objective=question or "Analyze local files",
+            continuation_action="analyze_paths",
+            continuation_params=params,
+        )
+        if permission is not None:
+            return permission
+        docs, unsupported, scan_meta = self._collect_documents(requested_paths)
+        payload = self._build_analysis_payload(docs, unsupported, scan_meta)
         return ToolResult(
             ok=True,
-            summary="Knowledge tool scaffold is registered but not implemented yet.",
-            data={
-                "implemented": False,
-                "action": action,
-                "paths": params.get("paths", []),
+            summary=f"Analyzed {len(payload['supported_files'])} readable file(s).",
+            data=payload,
+        )
+
+    def _summarize_folder(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        raw_path = params.get("path") or params.get("root_path")
+        if not raw_path:
+            return ToolResult(ok=False, summary="No folder path was provided.", data={})
+        folder_path = self._resolve_target_path(raw_path)
+        permission = self._ensure_read_grants(
+            [folder_path],
+            ctx=ctx,
+            objective=str(params.get("objective", "Summarize folder contents")).strip(),
+            continuation_action="summarize_folder",
+            continuation_params=params,
+        )
+        if permission is not None:
+            return permission
+        docs, unsupported, scan_meta = self._collect_documents([folder_path])
+        payload = self._build_analysis_payload(docs, unsupported, scan_meta)
+        if not docs:
+            payload.update({"grounded": False, "partial": bool(unsupported), "answer": ""})
+            return ToolResult(
+                ok=True,
+                summary="No readable files were found in the requested folder.",
+                data=payload,
+            )
+        summary_result = self._run_summary_model(payload)
+        payload.update(summary_result)
+        return ToolResult(
+            ok=True,
+            summary="Summarized readable files in the requested folder.",
+            data=payload,
+        )
+
+    def _answer_from_paths(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        question = str(params.get("question", "")).strip()
+        if not question:
+            return ToolResult(ok=False, summary="No question was provided for knowledge lookup.", data={})
+        requested_paths = self._coerce_paths(params)
+        if not requested_paths:
+            return ToolResult(ok=False, summary="No paths were provided for knowledge lookup.", data={})
+        permission = self._ensure_read_grants(
+            requested_paths,
+            ctx=ctx,
+            objective=question,
+            continuation_action="answer_from_paths",
+            continuation_params=params,
+        )
+        if permission is not None:
+            return permission
+        docs, unsupported, scan_meta = self._collect_documents(requested_paths)
+        payload = self._build_analysis_payload(docs, unsupported, scan_meta)
+        if not docs:
+            payload.update(
+                {
+                    "answer": "I could not find readable evidence in the requested paths.",
+                    "grounded": False,
+                    "partial": bool(unsupported),
+                    "citations": [],
+                }
+            )
+            return ToolResult(
+                ok=True,
+                summary="No readable evidence was available for the requested question.",
+                data=payload,
+            )
+        answer_result = self._run_answer_model(question, payload)
+        payload.update(answer_result)
+        return ToolResult(
+            ok=True,
+            summary="Answered from local file evidence.",
+            data=payload,
+        )
+
+    def _coerce_paths(self, params: dict[str, Any]) -> list[Path]:
+        raw_paths = params.get("paths")
+        items: list[str | Path] = []
+        if isinstance(raw_paths, list):
+            items.extend(raw_paths)
+        elif raw_paths not in (None, ""):
+            items.append(raw_paths)
+        elif params.get("path"):
+            items.append(params["path"])
+        return [self._resolve_target_path(item) for item in items if item not in (None, "")]
+
+    def _ensure_read_grants(
+        self,
+        requested_paths: list[Path],
+        *,
+        ctx: ToolContext,
+        objective: str,
+        continuation_action: str,
+        continuation_params: dict[str, Any],
+    ) -> ToolResult | None:
+        for requested_path in requested_paths:
+            root_path = self._default_root_for_path(requested_path)
+            if self._matching_grant(root_path, "read") is not None:
+                continue
+            request = self.db.create_approval_request(
+                kind="grant",
+                chat_id=ctx.chat_id,
+                root_path=str(root_path),
+                capabilities=("read",),
+                objective=objective,
+                payload={
+                    "message": f"Grant read access to {root_path}",
+                    "continuation": {
+                        "tool": self.name,
+                        "action": continuation_action,
+                        "params": continuation_params,
+                    },
+                },
+            )
+            return ToolResult(
+                ok=True,
+                summary=(
+                    f"Approval required to grant read access for {root_path}. "
+                    f"Use /approve {request.request_id} or /deny {request.request_id}."
+                ),
+                data={
+                    "request_id": request.request_id,
+                    "request_kind": request.kind,
+                    "root_path": str(root_path),
+                    "capabilities": ["read"],
+                },
+                needs_confirmation=True,
+            )
+        return None
+
+    def _collect_documents(
+        self,
+        requested_paths: list[Path],
+    ) -> tuple[list[ExtractedDocument], list[dict[str, str]], dict[str, Any]]:
+        documents: list[ExtractedDocument] = []
+        unsupported: list[dict[str, str]] = []
+        scanned_files = 0
+        truncated = False
+        for requested_path in requested_paths:
+            for file_path in self._expand_files(requested_path):
+                if scanned_files >= self.max_folder_scan_files:
+                    truncated = True
+                    break
+                scanned_files += 1
+                reader = self.registry.get_reader(file_path)
+                if reader is None:
+                    unsupported.append({"path": str(file_path), "reason": "Unsupported file type."})
+                    continue
+                document = reader.extract(file_path, max_bytes=self.max_file_read_bytes)
+                if not document.text.strip():
+                    unsupported.append({"path": str(file_path), "reason": "No readable text extracted."})
+                    continue
+                documents.append(document)
+            if scanned_files >= self.max_folder_scan_files:
+                break
+        return (
+            documents,
+            unsupported,
+            {
+                "requested_paths": [str(path) for path in requested_paths],
+                "scanned_files": scanned_files,
+                "scan_truncated": truncated,
             },
         )
+
+    def _build_analysis_payload(
+        self,
+        documents: list[ExtractedDocument],
+        unsupported: list[dict[str, str]],
+        scan_meta: dict[str, Any],
+    ) -> dict[str, Any]:
+        chunks = self._chunk_documents(documents)
+        supported_files = []
+        for document in documents:
+            supported_files.append(
+                {
+                    "path": document.path,
+                    "title": document.title,
+                    "file_type": document.file_type,
+                    "preview": document.text[: self.text_preview_chars],
+                    "warnings": document.warnings,
+                }
+            )
+        return {
+            "requested_paths": scan_meta["requested_paths"],
+            "supported_files": supported_files,
+            "unsupported_files": unsupported,
+            "chunks": [
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "path": chunk.path,
+                    "text": chunk.text,
+                    "start_offset": chunk.start_offset,
+                    "end_offset": chunk.end_offset,
+                }
+                for chunk in chunks
+            ],
+            "citations": [],
+            "grounded": bool(documents),
+            "partial": bool(unsupported) or bool(scan_meta["scan_truncated"]),
+            "scanned_files": scan_meta["scanned_files"],
+            "scan_truncated": scan_meta["scan_truncated"],
+        }
+
+    def _run_summary_model(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._summarize_documents is None:
+            citations = self._select_citations(payload["chunks"], [])
+            return {
+                "answer": "",
+                "summary_text": "Readable files were extracted, but no knowledge summarizer is configured.",
+                "citations": citations,
+                "grounded": False,
+                "partial": True,
+            }
+        result = self._summarize_documents(payload)
+        summary_text = ""
+        cited_ids: list[str] = []
+        if isinstance(result, dict):
+            summary_text = str(result.get("summary", "")).strip()
+            raw_ids = result.get("cited_chunk_ids", [])
+            if isinstance(raw_ids, list):
+                cited_ids = [str(item).strip() for item in raw_ids if str(item).strip()]
+        citations = self._select_citations(payload["chunks"], cited_ids)
+        return {
+            "answer": "",
+            "summary_text": summary_text or "Summary unavailable.",
+            "citations": citations,
+            "grounded": bool(citations),
+            "partial": payload["partial"] or not bool(citations),
+        }
+
+    def _run_answer_model(self, question: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._answer_question is None:
+            citations = self._select_citations(payload["chunks"], [])
+            return {
+                "answer": "Knowledge answering is unavailable because no answer model is configured.",
+                "citations": citations,
+                "grounded": False,
+                "partial": True,
+            }
+        result = self._answer_question({"question": question, **payload})
+        answer = ""
+        cited_ids: list[str] = []
+        grounded = False
+        partial = True
+        if isinstance(result, dict):
+            answer = str(result.get("answer", "")).strip()
+            raw_ids = result.get("cited_chunk_ids", [])
+            if isinstance(raw_ids, list):
+                cited_ids = [str(item).strip() for item in raw_ids if str(item).strip()]
+            grounded = bool(result.get("grounded", False))
+            partial = bool(result.get("partial", False))
+        citations = self._select_citations(payload["chunks"], cited_ids)
+        if not citations:
+            grounded = False
+            partial = True
+        if not answer:
+            answer = "I could not answer the question from the extracted file evidence."
+        return {
+            "answer": answer,
+            "citations": citations,
+            "grounded": grounded,
+            "partial": partial or payload["partial"],
+        }
+
+    def _select_citations(
+        self,
+        chunks: list[dict[str, Any]],
+        cited_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        chunk_map = {str(item["chunk_id"]): item for item in chunks}
+        citations: list[dict[str, Any]] = []
+        for chunk_id in cited_ids[: self.max_answer_citations]:
+            chunk = chunk_map.get(chunk_id)
+            if not chunk:
+                continue
+            citations.append(
+                {
+                    "chunk_id": chunk_id,
+                    "path": str(chunk["path"]),
+                    "excerpt": str(chunk["text"])[: self.text_preview_chars],
+                    "start_offset": int(chunk["start_offset"]),
+                    "end_offset": int(chunk["end_offset"]),
+                }
+            )
+        return citations
+
+    def _chunk_documents(self, documents: list[ExtractedDocument]) -> list[DocumentChunk]:
+        chunks: list[DocumentChunk] = []
+        max_chars = max(600, self.text_preview_chars * 3)
+        for document in documents:
+            start = 0
+            for chunk_index in range(self.max_chunks_per_file):
+                if start >= len(document.text):
+                    break
+                end = min(len(document.text), start + max_chars)
+                chunk_text = document.text[start:end].strip()
+                if chunk_text:
+                    chunks.append(
+                        DocumentChunk(
+                            chunk_id=f"{Path(document.path).name}:{chunk_index + 1}",
+                            path=document.path,
+                            text=chunk_text,
+                            start_offset=start,
+                            end_offset=end,
+                        )
+                    )
+                if len(chunks) >= self.max_total_chunks:
+                    return chunks
+                start = end
+        return chunks
+
+    def _expand_files(self, requested_path: Path) -> list[Path]:
+        if requested_path.exists() and requested_path.is_file():
+            return [requested_path]
+        if not requested_path.exists() or not requested_path.is_dir():
+            return []
+        files: list[Path] = []
+        for path in requested_path.rglob("*"):
+            if len(files) >= self.max_folder_scan_files:
+                break
+            if any(part.startswith(".") and part not in {".github"} for part in path.parts):
+                continue
+            if any(part in {"node_modules", ".venv", "__pycache__", ".git"} for part in path.parts):
+                continue
+            if path.is_file():
+                files.append(path)
+        return files
+
+    def _matching_grant(self, path: Path, capability: str) -> Any:
+        target = self._canonicalize_path(path)
+        best_match = None
+        best_length = -1
+        for grant in self.db.list_grants(active_only=True):
+            if capability not in grant.capabilities:
+                continue
+            root = self._canonicalize_path(grant.root_path)
+            if self._path_within(target, root):
+                length = len(root.parts)
+                if length > best_length:
+                    best_match = grant
+                    best_length = length
+        return best_match
+
+    def _resolve_target_path(self, value: str | Path | None) -> Path:
+        if value in (None, ""):
+            return self.repo_root
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = self.repo_root / path
+        return self._normalize_user_home_path(path).resolve(strict=False)
+
+    def _canonicalize_path(self, value: str | Path) -> Path:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = self.repo_root / path
+        return self._normalize_user_home_path(path).resolve(strict=False)
+
+    def _normalize_user_home_path(self, path: Path) -> Path:
+        parts = path.parts
+        if len(parts) < 3 or parts[0] != "/" or parts[1] != "Users":
+            return path
+        requested_user = parts[2]
+        current_user = self.home_dir.name
+        if requested_user == current_user:
+            return path
+        remainder = parts[3:]
+        candidate = self.home_dir.joinpath(*remainder) if remainder else self.home_dir
+        if path.exists():
+            return path
+        if remainder and remainder[0] not in self.COMMON_HOME_FOLDERS:
+            return path
+        return candidate
+
+    def _default_root_for_path(self, path: Path) -> Path:
+        if path.exists() and path.is_dir():
+            return path
+        return path.parent if path.parent != Path("") else self.repo_root
+
+    def _path_within(self, path: Path, root: Path) -> bool:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+    def _trace_event(
+        self,
+        event: str,
+        *,
+        ctx: ToolContext,
+        action: str,
+        params: dict[str, Any],
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        payload = {
+            "timestamp": _utc_now(),
+            "event": event,
+            "chat_id": ctx.chat_id,
+            "user_id": ctx.user_id,
+            "action": action,
+            "params": params,
+        }
+        if result is not None:
+            payload["result"] = result
+        if error is not None:
+            payload["error"] = error
+        with (self.root / "events.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=True) + "\n")

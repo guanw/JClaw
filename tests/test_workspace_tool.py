@@ -5,7 +5,6 @@ import subprocess
 
 from jclaw.core.db import Database
 from jclaw.tools.base import ToolContext
-from jclaw.tools.knowledge.tool import KnowledgeTool
 from jclaw.tools.workspace.tool import WorkspaceTool
 
 
@@ -208,10 +207,3 @@ def test_prepare_shell_action_enforces_policy_and_apply_runs_locally(tmp_path) -
     assert applied.ok is True
     assert str(root.resolve()) in applied.data["stdout"]
     db.close()
-
-
-def test_knowledge_tool_is_scaffold_only() -> None:
-    tool = KnowledgeTool()
-    result = tool.invoke("analyze_paths", {"paths": ["/tmp/example.txt"]}, ToolContext(chat_id="chat-1"))
-    assert result.ok is True
-    assert result.data["implemented"] is False

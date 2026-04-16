@@ -18,8 +18,12 @@ from jclaw.core.defaults import (
     DAEMON_IDLE_SLEEP_SECONDS,
     DAEMON_LAUNCHD_LABEL,
     KNOWLEDGE_ENABLED,
+    KNOWLEDGE_MAX_ANSWER_CITATIONS,
+    KNOWLEDGE_MAX_CHUNKS_PER_FILE,
     KNOWLEDGE_MAX_FILE_READ_BYTES,
     KNOWLEDGE_MAX_FOLDER_SCAN_FILES,
+    KNOWLEDGE_MAX_TOTAL_CHUNKS,
+    KNOWLEDGE_TEXT_PREVIEW_CHARS,
     MEMORY_MAX_CONTEXT_MESSAGES,
     MEMORY_MAX_MEMORY_ITEMS,
     PROVIDER_MAX_TOKENS,
@@ -132,6 +136,10 @@ class KnowledgeConfig:
     enabled: bool = KNOWLEDGE_ENABLED
     max_file_read_bytes: int = KNOWLEDGE_MAX_FILE_READ_BYTES
     max_folder_scan_files: int = KNOWLEDGE_MAX_FOLDER_SCAN_FILES
+    max_chunks_per_file: int = KNOWLEDGE_MAX_CHUNKS_PER_FILE
+    max_total_chunks: int = KNOWLEDGE_MAX_TOTAL_CHUNKS
+    text_preview_chars: int = KNOWLEDGE_TEXT_PREVIEW_CHARS
+    max_answer_citations: int = KNOWLEDGE_MAX_ANSWER_CITATIONS
 
 
 @dataclass(slots=True)
@@ -210,6 +218,10 @@ max_internal_read_bytes = {WORKSPACE_MAX_INTERNAL_READ_BYTES}
 enabled = {str(KNOWLEDGE_ENABLED).lower()}
 max_file_read_bytes = {KNOWLEDGE_MAX_FILE_READ_BYTES}
 max_folder_scan_files = {KNOWLEDGE_MAX_FOLDER_SCAN_FILES}
+max_chunks_per_file = {KNOWLEDGE_MAX_CHUNKS_PER_FILE}
+max_total_chunks = {KNOWLEDGE_MAX_TOTAL_CHUNKS}
+text_preview_chars = {KNOWLEDGE_TEXT_PREVIEW_CHARS}
+max_answer_citations = {KNOWLEDGE_MAX_ANSWER_CITATIONS}
 """
 
 
@@ -289,6 +301,18 @@ def load_config(path: str | Path | None = None) -> Config:
         ),
         max_folder_scan_files=int(
             knowledge_data.get("max_folder_scan_files", KNOWLEDGE_MAX_FOLDER_SCAN_FILES)
+        ),
+        max_chunks_per_file=int(
+            knowledge_data.get("max_chunks_per_file", KNOWLEDGE_MAX_CHUNKS_PER_FILE)
+        ),
+        max_total_chunks=int(
+            knowledge_data.get("max_total_chunks", KNOWLEDGE_MAX_TOTAL_CHUNKS)
+        ),
+        text_preview_chars=int(
+            knowledge_data.get("text_preview_chars", KNOWLEDGE_TEXT_PREVIEW_CHARS)
+        ),
+        max_answer_citations=int(
+            knowledge_data.get("max_answer_citations", KNOWLEDGE_MAX_ANSWER_CITATIONS)
         ),
     )
 
