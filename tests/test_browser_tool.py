@@ -1,10 +1,27 @@
 from jclaw.tools.base import ToolContext
+from jclaw.tools.browser.models import BrowserReasoner
 from jclaw.tools.browser.tool import BrowserTool
 
 
 def _stub_browser(tool: BrowserTool) -> BrowserTool:
     tool.playwright = tool.desktop
     return tool
+
+
+class StubBrowserReasoner:
+    def __init__(self, *, chosen_link=None, next_action=None) -> None:  # noqa: ANN001
+        self._chosen_link = chosen_link
+        self._next_action = next_action
+
+    def choose_link(self, objective: str, page_data: dict) -> str | None:  # noqa: ANN001
+        if callable(self._chosen_link):
+            return self._chosen_link(objective, page_data)
+        return self._chosen_link
+
+    def decide_next_action(self, objective: str, page_data: dict, sources: list[dict]) -> dict | None:  # noqa: ANN001
+        if callable(self._next_action):
+            return self._next_action(objective, page_data, sources)
+        return self._next_action
 
 
 def test_browser_tool_lists_actions(tmp_path) -> None:
@@ -68,7 +85,7 @@ def test_choose_follow_up_url_prefers_llm_choice(tmp_path) -> None:
     tool = _stub_browser(
         BrowserTool(
             tmp_path,
-            choose_link=lambda objective, page_data: "https://chosen.example.com/story",
+            reasoner=StubBrowserReasoner(chosen_link="https://chosen.example.com/story"),
         )
     )
     url = tool._choose_follow_up_url(  # noqa: SLF001
@@ -138,11 +155,11 @@ def test_run_objective_feedback_loop_follows_until_complete(tmp_path) -> None:
     tool = _stub_browser(
         BrowserTool(
             tmp_path,
-            choose_next_action=lambda objective, page_data, sources: (
+            reasoner=StubBrowserReasoner(next_action=lambda objective, page_data, sources: (
                 {"status": "follow", "url": "https://example.com/source-1", "reason": "Need one concrete source."}
                 if not sources
                 else {"status": "complete", "url": None, "reason": "Enough evidence gathered."}
-            ),
+            )),
         )
     )
 
@@ -215,11 +232,11 @@ def test_run_objective_stops_when_controller_sees_no_meaningful_progress(tmp_pat
     tool = _stub_browser(
         BrowserTool(
             tmp_path,
-            choose_next_action=lambda objective, page_data, sources: {
+            reasoner=StubBrowserReasoner(next_action=lambda objective, page_data, sources: {
                 "status": "stop",
                 "url": None,
                 "reason": "No meaningful result pages were found.",
-            },
+            }),
         )
     )
 

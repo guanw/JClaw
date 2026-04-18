@@ -154,7 +154,8 @@ def test_choose_browser_link_uses_inspected_elements(tmp_path) -> None:
         SequenceLLM(['{"chosen_element_id": "e2", "reason": "This is the relevant article."}']),
     )
 
-    href = agent._choose_browser_link_via_llm(  # noqa: SLF001
+    browser = agent.tools.get("browser")
+    href = browser._choose_follow_up_url_via_llm(  # noqa: SLF001
         "latest deepseek news",
         {
             "url": "https://html.duckduckgo.com/html/?q=latest+deepseek+news",
@@ -192,7 +193,8 @@ def test_choose_browser_next_action_uses_controller_output(tmp_path) -> None:
         SequenceLLM(['{"status":"follow","chosen_element_id":"e2","reason":"Reuters market page is the strongest next source."}']),
     )
 
-    decision = agent._choose_browser_next_action_via_llm(  # noqa: SLF001
+    browser = agent.tools.get("browser")
+    decision = browser._decide_next_action_via_llm(  # noqa: SLF001
         "latest trend on us stock market",
         {
             "url": "https://html.duckduckgo.com/html/?q=us+stock+market+trend",

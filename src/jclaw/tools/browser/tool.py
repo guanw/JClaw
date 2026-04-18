@@ -19,11 +19,30 @@ from jclaw.core.defaults import (
 from jclaw.tools.base import ToolContext, ToolResult
 from jclaw.tools.browser.artifacts import BrowserArtifactStore
 from jclaw.tools.browser.desktop_driver import DesktopBrowserDriver
-from jclaw.tools.browser.models import Target
+from jclaw.tools.browser.models import BrowserReasoner, Target
 from jclaw.tools.browser.permissions import check_permissions
-from jclaw.tools.browser.planner import BrowserPlanner
 from jclaw.tools.browser.playwright_driver import PlaywrightBrowserDriver
 from jclaw.tools.browser.session import BrowserSessionStore
+
+
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        parsed = json.loads(cleaned)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        return None
 
 
 class BrowserTool:
@@ -33,8 +52,8 @@ class BrowserTool:
         self,
         base_dir: str | Path,
         options: dict[str, Any] | None = None,
-        choose_link: Callable[[str, dict[str, Any]], str | None] | None = None,
-        choose_next_action: Callable[[str, dict[str, Any], list[dict[str, str]]], dict[str, Any] | None] | None = None,
+        llm_chat: Callable[[list[dict[str, str]]], str] | None = None,
+        reasoner: BrowserReasoner | None = None,
     ) -> None:
         root = Path(base_dir)
         root.mkdir(parents=True, exist_ok=True)
@@ -50,10 +69,8 @@ class BrowserTool:
             viewport_height=int(options.get("viewport_height", BROWSER_VIEWPORT_HEIGHT)) if options else BROWSER_VIEWPORT_HEIGHT,
         )
         self.desktop = DesktopBrowserDriver()
-        self.planner = BrowserPlanner()
         self._chat_sessions: dict[str, str] = {}
-        self._choose_link = choose_link
-        self._choose_next_action = choose_next_action
+        self._reasoner = reasoner or (LLMBrowserReasoner(llm_chat) if llm_chat is not None else None)
         self.max_objective_steps = (
             int(options.get("max_objective_steps", BROWSER_MAX_OBJECTIVE_STEPS))
             if options
@@ -512,10 +529,10 @@ class BrowserTool:
         return urls
 
     def _choose_follow_up_url_via_llm(self, objective: str, page_data: dict[str, Any]) -> str | None:
-        if self._choose_link is None:
+        if self._reasoner is None:
             return None
         try:
-            return self._choose_link(objective, page_data)
+            return self._reasoner.choose_link(objective, page_data)
         except Exception:  # noqa: BLE001
             return None
 
@@ -570,10 +587,10 @@ class BrowserTool:
         page_data: dict[str, Any],
         sources: list[dict[str, str]],
     ) -> dict[str, Any] | None:
-        if self._choose_next_action is None:
+        if self._reasoner is None:
             return None
         try:
-            return self._choose_next_action(objective, page_data, sources)
+            return self._reasoner.decide_next_action(objective, page_data, sources)
         except Exception:  # noqa: BLE001
             return None
 
@@ -685,3 +702,147 @@ class BrowserTool:
         )
         haystack = f"{lowered_text} {lowered_href}"
         return any(token in haystack for token in positive_tokens)
+
+
+class LLMBrowserReasoner:
+    def __init__(self, llm_chat: Callable[[list[dict[str, str]]], str]) -> None:
+        self._llm_chat = llm_chat
+
+    def choose_link(self, objective: str, page_data: dict[str, Any]) -> str | None:
+        elements = page_data.get("elements", [])
+        if not isinstance(elements, list) or not elements:
+            return None
+        compact_elements: list[dict[str, Any]] = []
+        for item in elements[:20]:
+            if not isinstance(item, dict):
+                continue
+            href = str(item.get("href", "")).strip()
+            role = str(item.get("role", "")).strip()
+            text = str(item.get("text", "")).strip()
+            if role != "link":
+                continue
+            if not href.startswith("http"):
+                continue
+            compact_elements.append(
+                {
+                    "id": str(item.get("id", "")),
+                    "role": role,
+                    "text": text[:200],
+                    "href": href,
+                    "area": str(item.get("area", "")),
+                    "clickable": bool(item.get("clickable", False)),
+                    "score_hint": item.get("score_hint", 0),
+                }
+            )
+        if not compact_elements:
+            return None
+        chooser_prompt = (
+            "You are helping JClaw choose the next browser link to follow.\n"
+            "You are given a user objective and a compact inspected-elements snapshot from the current page.\n"
+            "Choose the single best link element that most likely advances the user's objective.\n"
+            "Avoid search-engine homepages, settings, privacy/help pages, app-store links, download/install pages, and obvious ads.\n"
+            "Prefer result/article/documentation/news pages that directly match the user's request.\n"
+            "Return strict JSON only with schema:\n"
+            '{"chosen_element_id": string | null, "reason": string}\n'
+            "Use null if none of the elements look useful."
+        )
+        chooser_payload = {
+            "objective": objective,
+            "page_url": page_data.get("url", ""),
+            "page_title": page_data.get("title", ""),
+            "page_kind": page_data.get("page_kind", ""),
+            "page_text_preview": str(page_data.get("text", ""))[:800],
+            "elements": compact_elements,
+        }
+        raw = self._llm_chat(
+            [
+                {"role": "system", "content": chooser_prompt},
+                {"role": "user", "content": json.dumps(chooser_payload, ensure_ascii=True)},
+            ]
+        )
+        parsed = _parse_json_object(raw)
+        if not parsed:
+            return None
+        chosen_element_id = parsed.get("chosen_element_id")
+        if chosen_element_id in (None, "", "null"):
+            return None
+        chosen_id = str(chosen_element_id).strip()
+        for item in compact_elements:
+            if item.get("id") == chosen_id:
+                href = str(item.get("href", "")).strip()
+                return href if href.startswith("http") else None
+        return None
+
+    def decide_next_action(
+        self,
+        objective: str,
+        page_data: dict[str, Any],
+        sources: list[dict[str, str]],
+    ) -> dict[str, Any] | None:
+        elements = page_data.get("elements", [])
+        if not isinstance(elements, list):
+            return None
+        compact_elements: list[dict[str, Any]] = []
+        for item in elements[:20]:
+            if not isinstance(item, dict):
+                continue
+            href = str(item.get("href", "")).strip()
+            role = str(item.get("role", "")).strip()
+            text = str(item.get("text", "")).strip()
+            compact_elements.append(
+                {
+                    "id": str(item.get("id", "")),
+                    "role": role,
+                    "text": text[:180],
+                    "href": href,
+                    "area": str(item.get("area", "")),
+                    "clickable": bool(item.get("clickable", False)),
+                    "score_hint": item.get("score_hint", 0),
+                }
+            )
+        controller_prompt = (
+            "You are JClaw's browser controller.\n"
+            "Decide whether the current browser mission is complete, should continue by following one visible link, or should stop because no meaningful progress is likely.\n"
+            "Use only the provided page observation and gathered sources.\n"
+            "Prefer COMPLETE only when there is enough concrete information to answer the objective.\n"
+            "Prefer STOP when the page is low-signal, repetitive, blocked, or unlikely to add value.\n"
+            "Prefer FOLLOW when a visible link is likely to materially improve the answer.\n"
+            "Avoid describing future actions as completed work.\n"
+            "Return strict JSON only with schema:\n"
+            '{"status":"follow|complete|stop","chosen_element_id":string|null,"reason":string}\n'
+            "If status is follow, chosen_element_id must identify one visible link element from the snapshot.\n"
+            "If no meaningful link should be followed, return complete or stop."
+        )
+        payload = {
+            "objective": objective,
+            "current_page": {
+                "url": page_data.get("url", ""),
+                "title": page_data.get("title", ""),
+                "page_kind": page_data.get("page_kind", ""),
+                "text_preview": str(page_data.get("text", ""))[:1200],
+            },
+            "sources": sources[-3:],
+            "elements": compact_elements,
+        }
+        raw = self._llm_chat(
+            [
+                {"role": "system", "content": controller_prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=True)},
+            ]
+        )
+        parsed = _parse_json_object(raw)
+        if not parsed:
+            return None
+        status = str(parsed.get("status", "")).strip().lower()
+        if status not in {"follow", "complete", "stop"}:
+            return None
+        chosen_element_id = parsed.get("chosen_element_id")
+        if status != "follow":
+            return {"status": status, "url": None, "reason": str(parsed.get("reason", ""))}
+        chosen_id = None if chosen_element_id in (None, "", "null") else str(chosen_element_id).strip()
+        if not chosen_id:
+            return None
+        for item in compact_elements:
+            if item.get("id") == chosen_id and str(item.get("href", "")).startswith("http"):
+                return {"status": "follow", "url": str(item["href"]), "reason": str(parsed.get("reason", ""))}
+        return None

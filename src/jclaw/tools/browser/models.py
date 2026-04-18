@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 
 @dataclass(slots=True)
@@ -42,3 +42,16 @@ class InspectedElement:
     visible: bool = True
     selector_hint: str = ""
     score_hint: float = 0.0
+
+
+class BrowserReasoner(Protocol):
+    def choose_link(self, objective: str, page_data: dict[str, Any]) -> str | None:
+        ...
+
+    def decide_next_action(
+        self,
+        objective: str,
+        page_data: dict[str, Any],
+        sources: list[dict[str, str]],
+    ) -> dict[str, Any] | None:
+        ...
