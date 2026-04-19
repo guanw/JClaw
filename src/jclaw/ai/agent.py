@@ -417,7 +417,7 @@ class AssistantAgent:
                         "result": result,
                     }
                 )
-                if result.needs_confirmation or result.data.get("implemented") is False:
+                if result.needs_confirmation:
                     return self._compose_tool_reply(
                         chat_id,
                         text,
@@ -555,7 +555,6 @@ class AssistantAgent:
             "Use complete when the user's objective has already been satisfied by the latest tool output or when no tool is needed because the task can be answered directly without tools.\n"
             "Use stop when progress is blocked, evidence is insufficient to continue safely, or another tool call is unlikely to help.\n"
             "Do not require any hardcoded tool-specific rules from the caller; rely on the tool catalog and prior step results.\n"
-            "Do not choose any tool or action whose metadata says implemented=false or scaffold_only=true.\n"
             "Keep params minimal and choose only one next tool step.\n"
             "Return strict JSON only.\n"
             "Schema:\n"
@@ -614,7 +613,6 @@ class AssistantAgent:
         planner_data: dict[str, Any] = {
             "summary": result.summary,
             "needs_confirmation": result.needs_confirmation,
-            "implemented": data.get("implemented", True),
         }
         for key in (
             "root_path",
@@ -650,8 +648,6 @@ class AssistantAgent:
             if "actions" in tool:
                 entry["actions"] = tool["actions"]
             for key in (
-                "implemented",
-                "scaffold_only",
                 "dangerous",
                 "preview_required",
                 "read_only",
@@ -679,8 +675,8 @@ class AssistantAgent:
         if tool.describe().get("prefer_direct_result"):
             LOGGER.info("%s tool result returned directly based on tool metadata", decision["tool"])
             return tool_result_text
-        if result.data.get("implemented") is False or result.needs_confirmation:
-            LOGGER.info("tool result is scaffold-only; returning raw tool result to avoid overclaiming")
+        if result.needs_confirmation:
+            LOGGER.info("tool result requires confirmation; returning raw tool result")
             return tool_result_text
         messages = self._build_messages(chat_id, user_text=text, user_name=user_name)
         messages.append(

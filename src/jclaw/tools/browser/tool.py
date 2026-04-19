@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -20,7 +19,6 @@ from jclaw.tools.base import ToolContext, ToolResult
 from jclaw.tools.browser.artifacts import BrowserArtifactStore
 from jclaw.tools.browser.desktop_driver import DesktopBrowserDriver
 from jclaw.tools.browser.models import BrowserReasoner, Target
-from jclaw.tools.browser.permissions import check_permissions
 from jclaw.tools.browser.playwright_driver import PlaywrightBrowserDriver
 from jclaw.tools.browser.session import BrowserSessionStore
 
@@ -116,7 +114,6 @@ class BrowserTool:
                 },
                 "close_session": {"description": "Close an existing browser session."},
                 "list_sessions": {"description": "List active browser sessions."},
-                "permissions": {"description": "Inspect browser-related local permission state."},
             },
             "read_only_by_default": False,
             "supports_followup": True,
@@ -167,7 +164,6 @@ class BrowserTool:
             "run_objective": self._run_objective,
             "close_session": self._close_session,
             "list_sessions": self._list_sessions,
-            "permissions": self._permissions,
         }
         try:
             handler = handlers[action]
@@ -591,10 +587,6 @@ class BrowserTool:
             summary=f"Listed {len(sessions)} browser sessions.",
             data={"sessions": [session.as_dict() for session in sessions]},
         )
-
-    def _permissions(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        status = check_permissions()
-        return ToolResult(ok=True, summary="Read browser permission status.", data=asdict(status))
 
     def _trace_event(
         self,
