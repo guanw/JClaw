@@ -18,6 +18,7 @@ from jclaw.tools.automation.tool import AutomationTool
 from jclaw.tools.base import ToolContext, ToolResult
 from jclaw.tools.browser.tool import BrowserTool
 from jclaw.tools.knowledge.tool import KnowledgeTool
+from jclaw.tools.memory.tool import MemoryTool
 from jclaw.tools.registry import ToolRegistry
 from jclaw.tools.workspace.tool import WorkspaceTool
 
@@ -32,6 +33,7 @@ class AssistantAgent:
         self.llm = llm
         self.system_prompt = load_system_prompt(config.provider.system_prompt_files)
         self.tools = ToolRegistry()
+        self.tools.register(MemoryTool(db, search_limit=config.memory.max_memory_items))
         if config.automation.enabled:
             self.tools.register(AutomationTool(db))
         if config.browser.enabled:
@@ -154,23 +156,23 @@ class AssistantAgent:
 
         if command in {"/help", "help"}:
             return self._help_text()
-        if command in {"/remember", "remember"}:
+        if command == "/remember":
             return self._remember(chat_id, remainder)
-        if command in {"/forget", "forget"}:
+        if command == "/forget":
             return self._forget(chat_id, remainder)
-        if command in {"/memory", "memory"}:
+        if command == "/memory":
             return self._memory(chat_id)
-        if command in {"/cron", "cron"}:
+        if command == "/cron":
             return self._cron(chat_id, remainder)
-        if command in {"/approve", "approve"}:
+        if command == "/approve":
             return self._approve(chat_id, remainder)
-        if command in {"/deny", "deny"}:
+        if command == "/deny":
             return self._deny(chat_id, remainder)
-        if command in {"/grants", "grants"}:
+        if command == "/grants":
             return self._grants()
-        if command in {"/revoke", "revoke"}:
+        if command == "/revoke":
             return self._revoke(remainder)
-        if command in {"/abort", "abort"}:
+        if command == "/abort":
             return self._abort(chat_id, remainder)
         return None
 

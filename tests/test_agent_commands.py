@@ -125,6 +125,68 @@ def test_command_flow(tmp_path) -> None:
     db.close()
 
 
+def test_llm_selected_tool_routes_to_memory_remember(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"status":"continue","tool":"memory","action":"remember_fact","params":{"key":"favorite_color","value":"blue"},"reason":"The user asked to remember a preference."}',
+            ]
+        ),
+    )
+
+    reply = agent.handle_text("chat-1", "remember that my favorite color is blue")
+    assert "Remembered 'favorite_color'." in reply
+    assert db.list_memories("chat-1")[0].value == "blue"
+    db.close()
+
+
+def test_llm_selected_tool_routes_to_memory_search(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    db.remember("chat-1", "favorite_color", "blue")
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"status":"continue","tool":"memory","action":"search_memories","params":{"query":"favorite color"},"reason":"The user is asking what is remembered."}',
+            ]
+        ),
+    )
+
+    reply = agent.handle_text("chat-1", "what do you remember about my favorite color")
+    assert "favorite_color = blue" in reply
+    db.close()
+
+
 def test_llm_selected_tool_routes_to_browser(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),
