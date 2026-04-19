@@ -366,98 +366,157 @@ class AssistantAgent:
             return None
         steps: list[dict[str, Any]] = []
         seen_signatures: set[str] = set()
-        for _ in range(AGENT_MAX_TOOL_STEPS):
-            signature = json.dumps(
-                {
-                    "tool": decision["tool"],
-                    "action": decision["action"],
-                    "params": decision["params"],
-                },
-                sort_keys=True,
-                ensure_ascii=True,
-            )
-            if signature in seen_signatures:
-                LOGGER.info("tool loop detected repeated step; stopping")
-                return "Stopped because the tool plan repeated without making progress."
-            seen_signatures.add(signature)
+        followup_params_by_tool: dict[str, dict[str, Any]] = {}
+        loop_cleanup: dict[str, dict[str, Any]] = {}
+        try:
+            for _ in range(AGENT_MAX_TOOL_STEPS):
+                decision = self._bind_tool_followup_params(
+                    decision,
+                    followup_params=followup_params_by_tool.get(str(decision["tool"]), {}),
+                )
+                signature = json.dumps(
+                    {
+                        "tool": decision["tool"],
+                        "action": decision["action"],
+                        "params": decision["params"],
+                    },
+                    sort_keys=True,
+                    ensure_ascii=True,
+                )
+                if signature in seen_signatures:
+                    LOGGER.info("tool loop detected repeated step; stopping")
+                    return "Stopped because the tool plan repeated without making progress."
+                seen_signatures.add(signature)
 
-            try:
-                result = self.tools.invoke(
-                    str(decision["tool"]),
-                    str(decision["action"]),
-                    dict(decision["params"]),
-                    ToolContext(chat_id=chat_id, user_id=user_name),
+                try:
+                    result = self.tools.invoke(
+                        str(decision["tool"]),
+                        str(decision["action"]),
+                        dict(decision["params"]),
+                        ToolContext(chat_id=chat_id, user_id=user_name, metadata={"loop_managed": True}),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.exception(
+                        "tool step failed tool=%s action=%s",
+                        decision.get("tool"),
+                        decision.get("action"),
+                    )
+                    return f"Tool {decision['tool']}.{decision['action']} failed: {exc}"
+                self._update_tool_loop_state(
+                    decision,
+                    result,
+                    followup_params_by_tool=followup_params_by_tool,
+                    loop_cleanup=loop_cleanup,
                 )
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.exception(
-                    "tool step failed tool=%s action=%s",
-                    decision.get("tool"),
-                    decision.get("action"),
+                steps.append(
+                    {
+                        "tool": decision["tool"],
+                        "action": decision["action"],
+                        "params": dict(decision["params"]),
+                        "reason": decision.get("reason", ""),
+                        "result": result,
+                    }
                 )
-                return f"Tool {decision['tool']}.{decision['action']} failed: {exc}"
-            steps.append(
-                {
-                    "tool": decision["tool"],
-                    "action": decision["action"],
-                    "params": dict(decision["params"]),
-                    "reason": decision.get("reason", ""),
-                    "result": result,
+                if result.needs_confirmation or result.data.get("implemented") is False:
+                    return self._compose_tool_reply(
+                        chat_id,
+                        text,
+                        user_name=user_name,
+                        decision=decision,
+                        result=result,
+                    )
+                if result.data.get("allow_tool_followup") is False:
+                    return self._compose_tool_reply(
+                        chat_id,
+                        text,
+                        user_name=user_name,
+                        decision=decision,
+                        result=result,
+                    )
+
+                next_decision = self._decide_next_tool_step(
+                    chat_id,
+                    text,
+                    user_name=user_name,
+                    steps=steps,
+                )
+                if next_decision is None:
+                    LOGGER.info("tool continuation returned no usable decision; stopping with latest result")
+                    return self._compose_tool_reply(
+                        chat_id,
+                        text,
+                        user_name=user_name,
+                        decision=decision,
+                        result=result,
+                    )
+                if next_decision.get("status") in {"complete", "stop"}:
+                    return self._compose_tool_reply(
+                        chat_id,
+                        text,
+                        user_name=user_name,
+                        decision=decision,
+                        result=result,
+                    )
+                decision = {
+                    "tool": next_decision["tool"],
+                    "action": next_decision["action"],
+                    "params": next_decision["params"],
+                    "reason": next_decision.get("reason", ""),
                 }
-            )
-            if result.needs_confirmation or result.data.get("implemented") is False:
-                return self._compose_tool_reply(
-                    chat_id,
-                    text,
-                    user_name=user_name,
-                    decision=decision,
-                    result=result,
-                )
-            if result.data.get("allow_tool_followup") is False:
-                return self._compose_tool_reply(
-                    chat_id,
-                    text,
-                    user_name=user_name,
-                    decision=decision,
-                    result=result,
-                )
-
-            next_decision = self._decide_next_tool_step(
+            last = steps[-1]
+            return self._compose_tool_reply(
                 chat_id,
                 text,
                 user_name=user_name,
-                steps=steps,
+                decision={"tool": last["tool"], "action": last["action"], "reason": last["reason"], "params": last["params"]},
+                result=last["result"],
             )
-            if next_decision is None:
-                LOGGER.info("tool continuation returned no usable decision; stopping with latest result")
-                return self._compose_tool_reply(
-                    chat_id,
-                    text,
-                    user_name=user_name,
-                    decision=decision,
-                    result=result,
-                )
-            if next_decision.get("status") in {"complete", "stop"}:
-                return self._compose_tool_reply(
-                    chat_id,
-                    text,
-                    user_name=user_name,
-                    decision=decision,
-                    result=result,
-                )
-            decision = {
-                "tool": next_decision["tool"],
-                "action": next_decision["action"],
-                "params": next_decision["params"],
-                "reason": next_decision.get("reason", ""),
+        finally:
+            for tool_name, cleanup in loop_cleanup.items():
+                try:
+                    self.tools.invoke(
+                        tool_name,
+                        str(cleanup["action"]),
+                        dict(cleanup.get("params", {})),
+                        ToolContext(chat_id=chat_id, user_id=user_name),
+                    )
+                except Exception:  # noqa: BLE001
+                    LOGGER.exception("failed to run tool loop cleanup for %s", tool_name)
+
+    def _bind_tool_followup_params(
+        self,
+        decision: dict[str, Any],
+        *,
+        followup_params: dict[str, Any],
+    ) -> dict[str, Any]:
+        params = dict(decision.get("params", {}))
+        for key, value in followup_params.items():
+            params.setdefault(key, value)
+        return {
+            "tool": decision["tool"],
+            "action": decision["action"],
+            "params": params,
+            "reason": decision.get("reason", ""),
+        }
+
+    def _update_tool_loop_state(
+        self,
+        decision: dict[str, Any],
+        result: ToolResult,
+        *,
+        followup_params_by_tool: dict[str, dict[str, Any]],
+        loop_cleanup: dict[str, dict[str, Any]],
+    ) -> None:
+        tool_name = str(decision.get("tool", ""))
+        followup_params = result.data.get("followup_params")
+        if isinstance(followup_params, dict) and followup_params:
+            followup_params_by_tool[tool_name] = dict(followup_params)
+        cleanup = result.data.get("loop_cleanup")
+        if isinstance(cleanup, dict) and cleanup.get("action"):
+            loop_cleanup[tool_name] = {
+                "action": str(cleanup["action"]),
+                "params": dict(cleanup.get("params", {})),
             }
-        last = steps[-1]
-        return self._compose_tool_reply(
-            chat_id,
-            text,
-            user_name=user_name,
-            decision={"tool": last["tool"], "action": last["action"], "reason": last["reason"], "params": last["params"]},
-            result=last["result"],
-        )
 
     def _decide_next_tool_step(
         self,
@@ -496,6 +555,7 @@ class AssistantAgent:
             "Use complete when the user's objective has already been satisfied by the latest tool output or when no tool is needed because the task can be answered directly without tools.\n"
             "Use stop when progress is blocked, evidence is insufficient to continue safely, or another tool call is unlikely to help.\n"
             "Do not require any hardcoded tool-specific rules from the caller; rely on the tool catalog and prior step results.\n"
+            "Do not choose any tool or action whose metadata says implemented=false or scaffold_only=true.\n"
             "Keep params minimal and choose only one next tool step.\n"
             "Return strict JSON only.\n"
             "Schema:\n"

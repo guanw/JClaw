@@ -47,6 +47,8 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
 
 class BrowserTool:
     name = "browser"
+    MAX_REPEATED_DECISIONS = 2
+    MAX_REPEATED_OBSERVATIONS = 2
 
     def __init__(
         self,
@@ -137,6 +139,12 @@ class BrowserTool:
                 lines.append(f"- {title}: {url}")
         if data.get("termination_reason"):
             lines.append(f"Termination: {data['termination_reason']}")
+        if data.get("missing_information"):
+            lines.append(f"Missing information: {data['missing_information']}")
+        if data.get("evidence_refs"):
+            lines.append(f"Evidence refs: {', '.join(data['evidence_refs'][:8])}")
+        if data.get("observation_count") is not None:
+            lines.append(f"Observations: {data['observation_count']}")
         if data.get("steps"):
             lines.append("Executed steps:")
             for step in data["steps"][:5]:
@@ -214,6 +222,8 @@ class BrowserTool:
     def _cleanup_session_if_needed(self, session_id: str, *, ctx: ToolContext, action: str, params: dict[str, Any]) -> None:
         if not self._should_auto_close_session(params):
             return
+        if ctx.metadata.get("loop_managed"):
+            return
         try:
             self._close_session({"session_id": session_id}, ctx)
         except Exception as exc:  # noqa: BLE001
@@ -243,7 +253,7 @@ class BrowserTool:
         url = str(params.get("url", "about:blank"))
         data = driver.open_url(session.session_id, url, new_tab=bool(params.get("new_tab", False)))
         session.current_url = url
-        return ToolResult(ok=True, summary=f"Opened {url}", data=data)
+        return ToolResult(ok=True, summary=f"Opened {url}", data=self._with_loop_state(session.session_id, params, data))
 
     def _search_web(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         query = str(params.get("query", "")).strip()
@@ -269,13 +279,13 @@ class BrowserTool:
         session = self._ensure_session(params, ctx)
         driver = self._driver(params)
         data = driver.read_page(session.session_id)
-        return ToolResult(ok=True, summary="Read current page state.", data=data)
+        return ToolResult(ok=True, summary="Read current page state.", data=self._with_loop_state(session.session_id, params, data))
 
     def _click(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
         driver = self._driver(params)
         data = driver.click(session.session_id, self._target(params))
-        return ToolResult(ok=True, summary="Clicked target.", data=data)
+        return ToolResult(ok=True, summary="Clicked target.", data=self._with_loop_state(session.session_id, params, data))
 
     def _type(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -286,7 +296,7 @@ class BrowserTool:
             str(params.get("text", "")),
             submit=bool(params.get("submit", False)),
         )
-        return ToolResult(ok=True, summary="Typed into target.", data=data)
+        return ToolResult(ok=True, summary="Typed into target.", data=self._with_loop_state(session.session_id, params, data))
 
     def _scroll(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -296,7 +306,7 @@ class BrowserTool:
             direction=str(params.get("direction", "down")),
             amount=int(params.get("amount", 600)),
         )
-        return ToolResult(ok=True, summary="Scrolled page.", data=data)
+        return ToolResult(ok=True, summary="Scrolled page.", data=self._with_loop_state(session.session_id, params, data))
 
     def _wait_for(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -304,7 +314,7 @@ class BrowserTool:
         raw_target = params.get("target")
         target = self._target(params) if raw_target else None
         data = driver.wait_for(session.session_id, target, timeout_ms=int(params.get("timeout_ms", 5000)))
-        return ToolResult(ok=True, summary="Waited for page state.", data=data)
+        return ToolResult(ok=True, summary="Waited for page state.", data=self._with_loop_state(session.session_id, params, data))
 
     def _screenshot(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -319,15 +329,42 @@ class BrowserTool:
         else:
             shot = driver.screenshot(session.session_id, full_page=bool(params.get("full_page", False)))
         data = {"artifact_id": artifact.artifact_id, "path": artifact.path, **shot}
-        return ToolResult(ok=True, summary="Created screenshot artifact.", data=data)
+        return ToolResult(ok=True, summary="Created screenshot artifact.", data=self._with_loop_state(session.session_id, params, data))
 
     def _extract(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        schema = params.get("schema", {})
-        return ToolResult(
+        session = self._ensure_session(params, ctx)
+        page_result = self._read_page({"session_id": session.session_id}, ctx)
+        page_data = page_result.data
+        fields = params.get("schema") or params.get("fields") or {}
+        if not isinstance(fields, dict) or not fields:
+            result = ToolResult(
+                ok=False,
+                summary="No extraction fields were provided.",
+                data=self._with_loop_state(session.session_id, params, {"fields": {}, **page_data}),
+            )
+            self._cleanup_session_if_needed(session.session_id, ctx=ctx, action="extract", params=params)
+            return result
+        extracted = self._extract_fields_via_reasoner(page_data, fields)
+        if not extracted:
+            result = ToolResult(
+                ok=False,
+                summary="Browser extraction is unavailable for the current page.",
+                data=self._with_loop_state(session.session_id, params, {"fields": {}, **page_data}),
+            )
+            self._cleanup_session_if_needed(session.session_id, ctx=ctx, action="extract", params=params)
+            return result
+        result = ToolResult(
             ok=True,
-            summary="Extraction scaffold ready.",
-            data={"fields": {key: "" for key in schema}, "implemented": False},
+            summary=f"Extracted {len(extracted.get('fields', {}))} field(s) from the current page.",
+            data=self._with_loop_state(session.session_id, params, {
+                "fields": extracted.get("fields", {}),
+                "evidence_refs": extracted.get("evidence_refs", []),
+                "missing_information": extracted.get("missing_information", ""),
+                **page_data,
+            }),
         )
+        self._cleanup_session_if_needed(session.session_id, ctx=ctx, action="extract", params=params)
+        return result
 
     def _run_objective(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -372,6 +409,13 @@ class BrowserTool:
         sources: list[dict[str, str]] = []
         visited_urls = {self._normalize_url(str(current_read.data.get("url", "")))}
         recorded_source_urls: set[str] = set()
+        observations: list[dict[str, Any]] = []
+        novelty_history: list[dict[str, Any]] = []
+        repeated_decision_count = 0
+        repeated_observation_count = 0
+        previous_decision_signature = ""
+        previous_observation_signature = ""
+        final_decision: dict[str, Any] | None = None
 
         def record_source(page_data: dict[str, Any]) -> None:
             source_url = self._normalize_url(str(page_data.get("url", "")).strip())
@@ -386,13 +430,40 @@ class BrowserTool:
                 }
             )
 
-        if current_read.data.get("page_kind") != "search_results":
+        observation = self._build_observation(current_read.data, index=1)
+        observations.append(observation)
+        novelty = self._compute_novelty(observation, observations[:-1])
+        novelty_history.append(novelty)
+        previous_observation_signature = self._observation_signature(observation)
+
+        if self._observation_adds_source(observation):
             record_source(current_read.data)
 
         termination_reason = "step_budget_exhausted"
         for _ in range(max(0, max_steps - 1)):
-            decision = self._decide_next_action(objective, current_read.data, sources)
+            decision = self._decide_next_action(objective, current_read.data, sources, observations)
+            final_decision = decision
             chosen_url = self._normalize_url(str(decision.get("url", ""))) if decision else ""
+            valid_evidence_refs = self._validate_evidence_refs(
+                decision.get("evidence_refs", []) if decision else [],
+                observations,
+            )
+            self._trace_event(
+                "browser_loop_step",
+                ctx=ctx,
+                action="run_objective",
+                params={
+                    "objective": objective,
+                    "step_index": len(observations),
+                    "current_url": current_read.data.get("url", ""),
+                    "action_taken": executed_steps[-1]["action"] if executed_steps else None,
+                    "action_params": executed_steps[-1].get("params", {}) if executed_steps else {},
+                    "observation": self._compact_observation_for_trace(observation),
+                    "novelty": novelty_history[-1],
+                    "decision": decision,
+                    "valid_evidence_refs": valid_evidence_refs,
+                },
+            )
             self._trace_event(
                 "follow_up_choice",
                 ctx=ctx,
@@ -408,8 +479,20 @@ class BrowserTool:
             if not decision:
                 termination_reason = "no_decision"
                 break
+            decision_signature = self._decision_signature(decision)
+            if decision_signature == previous_decision_signature:
+                repeated_decision_count += 1
+            else:
+                repeated_decision_count = 0
+            previous_decision_signature = decision_signature
+            if repeated_decision_count >= self.MAX_REPEATED_DECISIONS:
+                termination_reason = "repeated_decision_limit"
+                break
             status = str(decision.get("status", "stop"))
             if status == "complete":
+                if not valid_evidence_refs:
+                    termination_reason = "missing_evidence_refs"
+                    break
                 termination_reason = "controller_complete"
                 break
             if status == "stop":
@@ -430,7 +513,6 @@ class BrowserTool:
                 }
             )
             current_read = self._read_page({"session_id": session.session_id}, ctx)
-            record_source(current_read.data)
             executed_steps.append(
                 {
                     "action": "read_page",
@@ -440,8 +522,23 @@ class BrowserTool:
                     "title": current_read.data.get("title", ""),
                 }
             )
+            observation = self._build_observation(current_read.data, index=len(observations) + 1)
+            novelty = self._compute_novelty(observation, observations)
+            observations.append(observation)
+            novelty_history.append(novelty)
+            observation_signature = self._observation_signature(observation)
+            if observation_signature == previous_observation_signature:
+                repeated_observation_count += 1
+            else:
+                repeated_observation_count = 0
+            previous_observation_signature = observation_signature
+            if self._observation_adds_source(observation):
+                record_source(current_read.data)
             if len(sources) >= max_sources:
                 termination_reason = "source_budget_reached"
+                break
+            if repeated_observation_count >= self.MAX_REPEATED_OBSERVATIONS:
+                termination_reason = "repeated_observation_limit"
                 break
 
         result = ToolResult(
@@ -450,17 +547,28 @@ class BrowserTool:
                 f"Executed browser objective and captured {len(sources)} source page"
                 f"{'' if len(sources) == 1 else 's'}."
             ),
-            data={
+            data=self._with_loop_state(session.session_id, params, {
                 "session_id": session.session_id,
                 "objective": objective,
                 "steps": executed_steps,
                 "sources": sources,
                 "implemented": True,
-                "research_complete": bool(sources),
+                "research_complete": bool(sources)
+                and termination_reason in {"controller_complete", "source_budget_reached"},
                 "termination_reason": termination_reason,
+                "evidence_refs": self._validate_evidence_refs(
+                    final_decision.get("evidence_refs", []) if final_decision else [],
+                    observations,
+                ),
+                "missing_information": str(final_decision.get("missing_information", "")).strip()
+                if final_decision
+                else "",
+                "observation_count": len(observations),
+                "novelty_history": novelty_history,
+                "observations": [self._compact_observation_for_trace(item) for item in observations],
                 **current_read.data,
                 "mode": self._driver(params).mode,
-            },
+            }),
         )
         self._cleanup_session_if_needed(session.session_id, ctx=ctx, action="run_objective", params=params)
         return result
@@ -570,29 +678,204 @@ class BrowserTool:
         scored_links.sort(key=lambda item: item[0], reverse=True)
         return [item[1] for item in scored_links]
 
-    def _decide_next_action(self, objective: str, page_data: dict[str, Any], sources: list[dict[str, str]]) -> dict[str, Any]:
-        llm_decision = self._decide_next_action_via_llm(objective, page_data, sources)
+    def _decide_next_action(
+        self,
+        objective: str,
+        page_data: dict[str, Any],
+        sources: list[dict[str, str]],
+        observations: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        observations = observations or []
+        llm_decision = self._decide_next_action_via_llm(objective, page_data, sources, observations)
         if llm_decision:
             return llm_decision
         next_url = self._choose_follow_up_url(objective, page_data)
         if next_url:
-            return {"status": "follow", "url": next_url, "reason": "Fallback selected the most relevant candidate URL."}
+            return {
+                "status": "follow",
+                "url": next_url,
+                "reason": "Fallback selected the most relevant candidate URL.",
+                "evidence_refs": [],
+                "missing_information": "Need additional evidence from a followed page.",
+            }
         if sources:
-            return {"status": "complete", "url": None, "reason": "Fallback found enough source material to stop."}
-        return {"status": "stop", "url": None, "reason": "Fallback found no meaningful next action."}
+            latest_observation = observations[-1] if observations else {}
+            fallback_refs = self._observation_ref_ids(latest_observation)[:2]
+            return {
+                "status": "complete",
+                "url": None,
+                "reason": "Fallback found enough source material to stop.",
+                "evidence_refs": fallback_refs,
+                "missing_information": "",
+            }
+        return {
+            "status": "stop",
+            "url": None,
+            "reason": "Fallback found no meaningful next action.",
+            "evidence_refs": [],
+            "missing_information": "No grounded source material was gathered.",
+        }
 
     def _decide_next_action_via_llm(
         self,
         objective: str,
         page_data: dict[str, Any],
         sources: list[dict[str, str]],
+        observations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         if self._reasoner is None:
             return None
         try:
-            return self._reasoner.decide_next_action(objective, page_data, sources)
+            return self._reasoner.decide_next_action(objective, page_data, sources, observations or [])
         except Exception:  # noqa: BLE001
             return None
+
+    def _extract_fields_via_reasoner(
+        self,
+        page_data: dict[str, Any],
+        fields: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if self._reasoner is None:
+            return None
+        try:
+            return self._reasoner.extract_fields(page_data, fields)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _build_observation(self, page_data: dict[str, Any], *, index: int) -> dict[str, Any]:
+        elements = page_data.get("elements", [])
+        interactive_elements: list[dict[str, Any]] = []
+        if isinstance(elements, list):
+            for item in elements[:20]:
+                if not isinstance(item, dict):
+                    continue
+                interactive_elements.append(
+                    {
+                        "id": str(item.get("id", "")),
+                        "role": str(item.get("role", "")),
+                        "text": str(item.get("text", ""))[:180],
+                        "href": str(item.get("href", "")),
+                    }
+                )
+        content_blocks = page_data.get("content_blocks", [])
+        normalized_blocks: list[dict[str, Any]] = []
+        if isinstance(content_blocks, list):
+            for item in content_blocks[:20]:
+                if not isinstance(item, dict):
+                    continue
+                normalized_blocks.append(
+                    {
+                        "id": str(item.get("id", "")),
+                        "text": str(item.get("text", ""))[:240],
+                        "tag": str(item.get("tag", "")),
+                    }
+                )
+        return {
+            "id": f"obs_{index}",
+            "url": self._normalize_url(str(page_data.get("url", ""))),
+            "title": str(page_data.get("title", ""))[:200],
+            "page_kind": str(page_data.get("page_kind", "")),
+            "text_preview": str(page_data.get("text", ""))[:1200],
+            "text_fingerprint": str(page_data.get("text_fingerprint", "")),
+            "content_blocks": normalized_blocks,
+            "interactive_elements": interactive_elements,
+        }
+
+    def _compute_novelty(self, observation: dict[str, Any], prior_observations: list[dict[str, Any]]) -> dict[str, Any]:
+        if not prior_observations:
+            return {
+                "is_new_url": True,
+                "is_new_fingerprint": True,
+                "new_ref_count": len(self._observation_ref_ids(observation)),
+                "score": 1.0,
+            }
+        prior_urls = {str(item.get("url", "")) for item in prior_observations}
+        prior_fingerprints = {str(item.get("text_fingerprint", "")) for item in prior_observations if item.get("text_fingerprint")}
+        prior_refs = {
+            ref
+            for item in prior_observations
+            for ref in self._observation_ref_ids(item)
+        }
+        current_refs = self._observation_ref_ids(observation)
+        new_refs = [ref for ref in current_refs if ref not in prior_refs]
+        is_new_url = observation.get("url", "") not in prior_urls
+        fingerprint = str(observation.get("text_fingerprint", ""))
+        is_new_fingerprint = bool(fingerprint) and fingerprint not in prior_fingerprints
+        score = 0.0
+        if is_new_url:
+            score += 0.45 if is_new_fingerprint or new_refs else 0.1
+        if is_new_fingerprint:
+            score += 0.35
+        if new_refs:
+            score += min(0.2, len(new_refs) * 0.05)
+        return {
+            "is_new_url": is_new_url,
+            "is_new_fingerprint": is_new_fingerprint,
+            "new_ref_count": len(new_refs),
+            "score": round(min(score, 1.0), 2),
+        }
+
+    def _compact_observation_for_trace(self, observation: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": observation.get("id", ""),
+            "url": observation.get("url", ""),
+            "title": observation.get("title", ""),
+            "text_fingerprint": observation.get("text_fingerprint", ""),
+            "content_block_count": len(observation.get("content_blocks", [])),
+            "interactive_count": len(observation.get("interactive_elements", [])),
+        }
+
+    def _observation_ref_ids(self, observation: dict[str, Any]) -> list[str]:
+        refs: list[str] = []
+        for item in observation.get("content_blocks", []):
+            if isinstance(item, dict) and item.get("id"):
+                refs.append(str(item["id"]))
+        for item in observation.get("interactive_elements", []):
+            if isinstance(item, dict) and item.get("id"):
+                refs.append(str(item["id"]))
+        return refs
+
+    def _validate_evidence_refs(self, refs: list[Any], observations: list[dict[str, Any]]) -> list[str]:
+        valid_refs = {
+            ref
+            for observation in observations
+            for ref in self._observation_ref_ids(observation)
+        }
+        normalized: list[str] = []
+        for item in refs[:8]:
+            ref = str(item).strip()
+            if ref and ref in valid_refs and ref not in normalized:
+                normalized.append(ref)
+        return normalized
+
+    def _decision_signature(self, decision: dict[str, Any]) -> str:
+        return "|".join(
+            [
+                str(decision.get("status", "")),
+                self._normalize_url(str(decision.get("url", ""))),
+                str(decision.get("chosen_element_id", "")),
+            ]
+        )
+
+    def _observation_signature(self, observation: dict[str, Any]) -> str:
+        return "|".join(
+            [
+                str(observation.get("url", "")),
+                str(observation.get("text_fingerprint", "")),
+            ]
+        )
+
+    def _observation_adds_source(self, observation: dict[str, Any]) -> bool:
+        if observation.get("page_kind") == "search_results":
+            return False
+        return bool(observation.get("text_preview", "").strip() or observation.get("content_blocks"))
+
+    def _with_loop_state(self, session_id: str, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(data)
+        enriched["followup_params"] = {"session_id": session_id}
+        if not params.get("session_id") and not bool(params.get("keep_session", False)):
+            enriched["loop_cleanup"] = {"action": "close_session", "params": {"session_id": session_id}}
+        return enriched
 
     def _extract_candidate_elements(self, page_data: dict[str, Any]) -> list[dict[str, Any]]:
         elements = page_data.get("elements", [])
@@ -773,11 +1056,56 @@ class LLMBrowserReasoner:
                 return href if href.startswith("http") else None
         return None
 
+    def extract_fields(
+        self,
+        page_data: dict[str, Any],
+        fields: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        extractor_prompt = (
+            "You are JClaw's browser extraction helper.\n"
+            "Extract only the requested fields from the current page observation.\n"
+            "Use only the provided page text, content blocks, and interactive elements.\n"
+            "Do not invent missing values. Use empty string or empty list when a field is not supported by the evidence.\n"
+            "Return strict JSON only with schema:\n"
+            '{"fields":object,"evidence_refs":[string],"missing_information":string}\n'
+            "The fields object must contain exactly the same top-level keys as the requested fields object.\n"
+            "evidence_refs must reference ids from content_blocks or interactive_elements.\n"
+        )
+        payload = {
+            "page": {
+                "url": page_data.get("url", ""),
+                "title": page_data.get("title", ""),
+                "text_preview": str(page_data.get("text", ""))[:1800],
+                "content_blocks": page_data.get("content_blocks", [])[:15],
+                "interactive_elements": page_data.get("elements", [])[:15],
+            },
+            "requested_fields": fields,
+        }
+        raw = self._llm_chat(
+            [
+                {"role": "system", "content": extractor_prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=True)},
+            ]
+        )
+        parsed = _parse_json_object(raw)
+        if not parsed:
+            return None
+        extracted_fields = parsed.get("fields")
+        if not isinstance(extracted_fields, dict):
+            return None
+        normalized_fields = {key: extracted_fields.get(key, "" if not isinstance(spec, list) else []) for key, spec in fields.items()}
+        return {
+            "fields": normalized_fields,
+            "evidence_refs": parsed.get("evidence_refs", []),
+            "missing_information": str(parsed.get("missing_information", "")),
+        }
+
     def decide_next_action(
         self,
         objective: str,
         page_data: dict[str, Any],
         sources: list[dict[str, str]],
+        observations: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
         elements = page_data.get("elements", [])
         if not isinstance(elements, list):
@@ -803,25 +1131,27 @@ class LLMBrowserReasoner:
         controller_prompt = (
             "You are JClaw's browser controller.\n"
             "Decide whether the current browser mission is complete, should continue by following one visible link, or should stop because no meaningful progress is likely.\n"
-            "Use only the provided page observation and gathered sources.\n"
-            "Prefer COMPLETE only when there is enough concrete information to answer the objective.\n"
-            "Prefer STOP when the page is low-signal, repetitive, blocked, or unlikely to add value.\n"
-            "Prefer FOLLOW when a visible link is likely to materially improve the answer.\n"
-            "Avoid describing future actions as completed work.\n"
+            "Use only the provided observations and gathered sources.\n"
+            "Base the decision on whether the current observations contain enough evidence for the objective.\n"
+            "Do not complete unless you can cite concrete observation references.\n"
+            "Prefer follow when a visible link is likely to materially improve the evidence.\n"
+            "Prefer stop when further browsing is unlikely to add useful information.\n"
             "Return strict JSON only with schema:\n"
-            '{"status":"follow|complete|stop","chosen_element_id":string|null,"reason":string}\n'
+            '{"status":"follow|complete|stop","chosen_element_id":string|null,"reason":string,"evidence_refs":[string],"missing_information":string}\n'
+            "evidence_refs must reference ids from content_blocks or interactive_elements in the current or prior observations.\n"
             "If status is follow, chosen_element_id must identify one visible link element from the snapshot.\n"
-            "If no meaningful link should be followed, return complete or stop."
+            "If status is complete or stop, chosen_element_id must be null."
         )
         payload = {
             "objective": objective,
             "current_page": {
                 "url": page_data.get("url", ""),
                 "title": page_data.get("title", ""),
-                "page_kind": page_data.get("page_kind", ""),
                 "text_preview": str(page_data.get("text", ""))[:1200],
+                "content_blocks": page_data.get("content_blocks", [])[:12],
             },
             "sources": sources[-3:],
+            "prior_observations": observations[-3:],
             "elements": compact_elements,
         }
         raw = self._llm_chat(
@@ -838,11 +1168,24 @@ class LLMBrowserReasoner:
             return None
         chosen_element_id = parsed.get("chosen_element_id")
         if status != "follow":
-            return {"status": status, "url": None, "reason": str(parsed.get("reason", ""))}
+            return {
+                "status": status,
+                "url": None,
+                "reason": str(parsed.get("reason", "")),
+                "evidence_refs": parsed.get("evidence_refs", []),
+                "missing_information": str(parsed.get("missing_information", "")),
+            }
         chosen_id = None if chosen_element_id in (None, "", "null") else str(chosen_element_id).strip()
         if not chosen_id:
             return None
         for item in compact_elements:
             if item.get("id") == chosen_id and str(item.get("href", "")).startswith("http"):
-                return {"status": "follow", "url": str(item["href"]), "reason": str(parsed.get("reason", ""))}
+                return {
+                    "status": "follow",
+                    "url": str(item["href"]),
+                    "reason": str(parsed.get("reason", "")),
+                    "evidence_refs": parsed.get("evidence_refs", []),
+                    "missing_information": str(parsed.get("missing_information", "")),
+                    "chosen_element_id": chosen_id,
+                }
         return None

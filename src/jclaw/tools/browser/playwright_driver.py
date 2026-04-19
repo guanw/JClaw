@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import hashlib
 import re
 
 from playwright.sync_api import BrowserContext, Error, Page, Playwright, TimeoutError, sync_playwright
@@ -129,6 +130,7 @@ class PlaywrightBrowserDriver:
         )
         page_kind = _infer_page_kind(page.url, title, visible_text)
         elements = self._extract_elements(page, page_kind=page_kind)
+        content_blocks = self._extract_content_blocks(page)
         links = [
             {"id": item["id"], "text": item["text"], "href": item["href"], "area": item["area"]}
             for item in elements
@@ -153,6 +155,8 @@ class PlaywrightBrowserDriver:
             "title": title,
             "page_kind": page_kind,
             "text": visible_text,
+            "text_fingerprint": hashlib.sha1(visible_text.encode("utf-8")).hexdigest()[:16] if visible_text else "",
+            "content_blocks": content_blocks,
             "elements": elements,
             "links": links,
             "forms": forms,
@@ -268,6 +272,45 @@ class PlaywrightBrowserDriver:
             {"pageKind": page_kind},
         )
         return elements if isinstance(elements, list) else []
+
+    def _extract_content_blocks(self, page: Page) -> list[dict[str, Any]]:
+        blocks = page.evaluate(
+            """
+            () => {
+              const normalize = (value, limit = 400) => {
+                const text = (value || '').replace(/\\s+/g, ' ').trim();
+                return text.slice(0, limit);
+              };
+              const candidates = Array.from(
+                document.querySelectorAll('main h1, main h2, main h3, main p, main li, article h1, article h2, article h3, article p, article li, body h1, body h2, body h3, body p, body li')
+              );
+              const items = [];
+              const seen = new Set();
+              for (const node of candidates) {
+                if (!(node instanceof HTMLElement)) continue;
+                const text = normalize(node.innerText || node.textContent || '');
+                if (!text || text.length < 20) continue;
+                const style = window.getComputedStyle(node);
+                if (!style || style.display === 'none' || style.visibility === 'hidden') continue;
+                const rect = node.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) continue;
+                const tag = node.tagName.toLowerCase();
+                const key = `${tag}|${text}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                items.push({
+                  id: `b${items.length + 1}`,
+                  tag,
+                  text,
+                  y: Math.round(rect.top),
+                });
+              }
+              items.sort((a, b) => a.y - b.y);
+              return items.slice(0, 25).map(({ y, ...item }) => item);
+            }
+            """
+        )
+        return blocks if isinstance(blocks, list) else []
 
     def screenshot(self, session_id: str, *, full_page: bool, path: str) -> dict[str, Any]:
         page = self._get_or_create_page(session_id)

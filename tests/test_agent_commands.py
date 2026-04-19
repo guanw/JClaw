@@ -101,6 +101,72 @@ class ExplodingTool:
         return result.summary
 
 
+class FakeBrowserTool:
+    name = "browser"
+
+    def __init__(self) -> None:
+        self.invocations: list[tuple[str, dict]] = []
+
+    def describe(self) -> dict:
+        return {
+            "name": "browser",
+            "description": "Fake browser tool used for loop session tests.",
+            "actions": {
+                "search_web": {"description": "Search the web."},
+                "read_page": {"description": "Read the current page."},
+                "extract": {"description": "Extract fields from the current page."},
+                "close_session": {"description": "Close the current page session."},
+            },
+            "supports_followup": True,
+        }
+
+    def invoke(self, action: str, params: dict, ctx: ToolContext) -> ToolResult:
+        self.invocations.append((action, dict(params)))
+        if action == "search_web":
+            return ToolResult(
+                ok=True,
+                summary="Searched the web.",
+                data={
+                    "session_id": "sess_browser_loop",
+                    "url": "https://example.com/result",
+                    "followup_params": {"session_id": "sess_browser_loop"},
+                    "loop_cleanup": {"action": "close_session", "params": {"session_id": "sess_browser_loop"}},
+                },
+            )
+        if action == "read_page":
+            assert params.get("session_id") == "sess_browser_loop"
+            return ToolResult(
+                ok=True,
+                summary="Read page.",
+                data={
+                    "session_id": "sess_browser_loop",
+                    "url": "https://example.com/result",
+                    "title": "result",
+                    "followup_params": {"session_id": "sess_browser_loop"},
+                    "loop_cleanup": {"action": "close_session", "params": {"session_id": "sess_browser_loop"}},
+                },
+            )
+        if action == "extract":
+            assert params.get("session_id") == "sess_browser_loop"
+            return ToolResult(
+                ok=True,
+                summary="Extracted fields.",
+                data={
+                    "session_id": "sess_browser_loop",
+                    "fields": {"name": "Breathe Easy Remodeling"},
+                    "followup_params": {"session_id": "sess_browser_loop"},
+                    "loop_cleanup": {"action": "close_session", "params": {"session_id": "sess_browser_loop"}},
+                },
+            )
+        if action == "close_session":
+            assert params.get("session_id") == "sess_browser_loop"
+            return ToolResult(ok=True, summary="Closed session.", data={"session_id": "sess_browser_loop"})
+        raise AssertionError(f"unexpected action: {action}")
+
+    def format_result(self, action: str, result: ToolResult) -> str:
+        return result.summary
+
+
 def test_command_flow(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),
@@ -299,6 +365,9 @@ def test_choose_browser_next_action_uses_controller_output(tmp_path) -> None:
         "status": "follow",
         "url": "https://www.reuters.com/markets/us/",
         "reason": "Reuters market page is the strongest next source.",
+        "evidence_refs": [],
+        "missing_information": "",
+        "chosen_element_id": "e2",
     }
     db.close()
 
@@ -362,6 +431,49 @@ def test_tool_loop_returns_failure_reply_when_tool_raises(tmp_path) -> None:
 
     reply = agent.handle_text("chat-1", "trigger failure")
     assert reply == "Tool exploding.boom failed: boom"
+    db.close()
+
+
+def test_browser_tool_loop_reuses_one_session_across_steps_and_closes_at_end(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"status":"continue","tool":"browser","action":"search_web","params":{"query":"millburn contractors"},"reason":"Search first."}',
+                '{"status":"continue","tool":"browser","action":"read_page","params":{},"reason":"Read the result page."}',
+                '{"status":"continue","tool":"browser","action":"extract","params":{"fields":{"name":"contractor name"}},"reason":"Extract the contractor name."}',
+                '{"status":"complete","tool":"","action":"","params":{},"reason":"Enough information gathered."}',
+                "Found one contractor.",
+            ]
+        ),
+    )
+    fake_browser = FakeBrowserTool()
+    agent.tools._tools["browser"] = fake_browser  # noqa: SLF001
+
+    reply = agent.handle_text("chat-1", "find a millburn remodeling contractor")
+
+    assert reply == "Found one contractor."
+    assert fake_browser.invocations == [
+        ("search_web", {"query": "millburn contractors"}),
+        ("read_page", {"session_id": "sess_browser_loop"}),
+        ("extract", {"fields": {"name": "contractor name"}, "session_id": "sess_browser_loop"}),
+        ("close_session", {"session_id": "sess_browser_loop"}),
+    ]
     db.close()
 
 

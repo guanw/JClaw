@@ -53,5 +53,13 @@ class BrowserReasoner(Protocol):
         objective: str,
         page_data: dict[str, Any],
         sources: list[dict[str, str]],
+        observations: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        ...
+
+    def extract_fields(
+        self,
+        page_data: dict[str, Any],
+        fields: dict[str, Any],
     ) -> dict[str, Any] | None:
         ...
