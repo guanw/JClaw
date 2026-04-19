@@ -7,6 +7,7 @@ import tomllib
 
 from jclaw.core.defaults import (
     APP_NAME,
+    AUTOMATION_ENABLED,
     BROWSER_CHANNEL,
     BROWSER_ENABLED,
     BROWSER_HEADLESS,
@@ -108,6 +109,11 @@ class MemoryConfig:
 
 
 @dataclass(slots=True)
+class AutomationConfig:
+    enabled: bool = AUTOMATION_ENABLED
+
+
+@dataclass(slots=True)
 class BrowserConfig:
     enabled: bool = BROWSER_ENABLED
     headless: bool = BROWSER_HEADLESS
@@ -148,6 +154,7 @@ class Config:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     daemon: DaemonConfig = field(default_factory=DaemonConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    automation: AutomationConfig = field(default_factory=AutomationConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
@@ -194,6 +201,9 @@ idle_sleep_seconds = {DAEMON_IDLE_SLEEP_SECONDS}
 max_context_messages = {MEMORY_MAX_CONTEXT_MESSAGES}
 max_memory_items = {MEMORY_MAX_MEMORY_ITEMS}
 
+[automation]
+enabled = {str(AUTOMATION_ENABLED).lower()}
+
 [browser]
 enabled = {str(BROWSER_ENABLED).lower()}
 headless = {str(BROWSER_HEADLESS).lower()}
@@ -236,6 +246,7 @@ def load_config(path: str | Path | None = None) -> Config:
     telegram_data = data.get("telegram", {})
     daemon_data = data.get("daemon", {})
     memory_data = data.get("memory", {})
+    automation_data = data.get("automation", {})
     browser_data = data.get("browser", {})
     workspace_data = data.get("workspace", {})
     knowledge_data = data.get("knowledge", {})
@@ -269,6 +280,9 @@ def load_config(path: str | Path | None = None) -> Config:
     memory = MemoryConfig(
         max_context_messages=int(memory_data.get("max_context_messages", MEMORY_MAX_CONTEXT_MESSAGES)),
         max_memory_items=int(memory_data.get("max_memory_items", MEMORY_MAX_MEMORY_ITEMS)),
+    )
+    automation = AutomationConfig(
+        enabled=bool(automation_data.get("enabled", AUTOMATION_ENABLED)),
     )
     browser = BrowserConfig(
         enabled=bool(browser_data.get("enabled", BROWSER_ENABLED)),
@@ -321,6 +335,7 @@ def load_config(path: str | Path | None = None) -> Config:
         telegram=telegram,
         daemon=daemon,
         memory=memory,
+        automation=automation,
         browser=browser,
         workspace=workspace,
         knowledge=knowledge,

@@ -14,6 +14,7 @@ from jclaw.core.config import Config
 from jclaw.core.db import Database, MemoryRecord
 from jclaw.core.defaults import AGENT_MAX_TOOL_STEPS
 from jclaw.core.scheduler import next_run_at, parse_schedule, to_utc_iso
+from jclaw.tools.automation.tool import AutomationTool
 from jclaw.tools.base import ToolContext, ToolResult
 from jclaw.tools.browser.tool import BrowserTool
 from jclaw.tools.knowledge.tool import KnowledgeTool
@@ -31,6 +32,8 @@ class AssistantAgent:
         self.llm = llm
         self.system_prompt = load_system_prompt(config.provider.system_prompt_files)
         self.tools = ToolRegistry()
+        if config.automation.enabled:
+            self.tools.register(AutomationTool(db))
         if config.browser.enabled:
             self.tools.register(
                 BrowserTool(
@@ -374,12 +377,20 @@ class AssistantAgent:
                 return "Stopped because the tool plan repeated without making progress."
             seen_signatures.add(signature)
 
-            result = self.tools.invoke(
-                str(decision["tool"]),
-                str(decision["action"]),
-                dict(decision["params"]),
-                ToolContext(chat_id=chat_id, user_id=user_name),
-            )
+            try:
+                result = self.tools.invoke(
+                    str(decision["tool"]),
+                    str(decision["action"]),
+                    dict(decision["params"]),
+                    ToolContext(chat_id=chat_id, user_id=user_name),
+                )
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.exception(
+                    "tool step failed tool=%s action=%s",
+                    decision.get("tool"),
+                    decision.get("action"),
+                )
+                return f"Tool {decision['tool']}.{decision['action']} failed: {exc}"
             steps.append(
                 {
                     "tool": decision["tool"],
@@ -593,8 +604,8 @@ class AssistantAgent:
     ) -> str:
         tool = self.tools.get(str(decision["tool"]))
         tool_result_text = tool.format_result(str(decision["action"]), result)
-        if decision["tool"] in {"workspace", "knowledge"}:
-            LOGGER.info("%s tool result returned directly to avoid hallucinated summaries", decision["tool"])
+        if tool.describe().get("prefer_direct_result"):
+            LOGGER.info("%s tool result returned directly based on tool metadata", decision["tool"])
             return tool_result_text
         if result.data.get("implemented") is False or result.needs_confirmation:
             LOGGER.info("tool result is scaffold-only; returning raw tool result to avoid overclaiming")

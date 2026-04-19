@@ -290,10 +290,64 @@ class Database:
             for row in rows
         ]
 
+    def get_cron_job(self, chat_id: str, job_id: int) -> CronJobRecord | None:
+        row = self._connection.execute(
+            """
+            SELECT id, chat_id, schedule, prompt, next_run_at, enabled
+            FROM cron_jobs
+            WHERE chat_id = ? AND id = ?
+            """,
+            (chat_id, job_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return CronJobRecord(
+            id=int(row["id"]),
+            chat_id=str(row["chat_id"]),
+            schedule=str(row["schedule"]),
+            prompt=str(row["prompt"]),
+            next_run_at=str(row["next_run_at"]),
+            enabled=bool(row["enabled"]),
+        )
+
     def remove_cron_job(self, chat_id: str, job_id: int) -> int:
         cursor = self._connection.execute(
             "DELETE FROM cron_jobs WHERE chat_id = ? AND id = ?",
             (chat_id, job_id),
+        )
+        self._connection.commit()
+        return cursor.rowcount
+
+    def update_cron_job(
+        self,
+        chat_id: str,
+        job_id: int,
+        *,
+        schedule: str | None = None,
+        prompt: str | None = None,
+        next_run_at: str | None = None,
+        enabled: bool | None = None,
+    ) -> int:
+        updates: list[str] = []
+        params: list[object] = []
+        if schedule is not None:
+            updates.append("schedule = ?")
+            params.append(schedule)
+        if prompt is not None:
+            updates.append("prompt = ?")
+            params.append(prompt)
+        if next_run_at is not None:
+            updates.append("next_run_at = ?")
+            params.append(next_run_at)
+        if enabled is not None:
+            updates.append("enabled = ?")
+            params.append(1 if enabled else 0)
+        if not updates:
+            return 0
+        params.extend([chat_id, job_id])
+        cursor = self._connection.execute(
+            f"UPDATE cron_jobs SET {', '.join(updates)} WHERE chat_id = ? AND id = ?",  # noqa: S608
+            tuple(params),
         )
         self._connection.commit()
         return cursor.rowcount

@@ -3,6 +3,7 @@ from pathlib import Path
 from jclaw.ai.agent import AssistantAgent
 from jclaw.core.config import Config, DaemonConfig, MemoryConfig, ProviderConfig, TelegramConfig
 from jclaw.core.defaults import (
+    AUTOMATION_ENABLED,
     BROWSER_MAX_OBJECTIVE_STEPS,
     BROWSER_MAX_RESEARCH_SOURCES,
     BROWSER_VIEWPORT_HEIGHT,
@@ -74,6 +75,30 @@ class FakeTool:
         if result.data.get("answer"):
             lines.append(f"Answer:\n{result.data['answer']}")
         return "\n".join(lines)
+
+
+class ExplodingTool:
+    name = "exploding"
+
+    def describe(self) -> dict:
+        return {
+            "name": "exploding",
+            "description": "Tool that raises to verify agent failure handling.",
+            "implemented": True,
+            "prefer_direct_result": True,
+            "actions": {
+                "boom": {
+                    "description": "Raise an exception.",
+                    "use_when": ["Testing tool failure handling."],
+                },
+            },
+        }
+
+    def invoke(self, action: str, params: dict, ctx: ToolContext) -> ToolResult:
+        raise ValueError("boom")
+
+    def format_result(self, action: str, result: ToolResult) -> str:
+        return result.summary
 
 
 def test_command_flow(tmp_path) -> None:
@@ -247,6 +272,37 @@ def test_llm_can_decline_tool_and_fall_back_to_chat(tmp_path) -> None:
     db.close()
 
 
+def test_tool_loop_returns_failure_reply_when_tool_raises(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"status":"continue","tool":"exploding","action":"boom","params":{},"reason":"Exercise tool failure handling."}',
+            ]
+        ),
+    )
+    agent.tools.register(ExplodingTool())
+
+    reply = agent.handle_text("chat-1", "trigger failure")
+    assert reply == "Tool exploding.boom failed: boom"
+    db.close()
+
+
 def test_browser_config_defaults_are_centralized(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),
@@ -288,6 +344,7 @@ def test_workspace_and_knowledge_defaults_are_centralized(tmp_path) -> None:
     assert config.workspace.max_files_per_change == WORKSPACE_MAX_FILES_PER_CHANGE
     assert config.workspace.max_path_entries == WORKSPACE_MAX_PATH_ENTRIES
     assert config.workspace.max_internal_read_bytes == WORKSPACE_MAX_INTERNAL_READ_BYTES
+    assert config.automation.enabled == AUTOMATION_ENABLED
     assert config.knowledge.max_file_read_bytes == KNOWLEDGE_MAX_FILE_READ_BYTES
     assert config.knowledge.max_folder_scan_files == KNOWLEDGE_MAX_FOLDER_SCAN_FILES
     assert config.knowledge.max_chunks_per_file == KNOWLEDGE_MAX_CHUNKS_PER_FILE
@@ -611,4 +668,37 @@ def test_tool_loop_continuation_is_generic_not_tool_specific(tmp_path) -> None:
     reply = agent.handle_text("chat-1", "finish the fake task")
     assert "final fake answer" in reply
     assert fake_tool.invocations == [("step_one", {}), ("step_two", {})]
+    db.close()
+
+
+def test_llm_selected_tool_routes_to_automation(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"status":"continue","tool":"automation","action":"create_schedule","params":{"schedule":"every 30m","prompt":"stretch"},"reason":"The user wants a recurring reminder."}',
+                '{"status":"complete","tool":"","action":"","params":{},"reason":"The schedule was created successfully."}',
+            ]
+        ),
+    )
+
+    reply = agent.handle_text("chat-1", "remind me every 30 minutes to stretch")
+    assert "Created schedule" in reply
+    assert "every 30m" in reply
+    assert "stretch" in reply
     db.close()

@@ -40,7 +40,12 @@ class JClawDaemon:
                     next_offset = offset
                     for item in messages:
                         next_offset = max(next_offset, item.update_id + 1)
-                        self._handle_message(item.chat_id, item.message_id, item.sender_name, item.text)
+                        try:
+                            self._handle_message(item.chat_id, item.message_id, item.sender_name, item.text)
+                        except KeyboardInterrupt:
+                            raise
+                        except Exception:  # noqa: BLE001
+                            LOGGER.exception("message handling failed for update %s", item.update_id)
                     if next_offset != offset:
                         self.db.set_telegram_offset(next_offset)
                     if not messages:
