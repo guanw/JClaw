@@ -23,7 +23,7 @@ from jclaw.core.defaults import (
     WORKSPACE_SHELL_TIMEOUT_SECONDS,
 )
 from jclaw.core.db import Database
-from jclaw.tools.base import ToolContext, ToolResult
+from jclaw.tools.base import ToolContext, ToolLoopFinalizer, ToolResult
 
 
 class DummyLLM:
@@ -123,40 +123,34 @@ class FakeBrowserTool:
     def invoke(self, action: str, params: dict, ctx: ToolContext) -> ToolResult:
         self.invocations.append((action, dict(params)))
         if action == "search_web":
+            assert ctx.execution is not None
+            ctx.execution.tool_state["browser"] = {"session_id": "sess_browser_loop"}
+            ctx.execution.finalizers["browser"] = ToolLoopFinalizer(
+                action="close_session",
+                params={"session_id": "sess_browser_loop"},
+            )
             return ToolResult(
                 ok=True,
                 summary="Searched the web.",
-                data={
-                    "session_id": "sess_browser_loop",
-                    "url": "https://example.com/result",
-                    "followup_params": {"session_id": "sess_browser_loop"},
-                    "loop_cleanup": {"action": "close_session", "params": {"session_id": "sess_browser_loop"}},
-                },
+                data={"session_id": "sess_browser_loop", "url": "https://example.com/result"},
             )
         if action == "read_page":
-            assert params.get("session_id") == "sess_browser_loop"
+            assert params == {}
+            assert ctx.execution is not None
+            assert ctx.execution.tool_state["browser"]["session_id"] == "sess_browser_loop"
             return ToolResult(
                 ok=True,
                 summary="Read page.",
-                data={
-                    "session_id": "sess_browser_loop",
-                    "url": "https://example.com/result",
-                    "title": "result",
-                    "followup_params": {"session_id": "sess_browser_loop"},
-                    "loop_cleanup": {"action": "close_session", "params": {"session_id": "sess_browser_loop"}},
-                },
+                data={"session_id": "sess_browser_loop", "url": "https://example.com/result", "title": "result"},
             )
         if action == "extract":
-            assert params.get("session_id") == "sess_browser_loop"
+            assert params == {"fields": {"name": "contractor name"}}
+            assert ctx.execution is not None
+            assert ctx.execution.tool_state["browser"]["session_id"] == "sess_browser_loop"
             return ToolResult(
                 ok=True,
                 summary="Extracted fields.",
-                data={
-                    "session_id": "sess_browser_loop",
-                    "fields": {"name": "Breathe Easy Remodeling"},
-                    "followup_params": {"session_id": "sess_browser_loop"},
-                    "loop_cleanup": {"action": "close_session", "params": {"session_id": "sess_browser_loop"}},
-                },
+                data={"session_id": "sess_browser_loop", "fields": {"name": "Breathe Easy Remodeling"}},
             )
         if action == "close_session":
             assert params.get("session_id") == "sess_browser_loop"
@@ -470,8 +464,8 @@ def test_browser_tool_loop_reuses_one_session_across_steps_and_closes_at_end(tmp
     assert reply == "Found one contractor."
     assert fake_browser.invocations == [
         ("search_web", {"query": "millburn contractors"}),
-        ("read_page", {"session_id": "sess_browser_loop"}),
-        ("extract", {"fields": {"name": "contractor name"}, "session_id": "sess_browser_loop"}),
+        ("read_page", {}),
+        ("extract", {"fields": {"name": "contractor name"}}),
         ("close_session", {"session_id": "sess_browser_loop"}),
     ]
     db.close()

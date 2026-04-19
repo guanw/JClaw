@@ -15,7 +15,7 @@ from jclaw.core.db import Database, MemoryRecord
 from jclaw.core.defaults import AGENT_MAX_TOOL_STEPS
 from jclaw.core.scheduler import next_run_at, parse_schedule, to_utc_iso
 from jclaw.tools.automation.tool import AutomationTool
-from jclaw.tools.base import ToolContext, ToolResult
+from jclaw.tools.base import ToolContext, ToolExecutionState, ToolResult
 from jclaw.tools.browser.tool import BrowserTool
 from jclaw.tools.knowledge.tool import KnowledgeTool
 from jclaw.tools.memory.tool import MemoryTool
@@ -366,14 +366,9 @@ class AssistantAgent:
             return None
         steps: list[dict[str, Any]] = []
         seen_signatures: set[str] = set()
-        followup_params_by_tool: dict[str, dict[str, Any]] = {}
-        loop_cleanup: dict[str, dict[str, Any]] = {}
+        execution = ToolExecutionState()
         try:
             for _ in range(AGENT_MAX_TOOL_STEPS):
-                decision = self._bind_tool_followup_params(
-                    decision,
-                    followup_params=followup_params_by_tool.get(str(decision["tool"]), {}),
-                )
                 signature = json.dumps(
                     {
                         "tool": decision["tool"],
@@ -393,7 +388,12 @@ class AssistantAgent:
                         str(decision["tool"]),
                         str(decision["action"]),
                         dict(decision["params"]),
-                        ToolContext(chat_id=chat_id, user_id=user_name, metadata={"loop_managed": True}),
+                        ToolContext(
+                            chat_id=chat_id,
+                            user_id=user_name,
+                            execution=execution,
+                            metadata={"loop_managed": True},
+                        ),
                     )
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.exception(
@@ -402,12 +402,6 @@ class AssistantAgent:
                         decision.get("action"),
                     )
                     return f"Tool {decision['tool']}.{decision['action']} failed: {exc}"
-                self._update_tool_loop_state(
-                    decision,
-                    result,
-                    followup_params_by_tool=followup_params_by_tool,
-                    loop_cleanup=loop_cleanup,
-                )
                 steps.append(
                     {
                         "tool": decision["tool"],
@@ -472,51 +466,16 @@ class AssistantAgent:
                 result=last["result"],
             )
         finally:
-            for tool_name, cleanup in loop_cleanup.items():
+            for tool_name, finalizer in execution.finalizers.items():
                 try:
                     self.tools.invoke(
                         tool_name,
-                        str(cleanup["action"]),
-                        dict(cleanup.get("params", {})),
+                        finalizer.action,
+                        dict(finalizer.params),
                         ToolContext(chat_id=chat_id, user_id=user_name),
                     )
                 except Exception:  # noqa: BLE001
                     LOGGER.exception("failed to run tool loop cleanup for %s", tool_name)
-
-    def _bind_tool_followup_params(
-        self,
-        decision: dict[str, Any],
-        *,
-        followup_params: dict[str, Any],
-    ) -> dict[str, Any]:
-        params = dict(decision.get("params", {}))
-        for key, value in followup_params.items():
-            params.setdefault(key, value)
-        return {
-            "tool": decision["tool"],
-            "action": decision["action"],
-            "params": params,
-            "reason": decision.get("reason", ""),
-        }
-
-    def _update_tool_loop_state(
-        self,
-        decision: dict[str, Any],
-        result: ToolResult,
-        *,
-        followup_params_by_tool: dict[str, dict[str, Any]],
-        loop_cleanup: dict[str, dict[str, Any]],
-    ) -> None:
-        tool_name = str(decision.get("tool", ""))
-        followup_params = result.data.get("followup_params")
-        if isinstance(followup_params, dict) and followup_params:
-            followup_params_by_tool[tool_name] = dict(followup_params)
-        cleanup = result.data.get("loop_cleanup")
-        if isinstance(cleanup, dict) and cleanup.get("action"):
-            loop_cleanup[tool_name] = {
-                "action": str(cleanup["action"]),
-                "params": dict(cleanup.get("params", {})),
-            }
 
     def _decide_next_tool_step(
         self,

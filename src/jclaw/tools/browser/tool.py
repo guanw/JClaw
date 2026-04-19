@@ -15,7 +15,7 @@ from jclaw.core.defaults import (
     BROWSER_VIEWPORT_HEIGHT,
     BROWSER_VIEWPORT_WIDTH,
 )
-from jclaw.tools.base import ToolContext, ToolResult
+from jclaw.tools.base import ToolContext, ToolLoopFinalizer, ToolResult
 from jclaw.tools.browser.artifacts import BrowserArtifactStore
 from jclaw.tools.browser.desktop_driver import DesktopBrowserDriver
 from jclaw.tools.browser.models import BrowserReasoner, Target
@@ -195,6 +195,17 @@ class BrowserTool:
             session = self.sessions.get_session(str(session_id))
             self._chat_sessions[ctx.chat_id] = session.session_id
             return session
+        if ctx.execution is not None:
+            loop_state = ctx.execution.tool_state.get(self.name, {})
+            loop_session_id = str(loop_state.get("session_id", "")).strip()
+            if loop_session_id:
+                try:
+                    session = self.sessions.get_session(loop_session_id)
+                    self._chat_sessions[ctx.chat_id] = session.session_id
+                    return session
+                except KeyError:
+                    ctx.execution.tool_state.pop(self.name, None)
+                    ctx.execution.finalizers.pop(self.name, None)
         mapped_session_id = self._chat_sessions.get(ctx.chat_id)
         if mapped_session_id:
             try:
@@ -206,6 +217,8 @@ class BrowserTool:
             persistent=bool(params.get("persistent", True)),
         )
         self._chat_sessions[ctx.chat_id] = session.session_id
+        if ctx.execution is not None:
+            ctx.execution.tool_state[self.name] = {"session_id": session.session_id}
         return session
 
     def _should_auto_close_session(self, params: dict[str, Any]) -> bool:
@@ -218,7 +231,12 @@ class BrowserTool:
     def _cleanup_session_if_needed(self, session_id: str, *, ctx: ToolContext, action: str, params: dict[str, Any]) -> None:
         if not self._should_auto_close_session(params):
             return
-        if ctx.metadata.get("loop_managed"):
+        if ctx.execution is not None:
+            ctx.execution.tool_state[self.name] = {"session_id": session_id}
+            ctx.execution.finalizers[self.name] = ToolLoopFinalizer(
+                action="close_session",
+                params={"session_id": session_id},
+            )
             return
         try:
             self._close_session({"session_id": session_id}, ctx)
@@ -249,7 +267,7 @@ class BrowserTool:
         url = str(params.get("url", "about:blank"))
         data = driver.open_url(session.session_id, url, new_tab=bool(params.get("new_tab", False)))
         session.current_url = url
-        return ToolResult(ok=True, summary=f"Opened {url}", data=self._with_loop_state(session.session_id, params, data))
+        return ToolResult(ok=True, summary=f"Opened {url}", data=data)
 
     def _search_web(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         query = str(params.get("query", "")).strip()
@@ -275,13 +293,13 @@ class BrowserTool:
         session = self._ensure_session(params, ctx)
         driver = self._driver(params)
         data = driver.read_page(session.session_id)
-        return ToolResult(ok=True, summary="Read current page state.", data=self._with_loop_state(session.session_id, params, data))
+        return ToolResult(ok=True, summary="Read current page state.", data=data)
 
     def _click(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
         driver = self._driver(params)
         data = driver.click(session.session_id, self._target(params))
-        return ToolResult(ok=True, summary="Clicked target.", data=self._with_loop_state(session.session_id, params, data))
+        return ToolResult(ok=True, summary="Clicked target.", data=data)
 
     def _type(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -292,7 +310,7 @@ class BrowserTool:
             str(params.get("text", "")),
             submit=bool(params.get("submit", False)),
         )
-        return ToolResult(ok=True, summary="Typed into target.", data=self._with_loop_state(session.session_id, params, data))
+        return ToolResult(ok=True, summary="Typed into target.", data=data)
 
     def _scroll(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -302,7 +320,7 @@ class BrowserTool:
             direction=str(params.get("direction", "down")),
             amount=int(params.get("amount", 600)),
         )
-        return ToolResult(ok=True, summary="Scrolled page.", data=self._with_loop_state(session.session_id, params, data))
+        return ToolResult(ok=True, summary="Scrolled page.", data=data)
 
     def _wait_for(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -310,7 +328,7 @@ class BrowserTool:
         raw_target = params.get("target")
         target = self._target(params) if raw_target else None
         data = driver.wait_for(session.session_id, target, timeout_ms=int(params.get("timeout_ms", 5000)))
-        return ToolResult(ok=True, summary="Waited for page state.", data=self._with_loop_state(session.session_id, params, data))
+        return ToolResult(ok=True, summary="Waited for page state.", data=data)
 
     def _screenshot(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -325,7 +343,7 @@ class BrowserTool:
         else:
             shot = driver.screenshot(session.session_id, full_page=bool(params.get("full_page", False)))
         data = {"artifact_id": artifact.artifact_id, "path": artifact.path, **shot}
-        return ToolResult(ok=True, summary="Created screenshot artifact.", data=self._with_loop_state(session.session_id, params, data))
+        return ToolResult(ok=True, summary="Created screenshot artifact.", data=data)
 
     def _extract(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -336,7 +354,7 @@ class BrowserTool:
             result = ToolResult(
                 ok=False,
                 summary="No extraction fields were provided.",
-                data=self._with_loop_state(session.session_id, params, {"fields": {}, **page_data}),
+                data={"fields": {}, **page_data},
             )
             self._cleanup_session_if_needed(session.session_id, ctx=ctx, action="extract", params=params)
             return result
@@ -345,19 +363,19 @@ class BrowserTool:
             result = ToolResult(
                 ok=False,
                 summary="Browser extraction is unavailable for the current page.",
-                data=self._with_loop_state(session.session_id, params, {"fields": {}, **page_data}),
+                data={"fields": {}, **page_data},
             )
             self._cleanup_session_if_needed(session.session_id, ctx=ctx, action="extract", params=params)
             return result
         result = ToolResult(
             ok=True,
             summary=f"Extracted {len(extracted.get('fields', {}))} field(s) from the current page.",
-            data=self._with_loop_state(session.session_id, params, {
+            data={
                 "fields": extracted.get("fields", {}),
                 "evidence_refs": extracted.get("evidence_refs", []),
                 "missing_information": extracted.get("missing_information", ""),
                 **page_data,
-            }),
+            },
         )
         self._cleanup_session_if_needed(session.session_id, ctx=ctx, action="extract", params=params)
         return result
@@ -543,7 +561,7 @@ class BrowserTool:
                 f"Executed browser objective and captured {len(sources)} source page"
                 f"{'' if len(sources) == 1 else 's'}."
             ),
-            data=self._with_loop_state(session.session_id, params, {
+            data={
                 "session_id": session.session_id,
                 "objective": objective,
                 "steps": executed_steps,
@@ -564,7 +582,7 @@ class BrowserTool:
                 "observations": [self._compact_observation_for_trace(item) for item in observations],
                 **current_read.data,
                 "mode": self._driver(params).mode,
-            }),
+            },
         )
         self._cleanup_session_if_needed(session.session_id, ctx=ctx, action="run_objective", params=params)
         return result
@@ -575,6 +593,11 @@ class BrowserTool:
         if callable(close_session):
             close_session(session_id)
         self.sessions.close_session(session_id)
+        if ctx.execution is not None:
+            loop_state = ctx.execution.tool_state.get(self.name, {})
+            if str(loop_state.get("session_id", "")) == session_id:
+                ctx.execution.tool_state.pop(self.name, None)
+                ctx.execution.finalizers.pop(self.name, None)
         for chat_id, mapped_session_id in list(self._chat_sessions.items()):
             if mapped_session_id == session_id:
                 self._chat_sessions.pop(chat_id, None)
@@ -861,13 +884,6 @@ class BrowserTool:
         if observation.get("page_kind") == "search_results":
             return False
         return bool(observation.get("text_preview", "").strip() or observation.get("content_blocks"))
-
-    def _with_loop_state(self, session_id: str, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
-        enriched = dict(data)
-        enriched["followup_params"] = {"session_id": session_id}
-        if not params.get("session_id") and not bool(params.get("keep_session", False)):
-            enriched["loop_cleanup"] = {"action": "close_session", "params": {"session_id": session_id}}
-        return enriched
 
     def _extract_candidate_elements(self, page_data: dict[str, Any]) -> list[dict[str, Any]]:
         elements = page_data.get("elements", [])
