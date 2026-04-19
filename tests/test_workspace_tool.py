@@ -78,6 +78,71 @@ def test_inspect_root_reports_when_entries_are_truncated(tmp_path) -> None:
     db.close()
 
 
+def test_path_metadata_find_files_and_search_contents(tmp_path) -> None:
+    root = tmp_path / "repo"
+    docs = root / "docs"
+    docs.mkdir(parents=True)
+    target = docs / "notes.txt"
+    target.write_text("alpha\nbeta keyword\n", encoding="utf-8")
+    other = docs / "todo.md"
+    other.write_text("keyword appears here too\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    metadata = tool.invoke("path_metadata", {"path": str(target)}, ToolContext(chat_id="chat-1"))
+    assert metadata.ok is True
+    assert metadata.data["kind"] == "file"
+    assert metadata.data["metadata"]["size_bytes"] > 0
+
+    found = tool.invoke(
+        "find_files",
+        {"path": str(root), "pattern": "*.txt"},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert found.ok is True
+    assert found.data["match_count"] == 1
+    assert found.data["matches"][0]["path"] == "docs/notes.txt"
+
+    searched = tool.invoke(
+        "search_contents",
+        {"path": str(root), "query": "keyword"},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert searched.ok is True
+    assert searched.data["match_count"] == 2
+    assert {item["path"] for item in searched.data["matches"]} == {"docs/notes.txt", "docs/todo.md"}
+    db.close()
+
+
+def test_search_contents_supports_regex_queries_and_file_pattern(tmp_path) -> None:
+    root = tmp_path / "repo"
+    src = root / "src"
+    src.mkdir(parents=True)
+    py_file = src / "tool.py"
+    py_file.write_text("value = re.search('x', text)\n", encoding="utf-8")
+    txt_file = src / "notes.txt"
+    txt_file.write_text("re.search should not count when file_pattern is python-only\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    searched = tool.invoke(
+        "search_contents",
+        {
+            "root": str(root),
+            "query": r"re\.(compile|match|search|findall)",
+            "file_pattern": "*.py",
+        },
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert searched.ok is True
+    assert searched.data["match_count"] == 1
+    assert searched.data["matches"][0]["path"] == "src/tool.py"
+    db.close()
+
+
 def test_prepare_change_previews_before_apply(tmp_path) -> None:
     root = tmp_path / "repo"
     root.mkdir()
@@ -117,6 +182,74 @@ def test_prepare_change_previews_before_apply(tmp_path) -> None:
     )
     assert applied.ok is True
     assert target.read_text(encoding="utf-8") == "print('goodbye')\n"
+    db.close()
+
+
+def test_rename_move_copy_and_delete_paths_require_preview_then_apply(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    source = root / "notes.txt"
+    source.write_text("hello\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    rename_preview = tool.invoke(
+        "rename_path",
+        {"path": str(source), "new_name": "renamed.txt"},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert rename_preview.needs_confirmation is True
+    rename_apply = tool.invoke(
+        "apply_path_request",
+        {"request_id": rename_preview.data["request_id"]},
+        ToolContext(chat_id="chat-1"),
+    )
+    renamed = root / "renamed.txt"
+    assert rename_apply.ok is True
+    assert renamed.exists()
+
+    move_preview = tool.invoke(
+        "move_path",
+        {"source_path": str(renamed), "destination_path": str(root / "nested" / "moved.txt")},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert move_preview.needs_confirmation is True
+    tool.invoke(
+        "apply_path_request",
+        {"request_id": move_preview.data["request_id"]},
+        ToolContext(chat_id="chat-1"),
+    )
+    moved = root / "nested" / "moved.txt"
+    assert moved.exists()
+
+    copy_preview = tool.invoke(
+        "copy_path",
+        {"source_path": str(moved), "destination_path": str(root / "copy.txt")},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert copy_preview.needs_confirmation is True
+    tool.invoke(
+        "apply_path_request",
+        {"request_id": copy_preview.data["request_id"]},
+        ToolContext(chat_id="chat-1"),
+    )
+    copied = root / "copy.txt"
+    assert copied.exists()
+
+    delete_preview = tool.invoke(
+        "delete_path",
+        {"path": str(copied)},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert delete_preview.needs_confirmation is True
+    delete_apply = tool.invoke(
+        "apply_path_request",
+        {"request_id": delete_preview.data["request_id"]},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert delete_apply.ok is True
+    assert not copied.exists()
     db.close()
 
 

@@ -400,6 +400,41 @@ def test_workspace_preview_pauses_until_approval(tmp_path) -> None:
     db.close()
 
 
+def test_workspace_path_mutation_approval_applies_request(tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    target = repo_root / "notes.txt"
+    target.write_text("hello\n", encoding="utf-8")
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=repo_root,
+    )
+    db = Database(config.daemon.db_path)
+    db.upsert_grant(str(repo_root.resolve()), ("write",), "chat-1")
+    agent = AssistantAgent(config, db, DummyLLM())
+
+    preview = agent.tools.get("workspace").invoke(
+        "rename_path",
+        {"path": str(target), "new_name": "renamed.txt"},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert preview.needs_confirmation is True
+
+    apply_reply = agent.handle_text("chat-1", f"/approve {preview.data['request_id']}")
+    assert "Applied approved path request" in apply_reply
+    assert (repo_root / "renamed.txt").exists()
+    db.close()
+
+
 def test_workspace_inspect_reply_is_raw_tool_output(tmp_path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
@@ -436,6 +471,44 @@ def test_workspace_inspect_reply_is_raw_tool_output(tmp_path) -> None:
     assert "notes.txt" in reply
     assert "Total entries: 1" in reply
     assert "Hallucinated workspace summary" not in reply
+    db.close()
+
+
+def test_workspace_find_files_reply_preserves_all_matches(tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    for index in range(6):
+        (repo_root / f"file-{index}.py").write_text("print('x')\n", encoding="utf-8")
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=repo_root,
+    )
+    db = Database(config.daemon.db_path)
+    db.upsert_grant(str(repo_root.resolve()), ("read",), "chat-1")
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"status":"continue","tool":"workspace","action":"find_files","params":{"path":".","pattern":"*.py"},"reason":"Find python files."}',
+                "This fallback LLM text should not be used.",
+            ]
+        ),
+    )
+
+    reply = agent.handle_text("chat-1", "find all python files")
+    for index in range(6):
+        assert f"file-{index}.py" in reply
+    assert "This fallback LLM text should not be used." not in reply
     db.close()
 
 

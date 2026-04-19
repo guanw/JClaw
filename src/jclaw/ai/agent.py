@@ -288,6 +288,7 @@ class AssistantAgent:
             return f"{grant_message}\n\n{formatted}"
         action_map = {
             "file_mutation": "apply_change_request",
+            "path_mutation": "apply_path_request",
             "git_mutation": "apply_git_request",
             "shell_mutation": "apply_shell_request",
         }

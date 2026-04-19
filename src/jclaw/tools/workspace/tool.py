@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import difflib
+import fnmatch
 import json
+import os
 import re
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 from typing import Any, Callable
 
@@ -78,11 +81,40 @@ class WorkspaceTool:
                     "description": "Inspect a local path or list a directory.",
                     "use_when": ["the user wants to inspect, list, or verify local paths on the machine"],
                 },
+                "path_metadata": {
+                    "description": "Inspect detailed metadata for a local path.",
+                    "use_when": ["the user wants metadata such as size, timestamps, or file type for a local path"],
+                },
+                "find_files": {
+                    "description": "Find files by name or glob pattern under an approved local path.",
+                    "use_when": ["the user wants to locate files by name, pattern, or extension in a local folder"],
+                },
+                "search_contents": {
+                    "description": "Search literal text inside readable local files under an approved path.",
+                    "use_when": ["the user wants to find which local files or lines mention a string"],
+                },
                 "prepare_change": {
                     "description": "Prepare a preview for local file or code changes.",
                     "use_when": ["the user wants to modify local files or code"],
                 },
+                "rename_path": {
+                    "description": "Prepare a preview to rename a file or directory within the same parent folder.",
+                    "use_when": ["the user wants to rename a local file or folder without moving it elsewhere"],
+                },
+                "move_path": {
+                    "description": "Prepare a preview to move a file or directory to another path inside an approved root.",
+                    "use_when": ["the user wants to relocate a local file or folder"],
+                },
+                "copy_path": {
+                    "description": "Prepare a preview to copy a file or directory to another path inside an approved root.",
+                    "use_when": ["the user wants to duplicate a local file or folder"],
+                },
+                "delete_path": {
+                    "description": "Prepare a preview to delete a local file or directory.",
+                    "use_when": ["the user wants to remove a local file or folder"],
+                },
                 "apply_change_request": {"description": "Apply a previously approved file change request."},
+                "apply_path_request": {"description": "Apply a previously approved path mutation request."},
                 "git_status": {
                     "description": "Read local git status and diff summary.",
                     "use_when": ["the user wants local repository status without mutation"],
@@ -99,6 +131,7 @@ class WorkspaceTool:
             },
             "dangerous": True,
             "preview_required": True,
+            "prefer_direct_result": True,
             "path_resolution": {
                 "repo_root": str(self.repo_root),
                 "home_dir": str(self.home_dir),
@@ -140,6 +173,24 @@ class WorkspaceTool:
             lines.append("Touched files:")
             for file_path in data["touched_files"][:10]:
                 lines.append(f"- {file_path}")
+        if data.get("source_path"):
+            lines.append(f"Source: {data['source_path']}")
+        if data.get("destination_path"):
+            lines.append(f"Destination: {data['destination_path']}")
+        if data.get("metadata"):
+            lines.append("Metadata:")
+            for key in ("size_bytes", "modified_at", "created_at", "suffix", "mode"):
+                if key in data["metadata"]:
+                    lines.append(f"- {key}: {data['metadata'][key]}")
+        if data.get("matches"):
+            lines.append("Matches:")
+            for item in data["matches"][:10]:
+                if "line_number" in item:
+                    lines.append(f"- {item['path']}:{item['line_number']}: {item['line']}")
+                else:
+                    lines.append(f"- {item['path']}")
+            if data.get("match_count", 0) > len(data["matches"]):
+                lines.append(f"Shown {len(data['matches'])} of {data['match_count']} matches.")
         if data.get("diff_preview"):
             lines.append(f"Diff preview:\n{str(data['diff_preview'])[:1500]}")
         if data.get("command"):
@@ -161,8 +212,16 @@ class WorkspaceTool:
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handlers = {
             "inspect_root": self._inspect_root,
+            "path_metadata": self._path_metadata,
+            "find_files": self._find_files,
+            "search_contents": self._search_contents,
             "prepare_change": self._prepare_change,
+            "rename_path": self._rename_path,
+            "move_path": self._move_path,
+            "copy_path": self._copy_path,
+            "delete_path": self._delete_path,
             "apply_change_request": self._apply_change_request,
+            "apply_path_request": self._apply_path_request,
             "git_status": self._git_status,
             "prepare_git_action": self._prepare_git_action,
             "apply_git_request": self._apply_git_request,
@@ -237,6 +296,165 @@ class WorkspaceTool:
                 "entries_truncated": entries_truncated,
                 "git_root": None if git_root is None else str(git_root),
                 "approved_path": str(target_path),
+            },
+        )
+
+    def _path_metadata(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        objective = str(params.get("objective", "Inspect path metadata")).strip()
+        target_path = self._resolve_target_path(params.get("path") or params.get("root_path"))
+        root_path = self._default_root_for_path(target_path)
+        permission = self._ensure_grant(
+            root_path,
+            capabilities=("read",),
+            ctx=ctx,
+            objective=objective,
+            kind="grant",
+            continuation_action="path_metadata",
+            continuation_params=params,
+        )
+        if permission is not None:
+            return permission
+        if not target_path.exists():
+            return ToolResult(ok=False, summary=f"{target_path} does not exist.", data={"target_path": str(target_path)})
+        stats = target_path.stat()
+        kind = "directory" if target_path.is_dir() else "file"
+        metadata = {
+            "size_bytes": stats.st_size,
+            "modified_at": datetime.fromtimestamp(stats.st_mtime, tz=timezone.utc).isoformat(),
+            "created_at": datetime.fromtimestamp(stats.st_ctime, tz=timezone.utc).isoformat(),
+            "suffix": target_path.suffix,
+            "mode": oct(stats.st_mode & 0o777),
+        }
+        if kind == "directory":
+            metadata["entry_count"] = sum(1 for _ in target_path.iterdir())
+        return ToolResult(
+            ok=True,
+            summary=f"Collected metadata for {target_path}.",
+            data={
+                "root_path": str(root_path),
+                "target_path": str(target_path),
+                "exists": True,
+                "kind": kind,
+                "metadata": metadata,
+            },
+        )
+
+    def _find_files(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        objective = str(params.get("objective", "Find local files")).strip()
+        target_path = self._resolve_target_path(params.get("path") or params.get("root_path") or params.get("root"))
+        root_path = self._default_root_for_path(target_path)
+        permission = self._ensure_grant(
+            root_path,
+            capabilities=("read",),
+            ctx=ctx,
+            objective=objective,
+            kind="grant",
+            continuation_action="find_files",
+            continuation_params=params,
+        )
+        if permission is not None:
+            return permission
+        pattern = str(params.get("pattern", "")).strip()
+        query = str(params.get("query", "")).strip().lower()
+        if not pattern and not query:
+            return ToolResult(ok=False, summary="Finding files requires a pattern or query.", data={"root_path": str(root_path)})
+        search_root = target_path if target_path.exists() and target_path.is_dir() else root_path
+        matches: list[dict[str, str]] = []
+        match_count = 0
+        for path in self._iter_searchable_paths(search_root):
+            if not path.is_file():
+                continue
+            relative = str(path.relative_to(root_path))
+            name = path.name
+            matched = False
+            if pattern and (fnmatch.fnmatch(name, pattern) or fnmatch.fnmatch(relative, pattern)):
+                matched = True
+            if query and (query in name.lower() or query in relative.lower()):
+                matched = True
+            if not matched:
+                continue
+            match_count += 1
+            if len(matches) < self.max_path_entries:
+                matches.append({"path": relative, "name": name})
+        return ToolResult(
+            ok=True,
+            summary=f"Found {match_count} matching file(s) under {search_root}.",
+            data={
+                "root_path": str(root_path),
+                "target_path": str(search_root),
+                "matches": matches,
+                "match_count": match_count,
+            },
+        )
+
+    def _search_contents(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        objective = str(params.get("objective", "Search file contents")).strip()
+        query = str(params.get("query") or params.get("text") or "").strip()
+        if not query:
+            return ToolResult(ok=False, summary="Searching contents requires a query string.", data={})
+        case_sensitive = bool(params.get("case_sensitive", False))
+        file_pattern = str(params.get("file_pattern", "")).strip()
+        use_regex = bool(params.get("regex")) or self._looks_like_regex(query)
+        target_path = self._resolve_target_path(params.get("path") or params.get("root_path") or params.get("root"))
+        root_path = self._default_root_for_path(target_path)
+        permission = self._ensure_grant(
+            root_path,
+            capabilities=("read",),
+            ctx=ctx,
+            objective=objective or query,
+            kind="grant",
+            continuation_action="search_contents",
+            continuation_params=params,
+        )
+        if permission is not None:
+            return permission
+        search_root = target_path if target_path.exists() and target_path.is_dir() else target_path
+        candidate_files = [search_root] if search_root.exists() and search_root.is_file() else self._iter_searchable_paths(search_root)
+        matches: list[dict[str, Any]] = []
+        match_count = 0
+        needle = query if case_sensitive else query.lower()
+        pattern: re.Pattern[str] | None = None
+        if use_regex:
+            try:
+                pattern = re.compile(query, 0 if case_sensitive else re.IGNORECASE)
+            except re.error as exc:
+                return ToolResult(ok=False, summary=f"Invalid regex query: {exc}", data={"query": query})
+        for path in candidate_files:
+            if not path.is_file():
+                continue
+            relative_path = str(path.relative_to(root_path))
+            if file_pattern and not (
+                fnmatch.fnmatch(path.name, file_pattern) or fnmatch.fnmatch(relative_path, file_pattern)
+            ):
+                continue
+            content = self._read_text(path)
+            if not content:
+                continue
+            for line_number, line in enumerate(content.splitlines(), start=1):
+                if pattern is not None:
+                    if pattern.search(line) is None:
+                        continue
+                else:
+                    haystack = line if case_sensitive else line.lower()
+                    if needle not in haystack:
+                        continue
+                match_count += 1
+                if len(matches) < self.max_path_entries:
+                    matches.append(
+                        {
+                            "path": relative_path,
+                            "line_number": line_number,
+                            "line": line[:200],
+                        }
+                    )
+        return ToolResult(
+            ok=True,
+            summary=f"Found {match_count} content match(es) for '{query}'.",
+            data={
+                "root_path": str(root_path),
+                "target_path": str(search_root),
+                "matches": matches,
+                "match_count": match_count,
             },
         )
 
@@ -349,6 +567,105 @@ class WorkspaceTool:
             ok=True,
             summary=f"Applied approved file change request {request.request_id}.",
             data={"request_id": request.request_id, "root_path": request.root_path, "touched_files": touched_files},
+        )
+
+    def _rename_path(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        source = self._resolve_target_path(params.get("path") or params.get("source_path"))
+        new_name = str(params.get("new_name", "")).strip()
+        if not new_name or Path(new_name).name != new_name:
+            return ToolResult(ok=False, summary="Renaming a path requires a simple new_name.", data={})
+        destination = source.parent / new_name
+        return self._prepare_path_mutation(
+            operation="rename",
+            source_path=source,
+            destination_path=destination,
+            ctx=ctx,
+            objective=str(params.get("objective", f"Rename {source.name} to {new_name}")).strip(),
+            continuation_params=params,
+        )
+
+    def _move_path(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        source = self._resolve_target_path(params.get("path") or params.get("source_path"))
+        destination = self._resolve_target_path(params.get("destination_path") or params.get("to_path"))
+        return self._prepare_path_mutation(
+            operation="move",
+            source_path=source,
+            destination_path=destination,
+            ctx=ctx,
+            objective=str(params.get("objective", f"Move {source.name}")).strip(),
+            continuation_params=params,
+        )
+
+    def _copy_path(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        source = self._resolve_target_path(params.get("path") or params.get("source_path"))
+        destination = self._resolve_target_path(params.get("destination_path") or params.get("to_path"))
+        return self._prepare_path_mutation(
+            operation="copy",
+            source_path=source,
+            destination_path=destination,
+            ctx=ctx,
+            objective=str(params.get("objective", f"Copy {source.name}")).strip(),
+            continuation_params=params,
+        )
+
+    def _delete_path(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        source = self._resolve_target_path(params.get("path") or params.get("source_path"))
+        return self._prepare_path_mutation(
+            operation="delete",
+            source_path=source,
+            destination_path=None,
+            ctx=ctx,
+            objective=str(params.get("objective", f"Delete {source.name}")).strip(),
+            continuation_params=params,
+        )
+
+    def _apply_path_request(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        request = self._require_request(str(params.get("request_id", "")).strip(), expected_kind="path_mutation")
+        if request is None:
+            return ToolResult(ok=False, summary="Pending path request not found.", data={})
+        self.db.update_approval_request_status(request.request_id, "approved")
+        operation = str(request.payload.get("operation", "")).strip()
+        source = Path(str(request.payload.get("source_path", "")))
+        destination_raw = request.payload.get("destination_path")
+        destination = None if destination_raw in (None, "") else Path(str(destination_raw))
+        try:
+            if operation == "rename":
+                assert destination is not None
+                source.rename(destination)
+            elif operation == "move":
+                assert destination is not None
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(destination))
+            elif operation == "copy":
+                assert destination is not None
+                if source.is_dir():
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(source, destination)
+                else:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+            elif operation == "delete":
+                if source.is_dir():
+                    shutil.rmtree(source)
+                else:
+                    source.unlink()
+            else:
+                raise RuntimeError(f"Unsupported path operation: {operation}")
+        except Exception:  # noqa: BLE001
+            self.db.update_approval_request_status(request.request_id, "failed")
+            raise
+        self.db.update_approval_request_status(request.request_id, "applied")
+        touched_files = [str(item) for item in request.payload.get("touched_files", [])]
+        return ToolResult(
+            ok=True,
+            summary=f"Applied approved path request {request.request_id}.",
+            data={
+                "request_id": request.request_id,
+                "root_path": request.root_path,
+                "source_path": str(source),
+                "destination_path": None if destination is None else str(destination),
+                "touched_files": touched_files,
+            },
         )
 
     def _git_status(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -597,6 +914,114 @@ class WorkspaceTool:
         if request.status in {"denied", "aborted", "applied", "failed"}:
             return None
         return request
+
+    def _prepare_path_mutation(
+        self,
+        *,
+        operation: str,
+        source_path: Path,
+        destination_path: Path | None,
+        ctx: ToolContext,
+        objective: str,
+        continuation_params: dict[str, Any],
+    ) -> ToolResult:
+        mutation_root = self._common_mutation_root(source_path, destination_path)
+        permission = self._ensure_grant(
+            mutation_root,
+            capabilities=("write",),
+            ctx=ctx,
+            objective=objective or f"{operation} path",
+            kind="grant",
+            continuation_action=f"{operation}_path" if operation in {"rename", "move", "copy", "delete"} else "inspect_root",
+            continuation_params=continuation_params,
+        )
+        if permission is not None:
+            return permission
+        validation_error = self._validate_path_mutation(operation, source_path, destination_path, mutation_root)
+        if validation_error is not None:
+            return ToolResult(ok=False, summary=validation_error, data={"root_path": str(mutation_root)})
+        touched_files = [str(source_path.relative_to(mutation_root))]
+        if destination_path is not None:
+            touched_files.append(str(destination_path.relative_to(mutation_root)))
+        payload = {
+            "operation": operation,
+            "source_path": str(source_path),
+            "destination_path": None if destination_path is None else str(destination_path),
+            "touched_files": touched_files,
+        }
+        request = self.db.create_approval_request(
+            kind="path_mutation",
+            chat_id=ctx.chat_id,
+            root_path=str(mutation_root),
+            capabilities=("write",),
+            objective=objective or f"{operation} path",
+            payload=payload,
+        )
+        destination_summary = "" if destination_path is None else f" -> {destination_path.relative_to(mutation_root)}"
+        return ToolResult(
+            ok=True,
+            summary=f"Prepared a path {operation} preview. Approval required: {request.request_id}",
+            data={
+                "request_id": request.request_id,
+                "request_kind": request.kind,
+                "root_path": str(mutation_root),
+                "source_path": str(source_path),
+                "destination_path": None if destination_path is None else str(destination_path),
+                "touched_files": touched_files,
+                "preview": f"{operation}: {source_path.relative_to(mutation_root)}{destination_summary}",
+            },
+            needs_confirmation=True,
+        )
+
+    def _common_mutation_root(self, source_path: Path, destination_path: Path | None) -> Path:
+        candidates = [source_path]
+        if destination_path is not None:
+            candidates.append(destination_path)
+        common = Path(os.path.commonpath([str(path) for path in candidates]))
+        if common.exists() and common.is_file():
+            common = common.parent
+        if self._detect_git_root(common) is not None:
+            return self._detect_git_root(common) or common
+        return common
+
+    def _validate_path_mutation(
+        self,
+        operation: str,
+        source_path: Path,
+        destination_path: Path | None,
+        root_path: Path,
+    ) -> str | None:
+        if not source_path.exists():
+            return f"{source_path} does not exist."
+        if not self._path_within(source_path, root_path):
+            return "Source path is outside the approved root."
+        if operation == "delete" and source_path == root_path:
+            return "Refusing to delete the approved root directly."
+        if destination_path is None:
+            return None
+        if not self._path_within(destination_path, root_path):
+            return "Destination path is outside the approved root."
+        if destination_path.exists():
+            return f"{destination_path} already exists."
+        if operation == "rename" and destination_path.parent != source_path.parent:
+            return "rename_path only supports renaming within the same parent directory."
+        return None
+
+    def _iter_searchable_paths(self, search_root: Path) -> list[Path]:
+        if not search_root.exists():
+            return []
+        blocked_parts = {"node_modules", ".venv", "__pycache__", ".git"}
+        paths: list[Path] = []
+        for path in sorted(search_root.rglob("*"), key=lambda item: str(item).lower()):
+            if any(part in blocked_parts for part in path.parts):
+                continue
+            if any(part.startswith(".") and part not in {".github"} for part in path.parts):
+                continue
+            paths.append(path)
+        return paths
+
+    def _looks_like_regex(self, query: str) -> bool:
+        return any(token in query for token in ("\\", "|", "(", ")", "[", "]", "{", "}", "+", "*", "?"))
 
     def _normalize_draft_edits(self, *, root_path: Path, draft: dict[str, Any]) -> list[dict[str, str]]:
         edits: list[dict[str, str]] = []
