@@ -17,15 +17,15 @@ class AutomationTool:
     def describe(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "description": "Create, inspect, update, and remove recurring schedules for future JClaw tasks.",
+            "description": "Create, inspect, update, and remove recurring or one-off schedules for future JClaw tasks.",
             "actions": {
                 "list_schedules": {
                     "description": "List the current recurring schedules for this chat.",
                     "use_when": ["the user asks what schedules or reminders are currently configured"],
                 },
                 "create_schedule": {
-                    "description": "Create a recurring schedule with a schedule string and prompt.",
-                    "use_when": ["the user asks to add or schedule a recurring reminder or task"],
+                    "description": "Create a recurring or one-off schedule with a schedule string and prompt.",
+                    "use_when": ["the user asks to add or schedule a reminder or task, including one-off reminders like 'in 30 minutes'"],
                 },
                 "update_schedule": {
                     "description": "Update an existing schedule's timing, prompt, or enabled state.",
@@ -74,11 +74,11 @@ class AutomationTool:
     def _list_schedules(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         jobs = self.db.list_cron_jobs(ctx.chat_id)
         if not jobs:
-            return ToolResult(ok=True, summary="No schedules configured.", data={"jobs": []})
+            return ToolResult(ok=True, summary="No schedules configured.", data={"jobs": [], "allow_tool_followup": False})
         return ToolResult(
             ok=True,
             summary=f"Listed {len(jobs)} schedules.",
-            data={"jobs": [self._serialize_job(job) for job in jobs]},
+            data={"jobs": [self._serialize_job(job) for job in jobs], "allow_tool_followup": False},
         )
 
     def _create_schedule(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -88,12 +88,12 @@ class AutomationTool:
             return ToolResult(
                 ok=False,
                 summary="Creating a schedule requires both schedule and prompt.",
-                data={},
+                data={"allow_tool_followup": False},
             )
         try:
             spec = parse_schedule(schedule)
         except ValueError as exc:
-            return ToolResult(ok=False, summary=str(exc), data={"schedule": schedule})
+            return ToolResult(ok=False, summary=str(exc), data={"schedule": schedule, "allow_tool_followup": False})
         next_run = to_utc_iso(next_run_at(spec))
         job_id = self.db.add_cron_job(ctx.chat_id, spec.raw, prompt, next_run)
         job = self.db.get_cron_job(ctx.chat_id, job_id)
@@ -101,17 +101,17 @@ class AutomationTool:
         return ToolResult(
             ok=True,
             summary=f"Created schedule {job_id}.",
-            data={"job": self._serialize_job(job)},
+            data={"job": self._serialize_job(job), "allow_tool_followup": False},
         )
 
     def _update_schedule(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         try:
             job_id = int(params.get("job_id"))
         except (TypeError, ValueError):
-            return ToolResult(ok=False, summary="Updating a schedule requires a numeric job_id.", data={})
+            return ToolResult(ok=False, summary="Updating a schedule requires a numeric job_id.", data={"allow_tool_followup": False})
         current = self.db.get_cron_job(ctx.chat_id, job_id)
         if current is None:
-            return ToolResult(ok=False, summary=f"Schedule {job_id} was not found.", data={})
+            return ToolResult(ok=False, summary=f"Schedule {job_id} was not found.", data={"allow_tool_followup": False})
 
         schedule_param = params.get("schedule")
         prompt_param = params.get("prompt")
@@ -123,7 +123,7 @@ class AutomationTool:
             try:
                 spec = parse_schedule(str(schedule_param).strip())
             except ValueError as exc:
-                return ToolResult(ok=False, summary=str(exc), data={"schedule": str(schedule_param).strip()})
+                return ToolResult(ok=False, summary=str(exc), data={"schedule": str(schedule_param).strip(), "allow_tool_followup": False})
             schedule = spec.raw
             next_run = to_utc_iso(next_run_at(spec))
 
@@ -145,24 +145,24 @@ class AutomationTool:
             enabled=enabled,
         )
         if not updated:
-            return ToolResult(ok=False, summary=f"No schedule changes were applied to {job_id}.", data={})
+            return ToolResult(ok=False, summary=f"No schedule changes were applied to {job_id}.", data={"allow_tool_followup": False})
         job = self.db.get_cron_job(ctx.chat_id, job_id)
         assert job is not None
         return ToolResult(
             ok=True,
             summary=f"Updated schedule {job_id}.",
-            data={"job": self._serialize_job(job)},
+            data={"job": self._serialize_job(job), "allow_tool_followup": False},
         )
 
     def _remove_schedule(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         try:
             job_id = int(params.get("job_id"))
         except (TypeError, ValueError):
-            return ToolResult(ok=False, summary="Removing a schedule requires a numeric job_id.", data={})
+            return ToolResult(ok=False, summary="Removing a schedule requires a numeric job_id.", data={"allow_tool_followup": False})
         deleted = self.db.remove_cron_job(ctx.chat_id, job_id)
         if not deleted:
-            return ToolResult(ok=False, summary=f"Schedule {job_id} was not found.", data={})
-        return ToolResult(ok=True, summary=f"Removed schedule {job_id}.", data={"job_id": job_id})
+            return ToolResult(ok=False, summary=f"Schedule {job_id} was not found.", data={"allow_tool_followup": False})
+        return ToolResult(ok=True, summary=f"Removed schedule {job_id}.", data={"job_id": job_id, "allow_tool_followup": False})
 
     def _serialize_job(self, job: CronJobRecord) -> dict[str, Any]:
         return {

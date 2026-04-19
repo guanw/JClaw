@@ -73,4 +73,7 @@ class JClawDaemon:
             reply = self.agent.handle_cron(job.chat_id, job.prompt)
             self.channel.send_message(job.chat_id, reply)
             spec = parse_schedule(job.schedule)
-            self.db.update_cron_next_run(job.id, to_utc_iso(next_run_at(spec)))
+            if spec.kind == "once":
+                self.db.update_cron_job(job.chat_id, job.id, enabled=False)
+            else:
+                self.db.update_cron_next_run(job.id, to_utc_iso(next_run_at(spec)))

@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from jclaw.channel.base import IncomingMessage
+from jclaw.core.db import Database
 from jclaw.daemon.service import JClawDaemon
 
 
@@ -65,3 +66,30 @@ def test_daemon_advances_offset_when_message_handling_fails() -> None:
     daemon.run_forever()
 
     assert daemon.db.offset == 8
+
+
+def test_run_due_cron_jobs_disables_one_off_job(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    job_id = db.add_cron_job(
+        "chat-1",
+        "in 30 minutes",
+        "stretch",
+        "2000-01-01T00:00:00+00:00",
+    )
+    daemon = object.__new__(JClawDaemon)
+    daemon.db = db
+
+    sent_messages: list[tuple[str, str]] = []
+    daemon.channel = SimpleNamespace(
+        send_message=lambda chat_id, text, reply_to_message_id=None: sent_messages.append((chat_id, text)),
+        close=lambda: None,
+    )
+    daemon.agent = SimpleNamespace(handle_cron=lambda chat_id, prompt: f"Reminder: {prompt}")
+
+    daemon._run_due_cron_jobs()
+
+    job = db.get_cron_job("chat-1", job_id)
+    assert sent_messages == [("chat-1", "Reminder: stretch")]
+    assert job is not None
+    assert job.enabled is False
+    db.close()

@@ -22,9 +22,31 @@ def parse_schedule(text: str) -> ScheduleSpec:
     raw = text.strip()
     lowered = raw.lower()
 
+    once_match = re.fullmatch(
+        r"in\s+(\d+)\s*(m|min|mins|minute|minutes|h|hour|hours|d|day|days)",
+        lowered,
+    )
+    if once_match:
+        amount = int(once_match.group(1))
+        if amount <= 0:
+            raise ValueError("unsupported schedule; use 'in 30 minutes', 'every 30m', 'hourly', or 'daily 09:00'")
+        unit = once_match.group(2)
+        multiplier = 60
+        if unit in {"h", "hour", "hours"}:
+            multiplier = 3600
+        elif unit in {"d", "day", "days"}:
+            multiplier = 86400
+        return ScheduleSpec(
+            raw=raw,
+            kind="once",
+            interval_seconds=amount * multiplier,
+        )
+
     every_match = re.fullmatch(r"every\s+(\d+)\s*([mhd]|min|mins|minute|minutes|hour|hours|day|days)", lowered)
     if every_match:
         amount = int(every_match.group(1))
+        if amount <= 0:
+            raise ValueError("unsupported schedule; use 'in 30 minutes', 'every 30m', 'hourly', or 'daily 09:00'")
         unit = every_match.group(2)
         multiplier = 60
         if unit in {"h", "hour", "hours"}:
@@ -45,11 +67,14 @@ def parse_schedule(text: str) -> ScheduleSpec:
             minute=int(daily_match.group(2)),
         )
 
-    raise ValueError("unsupported schedule; use 'every 30m', 'hourly', or 'daily 09:00'")
+    raise ValueError("unsupported schedule; use 'in 30 minutes', 'every 30m', 'hourly', or 'daily 09:00'")
 
 
 def next_run_at(spec: ScheduleSpec, *, from_dt: datetime | None = None) -> datetime:
     current = from_dt or _local_now()
+    if spec.kind == "once" and spec.interval_seconds is not None:
+        return current + timedelta(seconds=spec.interval_seconds)
+
     if spec.kind == "interval" and spec.interval_seconds is not None:
         return current + timedelta(seconds=spec.interval_seconds)
 

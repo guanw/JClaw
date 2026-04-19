@@ -242,6 +242,7 @@ class AssistantAgent:
             "/remember key = value\n"
             "/memory\n"
             "/forget key\n"
+            "/cron add in 30 minutes | remind me to stretch\n"
             "/cron add every 30m | remind me to stretch\n"
             "/cron add daily 09:00 | ask for my standup update\n"
             "/cron list\n"
@@ -401,6 +402,14 @@ class AssistantAgent:
                 }
             )
             if result.needs_confirmation or result.data.get("implemented") is False:
+                return self._compose_tool_reply(
+                    chat_id,
+                    text,
+                    user_name=user_name,
+                    decision=decision,
+                    result=result,
+                )
+            if result.data.get("allow_tool_followup") is False:
                 return self._compose_tool_reply(
                     chat_id,
                     text,

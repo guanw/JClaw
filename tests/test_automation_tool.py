@@ -46,6 +46,21 @@ def test_automation_tool_updates_schedule(tmp_path) -> None:
     db.close()
 
 
+def test_automation_tool_creates_one_off_schedule(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    tool = AutomationTool(db)
+
+    created = tool.invoke(
+        "create_schedule",
+        {"schedule": "in 30 minutes", "prompt": "stretch"},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert created.ok is True
+    assert created.data["job"]["schedule"] == "in 30 minutes"
+    assert created.data["job"]["prompt"] == "stretch"
+    db.close()
+
+
 def test_automation_tool_removes_schedule(tmp_path) -> None:
     db = Database(tmp_path / "jclaw.db")
     tool = AutomationTool(db)
@@ -71,7 +86,7 @@ def test_automation_tool_rejects_unsupported_schedule_without_creating_job(tmp_p
 
     created = tool.invoke(
         "create_schedule",
-        {"schedule": "in 30 minutes", "prompt": "stretch"},
+        {"schedule": "sometime soon", "prompt": "stretch"},
         ToolContext(chat_id="chat-1"),
     )
 
