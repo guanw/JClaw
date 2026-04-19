@@ -100,6 +100,11 @@ class KnowledgeTool:
                 ".png",
                 ".jpg",
                 ".jpeg",
+                ".webp",
+                ".gif",
+                ".tiff",
+                ".tif",
+                ".icns",
             ],
             "supports_followup": True,
         }

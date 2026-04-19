@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from jclaw.core.db import Database
 from jclaw.tools.base import ToolContext
 from jclaw.tools.knowledge.readers.pdf_reader import PdfReaderTool
@@ -114,11 +116,12 @@ def test_analyze_paths_supports_pdf_files(monkeypatch, tmp_path) -> None:
     db.close()
 
 
-def test_analyze_paths_supports_images_with_callback(tmp_path) -> None:
+@pytest.mark.parametrize("suffix", [".png", ".webp", ".gif", ".tiff", ".tif", ".icns"])
+def test_analyze_paths_supports_images_with_callback(tmp_path, suffix: str) -> None:
     root = tmp_path / "repo"
     root.mkdir()
-    target = root / "scan.png"
-    target.write_bytes(b"not-a-real-png-but-good-enough-for-the-stub")
+    target = root / f"scan{suffix}"
+    target.write_bytes(b"not-a-real-image-but-good-enough-for-the-stub")
     db = Database(tmp_path / "jclaw.db")
     _grant_read(db, root)
 

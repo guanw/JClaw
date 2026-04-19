@@ -8,7 +8,7 @@ from jclaw.tools.knowledge.models import ExtractedDocument
 
 class ImageReader:
     name = "image"
-    SUPPORTED_SUFFIXES = {".jpg", ".jpeg", ".png"}
+    SUPPORTED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".tiff", ".tif", ".icns"}
 
     def __init__(
         self,
@@ -51,4 +51,3 @@ class ImageReader:
             },
             warnings=warnings if text else warnings or ["No readable image description extracted."],
         )
-
