@@ -19,6 +19,7 @@ from jclaw.tools.base import ToolContext, ToolExecutionState, ToolResult
 from jclaw.tools.browser.tool import BrowserTool
 from jclaw.tools.knowledge.tool import KnowledgeTool
 from jclaw.tools.memory.tool import MemoryTool
+from jclaw.tools.permissions.tool import PermissionsTool
 from jclaw.tools.registry import ToolRegistry
 from jclaw.tools.workspace.tool import WorkspaceTool
 
@@ -34,6 +35,7 @@ class AssistantAgent:
         self.system_prompt = load_system_prompt(config.provider.system_prompt_files)
         self.tools = ToolRegistry()
         self.tools.register(MemoryTool(db, search_limit=config.memory.max_memory_items))
+        self.tools.register(PermissionsTool(db))
         if config.automation.enabled:
             self.tools.register(AutomationTool(db))
         if config.browser.enabled:

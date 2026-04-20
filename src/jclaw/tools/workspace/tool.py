@@ -355,8 +355,9 @@ class WorkspaceTool:
         if permission is not None:
             return permission
         pattern = str(params.get("pattern", "")).strip()
+        patterns = self._expand_glob_patterns(pattern)
         query = str(params.get("query", "")).strip().lower()
-        if not pattern and not query:
+        if not patterns and not query:
             return ToolResult(ok=False, summary="Finding files requires a pattern or query.", data={"root_path": str(root_path)})
         search_root = target_path if target_path.exists() and target_path.is_dir() else root_path
         matches: list[dict[str, str]] = []
@@ -367,7 +368,9 @@ class WorkspaceTool:
             relative = str(path.relative_to(root_path))
             name = path.name
             matched = False
-            if pattern and (fnmatch.fnmatch(name, pattern) or fnmatch.fnmatch(relative, pattern)):
+            if patterns and any(
+                fnmatch.fnmatch(name, candidate) or fnmatch.fnmatch(relative, candidate) for candidate in patterns
+            ):
                 matched = True
             if query and (query in name.lower() or query in relative.lower()):
                 matched = True
@@ -394,6 +397,7 @@ class WorkspaceTool:
             return ToolResult(ok=False, summary="Searching contents requires a query string.", data={})
         case_sensitive = bool(params.get("case_sensitive", False))
         file_pattern = str(params.get("file_pattern", "")).strip()
+        file_patterns = self._expand_glob_patterns(file_pattern)
         use_regex = bool(params.get("regex")) or self._looks_like_regex(query)
         target_path = self._resolve_target_path(params.get("path") or params.get("root_path") or params.get("root"))
         root_path = self._default_root_for_path(target_path)
@@ -423,8 +427,9 @@ class WorkspaceTool:
             if not path.is_file():
                 continue
             relative_path = str(path.relative_to(root_path))
-            if file_pattern and not (
-                fnmatch.fnmatch(path.name, file_pattern) or fnmatch.fnmatch(relative_path, file_pattern)
+            if file_patterns and not any(
+                fnmatch.fnmatch(path.name, candidate) or fnmatch.fnmatch(relative_path, candidate)
+                for candidate in file_patterns
             ):
                 continue
             content = self._read_text(path)
@@ -1022,6 +1027,19 @@ class WorkspaceTool:
 
     def _looks_like_regex(self, query: str) -> bool:
         return any(token in query for token in ("\\", "|", "(", ")", "[", "]", "{", "}", "+", "*", "?"))
+
+    def _expand_glob_patterns(self, pattern: str) -> list[str]:
+        cleaned = pattern.strip()
+        if not cleaned:
+            return []
+        if "{" not in cleaned or "}" not in cleaned:
+            return [cleaned]
+        prefix, remainder = cleaned.split("{", 1)
+        choices_raw, suffix = remainder.split("}", 1)
+        choices = [choice.strip() for choice in choices_raw.split(",") if choice.strip()]
+        if not choices:
+            return [cleaned]
+        return [f"{prefix}{choice}{suffix}" for choice in choices]
 
     def _normalize_draft_edits(self, *, root_path: Path, draft: dict[str, Any]) -> list[dict[str, str]]:
         edits: list[dict[str, str]] = []

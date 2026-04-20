@@ -520,6 +520,33 @@ class Database:
             resolved_at=None if row["resolved_at"] is None else str(row["resolved_at"]),
         )
 
+    def list_approval_requests(self, *, status: str | None = None) -> list[ApprovalRequestRecord]:
+        query = """
+            SELECT request_id, kind, chat_id, root_path, capabilities_json, objective, payload_json, status, created_at, resolved_at
+            FROM approval_requests
+        """
+        params: tuple[object, ...] = ()
+        if status is not None:
+            query += " WHERE status = ?"
+            params = (status,)
+        query += " ORDER BY created_at ASC"
+        rows = self._connection.execute(query, params).fetchall()
+        return [
+            ApprovalRequestRecord(
+                request_id=str(row["request_id"]),
+                kind=str(row["kind"]),
+                chat_id=str(row["chat_id"]),
+                root_path=str(row["root_path"]),
+                capabilities=tuple(json.loads(str(row["capabilities_json"]))),
+                objective=str(row["objective"]),
+                payload=json.loads(str(row["payload_json"])),
+                status=str(row["status"]),
+                created_at=str(row["created_at"]),
+                resolved_at=None if row["resolved_at"] is None else str(row["resolved_at"]),
+            )
+            for row in rows
+        ]
+
     def resolve_approval_request(self, request_id: str, status: str) -> int:
         cursor = self._connection.execute(
             """

@@ -161,6 +161,37 @@ class FakeBrowserTool:
         return result.summary
 
 
+class FakeBrowserObjectiveTool:
+    name = "browser"
+
+    def describe(self) -> dict:
+        return {
+            "name": "browser",
+            "description": "Fake browser tool used for route tests.",
+            "prefer_direct_result": True,
+            "actions": {
+                "run_objective": {"description": "Run a browser objective."},
+            },
+        }
+
+    def invoke(self, action: str, params: dict, ctx: ToolContext) -> ToolResult:
+        assert action == "run_objective"
+        assert params == {"objective": "open example.com", "start_url": "https://example.com"}
+        return ToolResult(
+            ok=True,
+            summary="Opened example.com.",
+            data={
+                "url": "https://example.com",
+                "title": "Example Domain",
+                "text": "Example Domain",
+                "allow_tool_followup": False,
+            },
+        )
+
+    def format_result(self, action: str, result: ToolResult) -> str:
+        return f"{result.summary}\nURL: {result.data['url']}\nTitle: {result.data['title']}"
+
+
 def test_command_flow(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),
@@ -247,6 +278,38 @@ def test_llm_selected_tool_routes_to_memory_search(tmp_path) -> None:
     db.close()
 
 
+def test_llm_selected_tool_routes_to_permissions_list_grants(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    db.upsert_grant("/Users/Jude", ("read",), "chat-1")
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"status":"continue","tool":"permissions","action":"list_grants","params":{},"reason":"The user is asking what access has been granted."}',
+            ]
+        ),
+    )
+
+    reply = agent.handle_text("chat-1", "what are all the granted access right now")
+    assert "Active grants:" in reply
+    assert "/Users/Jude [read]" in reply
+    db.close()
+
+
 def test_llm_selected_tool_routes_to_browser(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),
@@ -268,11 +331,10 @@ def test_llm_selected_tool_routes_to_browser(tmp_path) -> None:
         SequenceLLM(
             [
                 '{"status":"continue","tool":"browser","action":"run_objective","params":{"objective":"open example.com","start_url":"https://example.com"},"reason":"The user wants browser help."}',
-                '{"status":"complete","tool":"","action":"","params":{},"reason":"The current page is already the intended destination."}',
-                "I opened the requested page and captured it.",
             ]
         ),
     )
+    agent.tools._tools["browser"] = FakeBrowserObjectiveTool()  # noqa: SLF001
 
     reply = agent.handle_text("chat-1", "please open example.com for me")
     assert "example.com" in reply.lower()

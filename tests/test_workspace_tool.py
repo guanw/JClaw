@@ -143,6 +143,56 @@ def test_search_contents_supports_regex_queries_and_file_pattern(tmp_path) -> No
     db.close()
 
 
+def test_search_contents_supports_brace_expansion_file_patterns(tmp_path) -> None:
+    root = tmp_path / "repo"
+    src = root / "src"
+    src.mkdir(parents=True)
+    (src / "tool.py").write_text("keyword here\n", encoding="utf-8")
+    (src / "view.ts").write_text("keyword there\n", encoding="utf-8")
+    (src / "notes.txt").write_text("keyword elsewhere\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    searched = tool.invoke(
+        "search_contents",
+        {
+            "root": str(root),
+            "query": "keyword",
+            "file_pattern": "*.{py,ts}",
+        },
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert searched.ok is True
+    assert searched.data["match_count"] == 2
+    assert {item["path"] for item in searched.data["matches"]} == {"src/tool.py", "src/view.ts"}
+    db.close()
+
+
+def test_find_files_supports_brace_expansion_patterns(tmp_path) -> None:
+    root = tmp_path / "repo"
+    images = root / "images"
+    images.mkdir(parents=True)
+    (images / "one.png").write_text("png\n", encoding="utf-8")
+    (images / "two.jpg").write_text("jpg\n", encoding="utf-8")
+    (images / "three.txt").write_text("txt\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    found = tool.invoke(
+        "find_files",
+        {"root": str(root), "pattern": "*.{jpg,png,gif}"},
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert found.ok is True
+    assert found.data["match_count"] == 2
+    assert {item["path"] for item in found.data["matches"]} == {"images/one.png", "images/two.jpg"}
+    db.close()
+
+
 def test_prepare_change_previews_before_apply(tmp_path) -> None:
     root = tmp_path / "repo"
     root.mkdir()
