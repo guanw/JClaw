@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import logging
+import threading
 import time
 
 from jclaw.ai.agent import AssistantAgent
@@ -16,6 +17,15 @@ LOGGER = logging.getLogger(__name__)
 
 
 class JClawDaemon:
+    THINKING_STATUSES = (
+        "JClaw is thinking...",
+        "JClaw is rummaging through the toolbox...",
+        "JClaw is chasing down the answer...",
+        "JClaw is lining up the next move...",
+        "JClaw is pulling threads together...",
+    )
+    THINKING_STATUS_INTERVAL_SECONDS = 1.2
+
     def __init__(self, config: Config) -> None:
         self.config = config
         self.db = Database(config.daemon.db_path)
@@ -63,8 +73,53 @@ class JClawDaemon:
             LOGGER.info("ignoring message from unauthorized chat %s", chat_id)
             return
         LOGGER.info("processing message from chat %s: %s", chat_id, text)
-        reply = self.agent.handle_text(chat_id, text, user_name=sender_name)
-        self.channel.send_message(chat_id, reply, reply_to_message_id=message_id)
+        initial_status = self._thinking_status(message_id, text, step=0)
+        placeholder_id = self.channel.send_message(
+            chat_id,
+            initial_status,
+            reply_to_message_id=message_id,
+        )
+        stop_indicator = threading.Event()
+        indicator_thread: threading.Thread | None = None
+        if placeholder_id:
+            indicator_thread = threading.Thread(
+                target=self._run_thinking_indicator,
+                args=(stop_indicator, chat_id, placeholder_id, message_id, text),
+                daemon=True,
+            )
+            indicator_thread.start()
+        try:
+            reply = self.agent.handle_text(chat_id, text, user_name=sender_name)
+        finally:
+            stop_indicator.set()
+            if indicator_thread is not None:
+                indicator_thread.join(timeout=0.5)
+        if placeholder_id:
+            self.channel.edit_message(chat_id, placeholder_id, reply)
+        else:
+            self.channel.send_message(chat_id, reply, reply_to_message_id=message_id)
+
+    def _thinking_status(self, message_id: str, text: str, *, step: int) -> str:
+        seed = f"{message_id}:{text}"
+        index = (sum(ord(char) for char in seed) + step) % len(self.THINKING_STATUSES)
+        return self.THINKING_STATUSES[index]
+
+    def _run_thinking_indicator(
+        self,
+        stop_indicator: threading.Event,
+        chat_id: str,
+        placeholder_id: str,
+        message_id: str,
+        text: str,
+    ) -> None:
+        step = 1
+        while not stop_indicator.wait(self.THINKING_STATUS_INTERVAL_SECONDS):
+            try:
+                self.channel.edit_message(chat_id, placeholder_id, self._thinking_status(message_id, text, step=step))
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("failed to update thinking indicator for chat %s", chat_id)
+                return
+            step += 1
 
     def _run_due_cron_jobs(self) -> None:
         now = datetime.now(timezone.utc).isoformat()

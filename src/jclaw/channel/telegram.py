@@ -53,13 +53,28 @@ class TelegramBotChannel:
             )
         return items
 
-    def send_message(self, chat_id: str, text: str, *, reply_to_message_id: str | None = None) -> None:
+    def send_message(self, chat_id: str, text: str, *, reply_to_message_id: str | None = None) -> str | None:
         chunks = self._chunk_text(text)
+        first_message_id: str | None = None
         for index, chunk in enumerate(chunks):
             payload: dict[str, object] = {"chat_id": chat_id, "text": chunk}
             if index == 0 and reply_to_message_id:
                 payload["reply_to_message_id"] = int(reply_to_message_id)
-            self._request("sendMessage", payload)
+            result = self._request("sendMessage", payload)
+            if index == 0 and isinstance(result, dict) and "message_id" in result:
+                first_message_id = str(result["message_id"])
+        return first_message_id
+
+    def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
+        chunks = self._chunk_text(text)
+        payload: dict[str, object] = {
+            "chat_id": chat_id,
+            "message_id": int(message_id),
+            "text": chunks[0],
+        }
+        self._request("editMessageText", payload)
+        for chunk in chunks[1:]:
+            self._request("sendMessage", {"chat_id": chat_id, "text": chunk})
 
     def _request(self, method: str, payload: dict[str, object]) -> object:
         if not self.config.bot_token:
