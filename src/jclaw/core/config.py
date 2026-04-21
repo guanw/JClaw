@@ -18,6 +18,8 @@ from jclaw.core.defaults import (
     BROWSER_VIEWPORT_WIDTH,
     DAEMON_IDLE_SLEEP_SECONDS,
     DAEMON_LAUNCHD_LABEL,
+    EMAIL_DEFAULT_ACCOUNT_ALIAS,
+    EMAIL_ENABLED,
     KNOWLEDGE_ENABLED,
     KNOWLEDGE_MAX_ANSWER_CITATIONS,
     KNOWLEDGE_MAX_CHUNKS_PER_FILE,
@@ -73,6 +75,16 @@ def _env_list(name: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
+def _detect_email_oauth_client(root: Path) -> Path:
+    matches = sorted(root.glob("client_secret_*.json"))
+    if len(matches) != 1:
+        raise RuntimeError(
+            "Expected exactly one Gmail OAuth client JSON matching client_secret_*.json in the repo root. "
+            f"Found {len(matches)}."
+        )
+    return matches[0]
+
+
 @dataclass(slots=True)
 class ProviderConfig:
     api_key: str = ""
@@ -111,6 +123,14 @@ class MemoryConfig:
 @dataclass(slots=True)
 class AutomationConfig:
     enabled: bool = AUTOMATION_ENABLED
+
+
+@dataclass(slots=True)
+class EmailConfig:
+    enabled: bool = EMAIL_ENABLED
+    oauth_client_path: Path | None = None
+    token_dir: Path = field(default_factory=lambda: default_state_dir() / "tools" / "email" / "tokens")
+    default_account_alias: str = EMAIL_DEFAULT_ACCOUNT_ALIAS
 
 
 @dataclass(slots=True)
@@ -155,6 +175,7 @@ class Config:
     daemon: DaemonConfig = field(default_factory=DaemonConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     automation: AutomationConfig = field(default_factory=AutomationConfig)
+    email: EmailConfig = field(default_factory=EmailConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
@@ -204,6 +225,12 @@ max_memory_items = {MEMORY_MAX_MEMORY_ITEMS}
 [automation]
 enabled = {str(AUTOMATION_ENABLED).lower()}
 
+[email]
+enabled = {str(EMAIL_ENABLED).lower()}
+oauth_client_path = ""
+token_dir = "{state_dir / "tools" / "email" / "tokens"}"
+default_account_alias = "{EMAIL_DEFAULT_ACCOUNT_ALIAS}"
+
 [browser]
 enabled = {str(BROWSER_ENABLED).lower()}
 headless = {str(BROWSER_HEADLESS).lower()}
@@ -247,6 +274,7 @@ def load_config(path: str | Path | None = None) -> Config:
     daemon_data = data.get("daemon", {})
     memory_data = data.get("memory", {})
     automation_data = data.get("automation", {})
+    email_data = data.get("email", {})
     browser_data = data.get("browser", {})
     workspace_data = data.get("workspace", {})
     knowledge_data = data.get("knowledge", {})
@@ -283,6 +311,18 @@ def load_config(path: str | Path | None = None) -> Config:
     )
     automation = AutomationConfig(
         enabled=bool(automation_data.get("enabled", AUTOMATION_ENABLED)),
+    )
+    detected_oauth_client = _detect_email_oauth_client(repo_root())
+    configured_oauth_path = email_data.get("oauth_client_path")
+    email = EmailConfig(
+        enabled=bool(email_data.get("enabled", EMAIL_ENABLED)),
+        oauth_client_path=(
+            _expand_path(configured_oauth_path, detected_oauth_client)
+            if configured_oauth_path not in (None, "")
+            else detected_oauth_client
+        ),
+        token_dir=_expand_path(email_data.get("token_dir"), default_state_dir() / "tools" / "email" / "tokens"),
+        default_account_alias=str(email_data.get("default_account_alias", EMAIL_DEFAULT_ACCOUNT_ALIAS)),
     )
     browser = BrowserConfig(
         enabled=bool(browser_data.get("enabled", BROWSER_ENABLED)),
@@ -336,6 +376,7 @@ def load_config(path: str | Path | None = None) -> Config:
         daemon=daemon,
         memory=memory,
         automation=automation,
+        email=email,
         browser=browser,
         workspace=workspace,
         knowledge=knowledge,

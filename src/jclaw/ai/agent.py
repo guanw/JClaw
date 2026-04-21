@@ -17,6 +17,7 @@ from jclaw.core.scheduler import next_run_at, parse_schedule, to_utc_iso
 from jclaw.tools.automation.tool import AutomationTool
 from jclaw.tools.base import ToolContext, ToolExecutionState, ToolResult
 from jclaw.tools.browser.tool import BrowserTool
+from jclaw.tools.email.tool import EmailTool
 from jclaw.tools.knowledge.tool import KnowledgeTool
 from jclaw.tools.memory.tool import MemoryTool
 from jclaw.tools.permissions.tool import PermissionsTool
@@ -38,6 +39,15 @@ class AssistantAgent:
         self.tools.register(PermissionsTool(db))
         if config.automation.enabled:
             self.tools.register(AutomationTool(db))
+        if config.email.enabled:
+            self.tools.register(
+                EmailTool(
+                    db,
+                    oauth_client_path=config.email.oauth_client_path,
+                    token_dir=config.email.token_dir,
+                    default_account_alias=config.email.default_account_alias,
+                )
+            )
         if config.browser.enabled:
             self.tools.register(
                 BrowserTool(

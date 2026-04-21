@@ -310,6 +310,45 @@ def test_llm_selected_tool_routes_to_permissions_list_grants(tmp_path) -> None:
     db.close()
 
 
+def test_llm_selected_tool_routes_to_email_list_accounts(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    db.upsert_email_account(
+        alias="gmail",
+        provider="gmail",
+        email_address="me@example.com",
+        scopes=("https://www.googleapis.com/auth/gmail.readonly",),
+        status="connected",
+        metadata={},
+    )
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"status":"continue","tool":"email","action":"list_accounts","params":{},"reason":"The user is asking which mail accounts are connected."}',
+            ]
+        ),
+    )
+
+    reply = agent.handle_text("chat-1", "what email accounts are connected")
+    assert "Connected email accounts:" in reply
+    assert "gmail: me@example.com" in reply
+    db.close()
+
+
 def test_llm_selected_tool_routes_to_browser(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),
