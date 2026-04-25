@@ -15,7 +15,7 @@ from jclaw.core.db import Database, MemoryRecord
 from jclaw.core.defaults import AGENT_MAX_TOOL_STEPS
 from jclaw.core.scheduler import next_run_at, parse_schedule, to_utc_iso
 from jclaw.tools.automation.tool import AutomationTool
-from jclaw.tools.base import ToolContext, ToolExecutionState, ToolResult
+from jclaw.tools.base import Decision, DecisionType, Observation, RuntimeState, ToolContext, ToolExecutionState, ToolResult
 from jclaw.tools.browser.tool import BrowserTool
 from jclaw.tools.email.tool import EmailTool
 from jclaw.tools.knowledge.tool import KnowledgeTool
@@ -370,11 +370,16 @@ class AssistantAgent:
         *,
         user_name: str,
     ) -> str | None:
-        decision = self._decide_next_tool_step(chat_id, text, user_name=user_name, steps=[])
+        runtime = RuntimeState(request=text)
+        decision = self._decide_next_tool_step(chat_id, text, user_name=user_name, steps=[], runtime=runtime)
         if decision is None:
             return None
-        if decision.get("status") in {"complete", "stop"}:
-            LOGGER.info("initial tool planner declined tool use: %s", decision.get("reason", ""))
+        if decision.type is DecisionType.ANSWER:
+            return decision.answer
+        if decision.type is DecisionType.BLOCKED:
+            return decision.reason or "Stopped because progress is blocked."
+        if decision.type is DecisionType.COMPLETE:
+            LOGGER.info("initial controller completed without tool use: %s", decision.reason)
             return None
         steps: list[dict[str, Any]] = []
         seen_signatures: set[str] = set()
@@ -383,9 +388,9 @@ class AssistantAgent:
             for _ in range(AGENT_MAX_TOOL_STEPS):
                 signature = json.dumps(
                     {
-                        "tool": decision["tool"],
-                        "action": decision["action"],
-                        "params": decision["params"],
+                        "tool": decision.tool,
+                        "action": decision.action,
+                        "params": decision.params,
                     },
                     sort_keys=True,
                     ensure_ascii=True,
@@ -397,9 +402,9 @@ class AssistantAgent:
 
                 try:
                     result = self.tools.invoke(
-                        str(decision["tool"]),
-                        str(decision["action"]),
-                        dict(decision["params"]),
+                        decision.tool,
+                        decision.action,
+                        dict(decision.params),
                         ToolContext(
                             chat_id=chat_id,
                             user_id=user_name,
@@ -410,25 +415,27 @@ class AssistantAgent:
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.exception(
                         "tool step failed tool=%s action=%s",
-                        decision.get("tool"),
-                        decision.get("action"),
+                        decision.tool,
+                        decision.action,
                     )
-                    return f"Tool {decision['tool']}.{decision['action']} failed: {exc}"
+                    return f"Tool {decision.tool}.{decision.action} failed: {exc}"
                 steps.append(
                     {
-                        "tool": decision["tool"],
-                        "action": decision["action"],
-                        "params": dict(decision["params"]),
-                        "reason": decision.get("reason", ""),
+                        "tool": decision.tool,
+                        "action": decision.action,
+                        "params": dict(decision.params),
+                        "reason": decision.reason,
                         "result": result,
                     }
                 )
+                runtime.last_decision = decision
+                runtime.append(Observation.from_tool_result(result))
                 if result.needs_confirmation:
                     return self._compose_tool_reply(
                         chat_id,
                         text,
                         user_name=user_name,
-                        decision=decision,
+                        decision=decision.to_dict(),
                         result=result,
                     )
                 if result.data.get("allow_tool_followup") is False:
@@ -436,7 +443,7 @@ class AssistantAgent:
                         chat_id,
                         text,
                         user_name=user_name,
-                        decision=decision,
+                        decision=decision.to_dict(),
                         result=result,
                     )
 
@@ -445,6 +452,7 @@ class AssistantAgent:
                     text,
                     user_name=user_name,
                     steps=steps,
+                    runtime=runtime,
                 )
                 if next_decision is None:
                     LOGGER.info("tool continuation returned no usable decision; stopping with latest result")
@@ -452,23 +460,28 @@ class AssistantAgent:
                         chat_id,
                         text,
                         user_name=user_name,
-                        decision=decision,
+                        decision=decision.to_dict(),
                         result=result,
                     )
-                if next_decision.get("status") in {"complete", "stop"}:
+                if next_decision.type is DecisionType.ANSWER:
+                    return next_decision.answer
+                if next_decision.type is DecisionType.BLOCKED:
+                    return next_decision.reason or self._compose_tool_reply(
+                        chat_id,
+                        text,
+                        user_name=user_name,
+                        decision=decision.to_dict(),
+                        result=result,
+                    )
+                if next_decision.type is DecisionType.COMPLETE:
                     return self._compose_tool_reply(
                         chat_id,
                         text,
                         user_name=user_name,
-                        decision=decision,
+                        decision=decision.to_dict(),
                         result=result,
                     )
-                decision = {
-                    "tool": next_decision["tool"],
-                    "action": next_decision["action"],
-                    "params": next_decision["params"],
-                    "reason": next_decision.get("reason", ""),
-                }
+                decision = next_decision
             last = steps[-1]
             return self._compose_tool_reply(
                 chat_id,
@@ -496,7 +509,8 @@ class AssistantAgent:
         *,
         user_name: str,
         steps: list[dict[str, Any]],
-    ) -> dict[str, Any] | None:
+        runtime: RuntimeState,
+    ) -> Decision | None:
         available_tools = self.tools.list_tools()
         if not available_tools:
             return None
@@ -509,7 +523,7 @@ class AssistantAgent:
                     "tool": step["tool"],
                     "action": step["action"],
                     "reason": step["reason"],
-                    "result": self._tool_result_for_planner(step["result"]),
+                    "result": runtime.observations[index - 1].to_dict() if index - 1 < len(runtime.observations) else self._tool_result_for_planner(step["result"]),
                 }
             )
         recent_history = [
@@ -517,20 +531,18 @@ class AssistantAgent:
             for item in self.db.recent_messages(chat_id, 4)
         ]
         prompt = (
-            "You are JClaw's tool step planner.\n"
-            "Given the original user request and completed tool steps, decide whether the task should stop, is complete, or should continue with exactly one tool step.\n"
-            "You are the only tool-planning gate for both the initial step and later continuation.\n"
-            "If there are no completed steps yet, decide whether any tool should be used at all.\n"
-            "Evaluate the request against the actual observed tool outputs.\n"
-            "Use continue only when another tool call materially advances the user's request.\n"
-            "Use complete when the user's objective has already been satisfied by the latest tool output or when no tool is needed because the task can be answered directly without tools.\n"
-            "Use stop when progress is blocked, evidence is insufficient to continue safely, or another tool call is unlikely to help.\n"
-            "Do not require any hardcoded tool-specific rules from the caller; rely on the tool catalog and prior step results.\n"
-            "Keep params minimal and choose only one next tool step.\n"
+            "You are JClaw's live tool controller.\n"
+            "Given the user request and prior tool observations, choose exactly one next decision.\n"
+            "Use tool_call when one tool step materially advances the request.\n"
+            "Use answer when the request can now be answered directly from the observations.\n"
+            "Use blocked when progress is unsafe or impossible without clarification, permission, or missing prerequisites.\n"
+            "Use complete when the operational task is finished and the latest tool result should be returned to the user.\n"
+            "Keep params minimal and choose only one next decision.\n"
             "Return strict JSON only.\n"
             "Schema:\n"
-            '{"status":"continue|complete|stop","tool":string,"action":string,"params":object,"reason":string}\n'
-            "If status is complete or stop, tool/action may be empty and params should be {}.\n"
+            '{"type":"tool_call|answer|blocked|complete","tool":string,"action":string,"params":object,"answer":string,"reason":string}\n'
+            "For answer, provide answer and leave tool/action empty.\n"
+            "For blocked or complete, leave tool/action empty and params {}.\n"
             f"Tool catalog: {self._tool_catalog_for_prompt(available_tools)}"
         )
         raw = self.llm.chat(
@@ -544,6 +556,11 @@ class AssistantAgent:
                             "user_name": user_name or "unknown",
                             "request": text,
                             "steps": step_summaries,
+                            "runtime": {
+                                "step_count": runtime.step_count,
+                                "artifact_types": sorted(runtime.artifacts_by_type.keys()),
+                                "pending_confirmation": runtime.pending_confirmation,
+                            },
                         },
                         ensure_ascii=True,
                     ),
@@ -557,27 +574,27 @@ class AssistantAgent:
         parsed = self._parse_json_object(raw)
         if not parsed:
             return None
-        status = str(parsed.get("status", "")).strip().lower()
-        if status not in {"continue", "complete", "stop"}:
-            return None
-        if status != "continue":
-            return {"status": status, "reason": str(parsed.get("reason", "")).strip()}
-        tool = str(parsed.get("tool", "")).strip()
-        action = str(parsed.get("action", "")).strip()
-        params = parsed.get("params", {})
-        if not tool or not action or not isinstance(params, dict):
+        try:
+            decision = Decision.from_dict(parsed)
+        except ValueError:
             return None
         if step_summaries:
-            LOGGER.info("tool continuation selected tool=%s action=%s reason=%s", tool, action, parsed.get("reason", ""))
+            LOGGER.info(
+                "tool continuation selected type=%s tool=%s action=%s reason=%s",
+                decision.type.value,
+                decision.tool,
+                decision.action,
+                decision.reason,
+            )
         else:
-            LOGGER.info("tool initial planner selected tool=%s action=%s reason=%s", tool, action, parsed.get("reason", ""))
-        return {
-            "status": "continue",
-            "tool": tool,
-            "action": action,
-            "params": params,
-            "reason": str(parsed.get("reason", "")).strip(),
-        }
+            LOGGER.info(
+                "tool initial planner selected type=%s tool=%s action=%s reason=%s",
+                decision.type.value,
+                decision.tool,
+                decision.action,
+                decision.reason,
+            )
+        return decision
 
     def _tool_result_for_planner(self, result: ToolResult) -> dict[str, Any]:
         data = result.data

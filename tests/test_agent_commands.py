@@ -236,7 +236,7 @@ def test_llm_selected_tool_routes_to_memory_remember(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"memory","action":"remember_fact","params":{"key":"favorite_color","value":"blue"},"reason":"The user asked to remember a preference."}',
+                '{"type":"tool_call","tool":"memory","action":"remember_fact","params":{"key":"favorite_color","value":"blue"},"reason":"The user asked to remember a preference."}',
             ]
         ),
     )
@@ -268,7 +268,7 @@ def test_llm_selected_tool_routes_to_memory_search(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"memory","action":"search_memories","params":{"query":"favorite color"},"reason":"The user is asking what is remembered."}',
+                '{"type":"tool_call","tool":"memory","action":"search_memories","params":{"query":"favorite color"},"reason":"The user is asking what is remembered."}',
             ]
         ),
     )
@@ -299,7 +299,7 @@ def test_llm_selected_tool_routes_to_permissions_list_grants(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"permissions","action":"list_grants","params":{},"reason":"The user is asking what access has been granted."}',
+                '{"type":"tool_call","tool":"permissions","action":"list_grants","params":{},"reason":"The user is asking what access has been granted."}',
             ]
         ),
     )
@@ -338,7 +338,7 @@ def test_llm_selected_tool_routes_to_email_list_accounts(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"email","action":"list_accounts","params":{},"reason":"The user is asking which mail accounts are connected."}',
+                '{"type":"tool_call","tool":"email","action":"list_accounts","params":{},"reason":"The user is asking which mail accounts are connected."}',
             ]
         ),
     )
@@ -369,7 +369,7 @@ def test_llm_selected_tool_routes_to_browser(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"browser","action":"run_objective","params":{"objective":"open example.com","start_url":"https://example.com"},"reason":"The user wants browser help."}',
+                '{"type":"tool_call","tool":"browser","action":"run_objective","params":{"objective":"open example.com","start_url":"https://example.com"},"reason":"The user wants browser help."}',
             ]
         ),
     )
@@ -487,7 +487,7 @@ def test_llm_can_decline_tool_and_fall_back_to_chat(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"status":"complete","tool":"","action":"","params":{},"reason":"No tool needed."}',
+                '{"type":"complete","tool":"","action":"","params":{},"reason":"No tool needed."}',
                 "Normal chat reply.",
             ]
         ),
@@ -495,6 +495,68 @@ def test_llm_can_decline_tool_and_fall_back_to_chat(tmp_path) -> None:
 
     reply = agent.handle_text("chat-1", "say hello")
     assert reply == "Normal chat reply."
+    db.close()
+
+
+def test_controller_can_answer_without_tool_use(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"type":"answer","tool":"","action":"","params":{},"answer":"Hello.","reason":"No tool is needed."}',
+            ]
+        ),
+    )
+
+    reply = agent.handle_text("chat-1", "say hello")
+
+    assert reply == "Hello."
+    db.close()
+
+
+def test_controller_can_block_without_tool_use(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"type":"blocked","tool":"","action":"","params":{},"reason":"I need clarification about which Abigail thread you mean."}',
+            ]
+        ),
+    )
+
+    reply = agent.handle_text("chat-1", "draft a reply to Abigail")
+
+    assert reply == "I need clarification about which Abigail thread you mean."
     db.close()
 
 
@@ -518,7 +580,7 @@ def test_tool_loop_returns_failure_reply_when_tool_raises(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"exploding","action":"boom","params":{},"reason":"Exercise tool failure handling."}',
+                '{"type":"tool_call","tool":"exploding","action":"boom","params":{},"reason":"Exercise tool failure handling."}',
             ]
         ),
     )
@@ -549,10 +611,10 @@ def test_browser_tool_loop_reuses_one_session_across_steps_and_closes_at_end(tmp
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"browser","action":"search_web","params":{"query":"millburn contractors"},"reason":"Search first."}',
-                '{"status":"continue","tool":"browser","action":"read_page","params":{},"reason":"Read the result page."}',
-                '{"status":"continue","tool":"browser","action":"extract","params":{"fields":{"name":"contractor name"}},"reason":"Extract the contractor name."}',
-                '{"status":"complete","tool":"","action":"","params":{},"reason":"Enough information gathered."}',
+                '{"type":"tool_call","tool":"browser","action":"search_web","params":{"query":"millburn contractors"},"reason":"Search first."}',
+                '{"type":"tool_call","tool":"browser","action":"read_page","params":{},"reason":"Read the result page."}',
+                '{"type":"tool_call","tool":"browser","action":"extract","params":{"fields":{"name":"contractor name"}},"reason":"Extract the contractor name."}',
+                '{"type":"complete","tool":"","action":"","params":{},"reason":"Enough information gathered."}',
                 "Found one contractor.",
             ]
         ),
@@ -646,7 +708,7 @@ def test_workspace_preview_pauses_until_approval(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"workspace","action":"prepare_change","params":{"objective":"Update app.py","path":"app.py"},"reason":"Local code change requested."}',
+                '{"type":"tool_call","tool":"workspace","action":"prepare_change","params":{"objective":"Update app.py","path":"app.py"},"reason":"Local code change requested."}',
                 '{"summary":"Update app.py","edits":[{"path":"app.py","reason":"Update greeting","new_content":"print(\\"goodbye\\")\\n"}]}',
             ]
         ),
@@ -728,7 +790,7 @@ def test_workspace_inspect_reply_is_raw_tool_output(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"workspace","action":"inspect_root","params":{"path":".","objective":"Inspect repo root"},"reason":"Local workspace inspection requested."}',
+                '{"type":"tool_call","tool":"workspace","action":"inspect_root","params":{"path":".","objective":"Inspect repo root"},"reason":"Local workspace inspection requested."}',
                 "Hallucinated workspace summary that should never be used.",
             ]
         ),
@@ -768,7 +830,7 @@ def test_workspace_find_files_reply_preserves_all_matches(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"workspace","action":"find_files","params":{"path":".","pattern":"*.py"},"reason":"Find python files."}',
+                '{"type":"tool_call","tool":"workspace","action":"find_files","params":{"path":".","pattern":"*.py"},"reason":"Find python files."}',
                 "This fallback LLM text should not be used.",
             ]
         ),
@@ -806,8 +868,8 @@ def test_workspace_inspect_reply_mentions_truncation(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"workspace","action":"inspect_root","params":{"path":".","objective":"Inspect repo root"},"reason":"Local workspace inspection requested."}',
-                '{"status":"complete","tool":"","action":"","params":{},"reason":"A plain directory listing satisfies the request."}',
+                '{"type":"tool_call","tool":"workspace","action":"inspect_root","params":{"path":".","objective":"Inspect repo root"},"reason":"Local workspace inspection requested."}',
+                '{"type":"complete","tool":"","action":"","params":{},"reason":"A plain directory listing satisfies the request."}',
             ]
         ),
     )
@@ -841,7 +903,7 @@ def test_workspace_grant_approval_resumes_inspect_root(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"workspace","action":"inspect_root","params":{"path":".","objective":"Inspect repo root"},"reason":"Local workspace inspection requested."}',
+                '{"type":"tool_call","tool":"workspace","action":"inspect_root","params":{"path":".","objective":"Inspect repo root"},"reason":"Local workspace inspection requested."}',
             ]
         ),
     )
@@ -881,7 +943,7 @@ def test_llm_selected_tool_routes_to_knowledge_and_returns_raw_result(tmp_path) 
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"knowledge","action":"answer_from_paths","params":{"paths":["notes.txt"],"question":"Who is the project owner?"},"reason":"The user is asking about local file contents."}',
+                '{"type":"tool_call","tool":"knowledge","action":"answer_from_paths","params":{"paths":["notes.txt"],"question":"Who is the project owner?"},"reason":"The user is asking about local file contents."}',
                 '{"answer":"The project owner is guan.","cited_chunk_ids":["notes.txt:1"],"grounded":true,"partial":false}',
                 "Hallucinated post-processing that should not be used.",
             ]
@@ -963,10 +1025,10 @@ def test_tool_loop_can_chain_workspace_then_knowledge(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"workspace","action":"inspect_root","params":{"path":"Desktop/819","objective":"Inspect Desktop/819"},"reason":"Need to inspect the folder first."}',
-                '{"status":"continue","tool":"knowledge","action":"answer_from_paths","params":{"paths":["Desktop/819"],"question":"Summarize the first file found in this folder."},"reason":"Now answer from the folder contents."}',
+                '{"type":"tool_call","tool":"workspace","action":"inspect_root","params":{"path":"Desktop/819","objective":"Inspect Desktop/819"},"reason":"Need to inspect the folder first."}',
+                '{"type":"tool_call","tool":"knowledge","action":"answer_from_paths","params":{"paths":["Desktop/819"],"question":"Summarize the first file found in this folder."},"reason":"Now answer from the folder contents."}',
                 '{"answer":"The first file says the purchase price is $1,250,000.","cited_chunk_ids":["a-contract.txt:1"],"grounded":true,"partial":false}',
-                '{"status":"complete","tool":"","action":"","params":{},"reason":"The grounded answer satisfies the request."}',
+                '{"type":"complete","tool":"","action":"","params":{},"reason":"The grounded answer satisfies the request."}',
             ]
         ),
     )
@@ -998,9 +1060,9 @@ def test_tool_loop_continuation_is_generic_not_tool_specific(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"fake","action":"step_one","params":{},"reason":"Need the first fake step."}',
-                '{"status":"continue","tool":"fake","action":"step_two","params":{},"reason":"A second fake step completes the request."}',
-                '{"status":"complete","tool":"","action":"","params":{},"reason":"The objective is complete."}',
+                '{"type":"tool_call","tool":"fake","action":"step_one","params":{},"reason":"Need the first fake step."}',
+                '{"type":"tool_call","tool":"fake","action":"step_two","params":{},"reason":"A second fake step completes the request."}',
+                '{"type":"complete","tool":"","action":"","params":{},"reason":"The objective is complete."}',
             ]
         ),
     )
@@ -1033,8 +1095,8 @@ def test_llm_selected_tool_routes_to_automation(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"automation","action":"create_schedule","params":{"schedule":"every 30m","prompt":"stretch"},"reason":"The user wants a recurring reminder."}',
-                '{"status":"complete","tool":"","action":"","params":{},"reason":"The schedule was created successfully."}',
+                '{"type":"tool_call","tool":"automation","action":"create_schedule","params":{"schedule":"every 30m","prompt":"stretch"},"reason":"The user wants a recurring reminder."}',
+                '{"type":"complete","tool":"","action":"","params":{},"reason":"The schedule was created successfully."}',
             ]
         ),
     )
@@ -1066,7 +1128,7 @@ def test_automation_terminal_result_skips_continuation_planner(tmp_path) -> None
         db,
         SequenceLLM(
             [
-                '{"status":"continue","tool":"automation","action":"create_schedule","params":{"schedule":"in 30 minutes","prompt":"stretch"},"reason":"The user wants a one-off reminder."}',
+                '{"type":"tool_call","tool":"automation","action":"create_schedule","params":{"schedule":"in 30 minutes","prompt":"stretch"},"reason":"The user wants a one-off reminder."}',
             ]
         ),
     )
