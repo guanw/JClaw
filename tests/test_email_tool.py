@@ -4,7 +4,7 @@ from pathlib import Path
 
 from jclaw.core.db import Database
 from jclaw.core.config import _detect_email_oauth_client
-from jclaw.tools.base import ToolContext
+from jclaw.tools.base import Observation, RuntimeState, ToolContext
 from jclaw.tools.email.auth import ConnectedEmailAccount
 from jclaw.tools.email.tool import EmailTool
 
@@ -180,3 +180,66 @@ def test_detect_email_oauth_client_requires_exactly_one_match(tmp_path) -> None:
         assert "exactly one" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected RuntimeError when multiple OAuth client files exist")
+
+
+def test_email_materialize_params_normalizes_alias_and_placeholder_ids(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    db.upsert_email_account(
+        alias="gmail",
+        provider="gmail",
+        email_address="guanw0826@gmail.com",
+        scopes=("https://www.googleapis.com/auth/gmail.readonly",),
+        status="connected",
+        metadata={},
+    )
+    tool = EmailTool(
+        db,
+        oauth_client_path=Path("/tmp/client.json"),
+        token_dir=tmp_path / "tokens",
+        get_client=lambda alias: FakeGmailClient(),
+    )
+    runtime = RuntimeState(request="draft a reply")
+    runtime.append(
+        Observation(
+            ok=True,
+            summary="Selected a message.",
+            artifacts={
+                "message_ref:selected": {
+                    "alias": "gmail",
+                    "message_id": "msg-1",
+                    "thread_id": "thread-1",
+                }
+            },
+            artifact_types=["message_ref"],
+        )
+    )
+
+    draft_params = tool.materialize_params(
+        "draft_reply",
+        {
+            "alias": "guanw0826@gmail.com",
+            "message_id": "selected",
+            "body": "hello",
+        },
+        runtime,
+    )
+    assert draft_params == {
+        "alias": "gmail",
+        "message_id": "msg-1",
+        "body": "hello",
+        "thread_id": "thread-1",
+    }
+
+    thread_params = tool.materialize_params(
+        "get_thread",
+        {
+            "alias": "guanw0826@gmail.com",
+            "thread_id": "selected",
+        },
+        runtime,
+    )
+    assert thread_params == {
+        "alias": "gmail",
+        "thread_id": "thread-1",
+    }
+    db.close()

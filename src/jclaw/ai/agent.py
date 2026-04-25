@@ -401,10 +401,16 @@ class AssistantAgent:
                 seen_signatures.add(signature)
 
                 try:
-                    result = self.tools.invoke(
+                    materialized_params = self.tools.materialize_params(
                         decision.tool,
                         decision.action,
                         dict(decision.params),
+                        runtime,
+                    )
+                    result = self.tools.invoke(
+                        decision.tool,
+                        decision.action,
+                        materialized_params,
                         ToolContext(
                             chat_id=chat_id,
                             user_id=user_name,
@@ -423,7 +429,7 @@ class AssistantAgent:
                     {
                         "tool": decision.tool,
                         "action": decision.action,
-                        "params": dict(decision.params),
+                        "params": dict(materialized_params),
                         "reason": decision.reason,
                         "result": result,
                     }

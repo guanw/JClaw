@@ -7,7 +7,7 @@ import re
 from typing import Any, Callable
 
 from jclaw.core.db import Database, EmailAccountRecord
-from jclaw.tools.base import ToolContext, ToolResult
+from jclaw.tools.base import RuntimeState, ToolContext, ToolResult
 from jclaw.tools.email.auth import ConnectedEmailAccount, GmailOAuthManager
 from jclaw.tools.email.gmail_client import GmailClient
 
@@ -128,6 +128,52 @@ class EmailTool:
                 f"Preview:\n{self._display_text(draft['body_preview'])}"
             )
         return result.summary
+
+    def materialize_params(
+        self,
+        action: str,
+        params: dict[str, Any],
+        runtime: RuntimeState,
+    ) -> dict[str, Any]:
+        materialized = dict(params)
+        alias = self._normalize_runtime_alias(str(materialized.get("alias", "")).strip())
+        if alias:
+            materialized["alias"] = alias
+        for key in ("message_id", "thread_id", "result_set_id"):
+            raw_value = str(materialized.get(key, "")).strip()
+            if self._is_placeholder_identifier(raw_value):
+                materialized.pop(key, None)
+        if action == "search_messages" and not str(materialized.get("alias", "")).strip():
+            alias = self._alias_from_runtime(runtime)
+            if alias:
+                materialized["alias"] = alias
+        if action == "get_message" and not str(materialized.get("message_id", "")).strip():
+            message_id = self._message_id_from_runtime(runtime)
+            if message_id:
+                materialized["message_id"] = message_id
+        if action == "get_thread":
+            if not str(materialized.get("thread_id", "")).strip():
+                thread_id = self._thread_id_from_runtime(runtime)
+                if thread_id:
+                    materialized["thread_id"] = thread_id
+            if not str(materialized.get("alias", "")).strip():
+                alias = self._alias_from_runtime(runtime)
+                if alias:
+                    materialized["alias"] = alias
+        if action == "draft_reply":
+            if not str(materialized.get("message_id", "")).strip():
+                message_id = self._message_id_from_runtime(runtime)
+                if message_id:
+                    materialized["message_id"] = message_id
+            if not str(materialized.get("thread_id", "")).strip():
+                thread_id = self._thread_id_from_runtime(runtime)
+                if thread_id:
+                    materialized["thread_id"] = thread_id
+            if not str(materialized.get("alias", "")).strip():
+                alias = self._alias_from_runtime(runtime)
+                if alias:
+                    materialized["alias"] = alias
+        return materialized
 
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handlers = {
@@ -256,10 +302,21 @@ class EmailTool:
         )
 
     def _resolve_alias(self, params: dict[str, Any]) -> str:
-        alias = str(params.get("alias") or self.default_account_alias).strip()
+        alias = self._normalize_runtime_alias(str(params.get("alias") or self.default_account_alias).strip())
         record = self.db.get_email_account(alias)
         if record is None:
             raise RuntimeError(f"Email account '{alias}' is not connected.")
+        return alias
+
+    def _normalize_runtime_alias(self, raw_alias: str) -> str:
+        alias = str(raw_alias).strip()
+        if not alias:
+            return ""
+        if self.db.get_email_account(alias) is not None:
+            return alias
+        for account in self.db.list_email_accounts():
+            if str(account.email_address).strip().lower() == alias.lower():
+                return str(account.alias).strip()
         return alias
 
     def _requested_scopes(self, params: dict[str, Any], *, include_compose: bool) -> tuple[str, ...]:
@@ -360,3 +417,47 @@ class EmailTool:
             "id": str(item.get("id", "")).strip(),
             "thread_id": str(item.get("thread_id", "")).strip(),
         }
+
+    def _is_placeholder_identifier(self, raw_value: str) -> bool:
+        value = str(raw_value).strip().lower()
+        if not value:
+            return False
+        return value in {
+            "selected",
+            "latest",
+            "first",
+            "message_ref",
+            "thread_ref",
+            "email_result_set",
+            "selected_message",
+        }
+
+    def _alias_from_runtime(self, runtime: RuntimeState) -> str:
+        for key in ("message_ref", "thread_ref", "email_result_set"):
+            artifact = runtime.artifacts_by_type.get(key)
+            if isinstance(artifact, dict):
+                alias = self._normalize_runtime_alias(str(artifact.get("alias", "")).strip())
+                if alias:
+                    return alias
+        return ""
+
+    def _message_id_from_runtime(self, runtime: RuntimeState) -> str:
+        artifact = runtime.artifacts_by_type.get("message_ref")
+        if isinstance(artifact, dict):
+            message_id = str(artifact.get("message_id", "")).strip()
+            if message_id:
+                return message_id
+        return ""
+
+    def _thread_id_from_runtime(self, runtime: RuntimeState) -> str:
+        thread_artifact = runtime.artifacts_by_type.get("thread_ref")
+        if isinstance(thread_artifact, dict):
+            thread_id = str(thread_artifact.get("thread_id", "")).strip()
+            if thread_id:
+                return thread_id
+        message_artifact = runtime.artifacts_by_type.get("message_ref")
+        if isinstance(message_artifact, dict):
+            thread_id = str(message_artifact.get("thread_id", "")).strip()
+            if thread_id:
+                return thread_id
+        return ""

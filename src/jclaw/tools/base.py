@@ -253,3 +253,11 @@ class Tool(Protocol):
 
     def format_result(self, action: str, result: ToolResult) -> str:
         ...
+
+    def materialize_params(
+        self,
+        action: str,
+        params: dict[str, Any],
+        runtime: RuntimeState,
+    ) -> dict[str, Any]:
+        ...

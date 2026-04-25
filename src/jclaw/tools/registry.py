@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from jclaw.tools.base import Tool, ToolContext, ToolResult
+from jclaw.tools.base import RuntimeState, Tool, ToolContext, ToolResult
 
 
 class ToolRegistry:
@@ -24,3 +24,15 @@ class ToolRegistry:
     def invoke(self, tool: str, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return self.get(tool).invoke(action, params, ctx)
 
+    def materialize_params(
+        self,
+        tool: str,
+        action: str,
+        params: dict[str, Any],
+        runtime: RuntimeState,
+    ) -> dict[str, Any]:
+        instance = self.get(tool)
+        materializer = getattr(instance, "materialize_params", None)
+        if callable(materializer):
+            return materializer(action, params, runtime)
+        return dict(params)
