@@ -25,6 +25,7 @@ from jclaw.core.defaults import (
 )
 from jclaw.core.db import Database
 from jclaw.tools.base import ToolContext, ToolLoopFinalizer, ToolResult
+from jclaw.tools.email.tool import EmailTool
 
 
 class DummyLLM:
@@ -262,6 +263,73 @@ class FakeBrowserObjectiveTool:
         return f"{result.summary}\nURL: {result.data['url']}\nTitle: {result.data['title']}"
 
 
+class FakeAbigailGmailClient:
+    def __init__(self) -> None:
+        self.messages = [
+            {
+                "id": "msg-1",
+                "thread_id": "thread-1",
+                "subject": "15 minute chat next week",
+                "from": "Abigail Clifford <aclifford@candidatelabs.com>",
+                "to": "guanw0826@gmail.com",
+                "cc": "",
+                "date": "Fri, 24 Apr 2026 13:49:06 +0000",
+                "snippet": "Initial invite for our chat.",
+                "labels": ["INBOX"],
+                "unread": False,
+                "text_body": "Initial invite for our chat.",
+                "html_body": "",
+                "message_id_header": "<msg-1@example.com>",
+                "references": "",
+                "in_reply_to": "",
+            },
+            {
+                "id": "msg-2",
+                "thread_id": "thread-2",
+                "subject": "Re: 15 minute chat next week",
+                "from": "Abigail Clifford <aclifford@candidatelabs.com>",
+                "to": "guanw0826@gmail.com",
+                "cc": "",
+                "date": "Fri, 24 Apr 2026 18:44:52 +0000",
+                "snippet": "New calendar invite for our chat next week.",
+                "labels": ["INBOX"],
+                "unread": False,
+                "text_body": "New calendar invite for our chat next week.",
+                "html_body": "",
+                "message_id_header": "<msg-2@example.com>",
+                "references": "",
+                "in_reply_to": "",
+            },
+        ]
+        self.last_draft: dict[str, str] | None = None
+
+    def list_unread(self, alias: str, *, max_results: int = 10) -> list[dict]:
+        return self.messages[:max_results]
+
+    def search_messages(self, alias: str, *, query: str, max_results: int = 10) -> list[dict]:
+        return self.messages[:max_results]
+
+    def get_message(self, alias: str, *, message_id: str) -> dict:
+        for item in self.messages:
+            if item["id"] == message_id:
+                return item
+        raise AssertionError(f"unexpected message_id: {message_id}")
+
+    def get_thread(self, alias: str, *, thread_id: str) -> dict:
+        return {"thread_id": thread_id, "messages": [item for item in self.messages if item["thread_id"] == thread_id]}
+
+    def draft_reply(self, alias: str, *, message: dict, body_text: str) -> dict:
+        self.last_draft = {"alias": alias, "message_id": message["id"], "body": body_text}
+        return {
+            "draft_id": "draft-1",
+            "message_id": "draft-msg-1",
+            "thread_id": message["thread_id"],
+            "subject": f"Re: {message['subject']}",
+            "to": message["from"],
+            "body_preview": body_text,
+        }
+
+
 def test_command_flow(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),
@@ -416,6 +484,116 @@ def test_llm_selected_tool_routes_to_email_list_accounts(tmp_path) -> None:
     reply = agent.handle_text("chat-1", "what email accounts are connected")
     assert "Connected email accounts:" in reply
     assert "gmail: me@example.com" in reply
+    db.close()
+
+
+def test_email_controller_can_search_select_and_answer(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    db.upsert_email_account(
+        alias="gmail",
+        provider="gmail",
+        email_address="guanw0826@gmail.com",
+        scopes=(
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.compose",
+        ),
+        status="connected",
+        metadata={},
+    )
+    fake_client = FakeAbigailGmailClient()
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"email","action":"search_messages","params":{"query":"from:abigail OR to:abigail","max_results":5},"reason":"Search for the recent email thread first."}',
+                '{"type":"tool_call","tool":"email","action":"select_message","params":{"selection":"latest"},"reason":"Select the latest message from the search results."}',
+                '{"type":"answer","tool":"","action":"","params":{},"answer":"The last email involving Abigail was on Fri, 24 Apr 2026 18:44:52 +0000.","reason":"The selected message already contains the date."}',
+            ]
+        ),
+    )
+    agent.tools._tools["email"] = EmailTool(  # noqa: SLF001
+        db,
+        oauth_client_path=Path("/tmp/client.json"),
+        token_dir=tmp_path / "tokens",
+        default_account_alias="gmail",
+        get_client=lambda alias: fake_client,
+    )
+
+    reply = agent.handle_text("chat-1", "what's the last time i emailed abigail?")
+
+    assert reply == "The last email involving Abigail was on Fri, 24 Apr 2026 18:44:52 +0000."
+    db.close()
+
+
+def test_email_controller_can_search_select_and_draft_reply(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    db.upsert_email_account(
+        alias="gmail",
+        provider="gmail",
+        email_address="guanw0826@gmail.com",
+        scopes=(
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.compose",
+        ),
+        status="connected",
+        metadata={},
+    )
+    fake_client = FakeAbigailGmailClient()
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"email","action":"search_messages","params":{"query":"from:abigail OR to:abigail","max_results":5},"reason":"Find the relevant thread first."}',
+                '{"type":"tool_call","tool":"email","action":"select_message","params":{"selection":"latest"},"reason":"Pick the latest Abigail thread."}',
+                '{"type":"tool_call","tool":"email","action":"draft_reply","params":{"body":"Hi Abigail, looking forward to our chat next week."},"reason":"Draft the requested reply."}',
+                '{"type":"complete","tool":"","action":"","params":{},"reason":"The draft is ready."}',
+            ]
+        ),
+    )
+    agent.tools._tools["email"] = EmailTool(  # noqa: SLF001
+        db,
+        oauth_client_path=Path("/tmp/client.json"),
+        token_dir=tmp_path / "tokens",
+        default_account_alias="gmail",
+        get_client=lambda alias: fake_client,
+    )
+
+    reply = agent.handle_text("chat-1", "Draft reply with Abigail I scheduled sometime next week to chat")
+
+    assert "Created Gmail draft draft-1." in reply
+    assert fake_client.last_draft == {
+        "alias": "gmail",
+        "message_id": "msg-2",
+        "body": "Hi Abigail, looking forward to our chat next week.",
+    }
     db.close()
 
 

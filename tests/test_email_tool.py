@@ -88,14 +88,26 @@ def test_email_tool_connect_list_search_get_and_draft(tmp_path) -> None:
     searched = tool.invoke("search_messages", {"alias": "gmail", "query": "tax"}, ToolContext(chat_id="chat-1"))
     assert searched.ok is True
     assert searched.data["messages"][0]["id"] == "msg-1"
+    assert searched.data["artifacts"]["email_result_set:latest"]["alias"] == "gmail"
+    assert searched.data["allow_tool_followup"] is True
+
+    selected = tool.invoke("select_message", {"alias": "gmail", "selection": "latest"}, ToolContext(chat_id="chat-1"))
+    assert selected.ok is True
+    assert selected.data["message"]["id"] == "msg-1"
+    assert selected.data["artifacts"]["message_ref:selected"]["message_id"] == "msg-1"
+    assert selected.data["allow_tool_followup"] is True
 
     message = tool.invoke("get_message", {"alias": "gmail", "message_id": "msg-1"}, ToolContext(chat_id="chat-1"))
     assert message.ok is True
     assert message.data["message"]["from"] == "alice@example.com"
+    assert message.data["artifacts"]["message_ref:latest"]["thread_id"] == "thread-1"
+    assert message.data["allow_tool_followup"] is True
 
     thread = tool.invoke("get_thread", {"alias": "gmail", "thread_id": "thread-1"}, ToolContext(chat_id="chat-1"))
     assert thread.ok is True
     assert thread.data["thread"]["thread_id"] == "thread-1"
+    assert thread.data["artifacts"]["thread_ref:latest"]["thread_id"] == "thread-1"
+    assert thread.data["allow_tool_followup"] is True
 
     draft = tool.invoke(
         "draft_reply",
@@ -104,6 +116,7 @@ def test_email_tool_connect_list_search_get_and_draft(tmp_path) -> None:
     )
     assert draft.ok is True
     assert draft.data["draft"]["draft_id"] == "draft-1"
+    assert draft.data["artifacts"]["email_draft:latest"]["draft_id"] == "draft-1"
     assert fake_client.last_draft == {"alias": "gmail", "message_id": "msg-1", "body": "Looks good to me."}
 
     searched = tool.invoke("search_messages", {"alias": "gmail", "query": "tax"}, ToolContext(chat_id="chat-1"))
