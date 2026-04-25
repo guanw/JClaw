@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from jclaw.ai.agent import AssistantAgent
@@ -36,6 +37,16 @@ class SequenceLLM:
         self._responses = iter(responses)
 
     def chat(self, messages):  # noqa: ANN001
+        return next(self._responses)
+
+
+class RecordingSequenceLLM:
+    def __init__(self, responses) -> None:  # noqa: ANN001
+        self._responses = iter(responses)
+        self.calls: list[list[dict]] = []
+
+    def chat(self, messages):  # noqa: ANN001
+        self.calls.append(messages)
         return next(self._responses)
 
 
@@ -529,6 +540,39 @@ def test_controller_can_answer_without_tool_use(tmp_path) -> None:
     db.close()
 
 
+def test_controller_can_answer_from_prior_observation(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"fake","action":"step_one","params":{},"reason":"Gather the intermediate observation first."}',
+                '{"type":"answer","tool":"","action":"","params":{},"answer":"The current phase is intermediate.","reason":"The prior observation already answers the request."}',
+            ]
+        ),
+    )
+    agent.tools.register(FakeTool())
+
+    reply = agent.handle_text("chat-1", "what phase are we in")
+
+    assert reply == "The current phase is intermediate."
+    db.close()
+
+
 def test_controller_can_block_without_tool_use(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),
@@ -557,6 +601,44 @@ def test_controller_can_block_without_tool_use(tmp_path) -> None:
     reply = agent.handle_text("chat-1", "draft a reply to Abigail")
 
     assert reply == "I need clarification about which Abigail thread you mean."
+    db.close()
+
+
+def test_controller_prompt_includes_structured_runtime_observations(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    llm = RecordingSequenceLLM(
+        [
+            '{"type":"tool_call","tool":"fake","action":"step_one","params":{},"reason":"Gather the intermediate observation first."}',
+            '{"type":"blocked","tool":"","action":"","params":{},"reason":"Inspection complete."}',
+        ]
+    )
+    agent = AssistantAgent(config, db, llm)
+    agent.tools.register(FakeTool())
+
+    reply = agent.handle_text("chat-1", "inspect the current phase")
+
+    assert reply == "Inspection complete."
+    continuation_payload = json.loads(llm.calls[-1][-1]["content"])
+    controller_state = continuation_payload["controller_state"]
+    assert controller_state["step_count"] == 1
+    assert controller_state["latest_observation"]["summary"] == "Completed fake step one."
+    assert controller_state["observations"][0]["tool"] == "fake"
+    assert controller_state["observations"][0]["action"] == "step_one"
+    assert controller_state["observations"][0]["observation"]["data_preview"]["phase"] == "intermediate"
+    assert controller_state["artifact_types"] == []
     db.close()
 
 

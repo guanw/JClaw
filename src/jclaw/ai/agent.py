@@ -515,17 +515,7 @@ class AssistantAgent:
         if not available_tools:
             return None
 
-        step_summaries = []
-        for index, step in enumerate(steps, start=1):
-            step_summaries.append(
-                {
-                    "step": index,
-                    "tool": step["tool"],
-                    "action": step["action"],
-                    "reason": step["reason"],
-                    "result": runtime.observations[index - 1].to_dict() if index - 1 < len(runtime.observations) else self._tool_result_for_planner(step["result"]),
-                }
-            )
+        controller_state = self._controller_state_for_prompt(steps, runtime)
         recent_history = [
             {"role": item.role, "content": item.content}
             for item in self.db.recent_messages(chat_id, 4)
@@ -537,6 +527,7 @@ class AssistantAgent:
             "Use answer when the request can now be answered directly from the observations.\n"
             "Use blocked when progress is unsafe or impossible without clarification, permission, or missing prerequisites.\n"
             "Use complete when the operational task is finished and the latest tool result should be returned to the user.\n"
+            "The runtime state includes normalized observations and the current artifact frontier. Treat the latest observation as authoritative.\n"
             "Keep params minimal and choose only one next decision.\n"
             "Return strict JSON only.\n"
             "Schema:\n"
@@ -555,19 +546,14 @@ class AssistantAgent:
                         {
                             "user_name": user_name or "unknown",
                             "request": text,
-                            "steps": step_summaries,
-                            "runtime": {
-                                "step_count": runtime.step_count,
-                                "artifact_types": sorted(runtime.artifacts_by_type.keys()),
-                                "pending_confirmation": runtime.pending_confirmation,
-                            },
+                            "controller_state": controller_state,
                         },
                         ensure_ascii=True,
                     ),
                 },
             ]
         )
-        if step_summaries:
+        if controller_state["observations"]:
             LOGGER.info("tool continuation raw response: %s", raw)
         else:
             LOGGER.info("tool initial planner raw response: %s", raw)
@@ -578,7 +564,7 @@ class AssistantAgent:
             decision = Decision.from_dict(parsed)
         except ValueError:
             return None
-        if step_summaries:
+        if controller_state["observations"]:
             LOGGER.info(
                 "tool continuation selected type=%s tool=%s action=%s reason=%s",
                 decision.type.value,
@@ -595,6 +581,59 @@ class AssistantAgent:
                 decision.reason,
             )
         return decision
+
+    def _controller_state_for_prompt(
+        self,
+        steps: list[dict[str, Any]],
+        runtime: RuntimeState,
+    ) -> dict[str, Any]:
+        observations: list[dict[str, Any]] = []
+        for index, step in enumerate(steps, start=1):
+            observation = (
+                runtime.observations[index - 1].to_dict()
+                if index - 1 < len(runtime.observations)
+                else self._tool_result_for_planner(step["result"])
+            )
+            observations.append(
+                {
+                    "step": index,
+                    "tool": step["tool"],
+                    "action": step["action"],
+                    "reason": step["reason"],
+                    "observation": observation,
+                }
+            )
+        return {
+            "step_count": runtime.step_count,
+            "pending_confirmation": runtime.pending_confirmation,
+            "artifact_types": sorted(runtime.artifacts_by_type.keys()),
+            "artifacts_by_type": {
+                str(key): self._preview_runtime_value(value)
+                for key, value in runtime.artifacts_by_type.items()
+            },
+            "latest_observation": runtime.last_observation.to_dict() if runtime.last_observation else {},
+            "observations": observations,
+        }
+
+    def _preview_runtime_value(self, value: Any, *, depth: int = 0) -> Any:
+        if value is None or isinstance(value, bool | int | float):
+            return value
+        if isinstance(value, str):
+            text = value.strip()
+            return f"{text[:220]}..." if len(text) > 220 else text
+        if depth >= 2:
+            return f"<{type(value).__name__}>"
+        if isinstance(value, list):
+            return [self._preview_runtime_value(item, depth=depth + 1) for item in value[:3]]
+        if isinstance(value, dict):
+            preview: dict[str, Any] = {}
+            for index, (key, item) in enumerate(value.items()):
+                if index >= 8:
+                    preview["__truncated__"] = True
+                    break
+                preview[str(key)] = self._preview_runtime_value(item, depth=depth + 1)
+            return preview
+        return str(value)
 
     def _tool_result_for_planner(self, result: ToolResult) -> dict[str, Any]:
         data = result.data
