@@ -539,6 +539,59 @@ def test_email_controller_can_search_select_and_answer(tmp_path) -> None:
     db.close()
 
 
+def test_email_controller_repairs_prose_answer_instead_of_falling_back_to_raw_search_dump(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    db.upsert_email_account(
+        alias="gmail",
+        provider="gmail",
+        email_address="guanw0826@gmail.com",
+        scopes=(
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.compose",
+        ),
+        status="connected",
+        metadata={},
+    )
+    fake_client = FakeAbigailGmailClient()
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"email","action":"search_messages","params":{"query":"from:aclifford@candidatelabs.com OR to:aclifford@candidatelabs.com","max_results":10},"reason":"Search for the most recent email exchange with Abigail."}',
+                "The last email involving Abigail was on Fri, 24 Apr 2026 18:44:52 +0000.",
+                '{"type":"answer","tool":"","action":"","params":{},"answer":"The last email involving Abigail was on Fri, 24 Apr 2026 18:44:52 +0000.","reason":"The search results already contain the answer."}',
+            ]
+        ),
+    )
+    agent.tools._tools["email"] = EmailTool(  # noqa: SLF001
+        db,
+        oauth_client_path=Path("/tmp/client.json"),
+        token_dir=tmp_path / "tokens",
+        default_account_alias="gmail",
+        get_client=lambda alias: fake_client,
+    )
+
+    reply = agent.handle_text("chat-1", "what's the last time i emailed abigail?")
+
+    assert reply == "The last email involving Abigail was on Fri, 24 Apr 2026 18:44:52 +0000."
+    assert "Found 10 matching email(s)" not in reply
+    db.close()
+
+
 def test_email_controller_can_search_select_and_draft_reply(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),

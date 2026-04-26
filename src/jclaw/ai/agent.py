@@ -565,7 +565,13 @@ class AssistantAgent:
             LOGGER.info("tool initial planner raw response: %s", raw)
         parsed = self._parse_json_object(raw)
         if not parsed:
-            return None
+            parsed = self._repair_controller_decision(
+                raw,
+                text=text,
+                controller_state=controller_state,
+            )
+            if not parsed:
+                return None
         try:
             decision = Decision.from_dict(parsed)
         except ValueError:
@@ -705,7 +711,7 @@ class AssistantAgent:
     ) -> str:
         tool = self.tools.get(str(decision["tool"]))
         tool_result_text = tool.format_result(str(decision["action"]), result)
-        if tool.describe().get("prefer_direct_result"):
+        if self._should_return_direct_tool_result(tool.describe(), result):
             LOGGER.info("%s tool result returned directly based on tool metadata", decision["tool"])
             return tool_result_text
         if result.needs_confirmation:
@@ -737,6 +743,58 @@ class AssistantAgent:
             return self.llm.chat(messages)
         except Exception:  # noqa: BLE001
             return tool_result_text
+
+    def _should_return_direct_tool_result(self, tool_description: dict[str, Any], result: ToolResult) -> bool:
+        if not tool_description.get("prefer_direct_result"):
+            return False
+        if result.needs_confirmation:
+            return True
+        if tool_description.get("supports_followup") and result.data.get("allow_tool_followup") is not False:
+            return False
+        return True
+
+    def _repair_controller_decision(
+        self,
+        raw: str,
+        *,
+        text: str,
+        controller_state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not str(raw).strip():
+            return None
+        try:
+            repaired = self.llm.chat(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Rewrite the prior controller response as strict JSON only.\n"
+                            "Allowed schema:\n"
+                            '{"type":"tool_call|answer|blocked|complete","tool":string,"action":string,"params":object,"answer":string,"reason":string}\n'
+                            "If the response already answers the user from available evidence, use type=answer.\n"
+                            "If it requests clarification or says progress is blocked, use type=blocked.\n"
+                            "If it says the operation is finished and the latest tool result should be returned, use type=complete.\n"
+                            "Otherwise use type=tool_call.\n"
+                            "Return strict JSON only."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "request": text,
+                                "controller_state": controller_state,
+                                "raw_controller_response": raw,
+                            },
+                            ensure_ascii=True,
+                        ),
+                    },
+                ]
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        LOGGER.info("tool controller repair raw response: %s", repaired)
+        return self._parse_json_object(repaired)
 
     def _parse_json_object(self, text: str) -> dict[str, Any] | None:
         cleaned = text.strip()
