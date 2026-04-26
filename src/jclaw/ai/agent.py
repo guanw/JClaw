@@ -14,7 +14,6 @@ from jclaw.ai.prompts import load_system_prompt
 from jclaw.core.config import Config
 from jclaw.core.db import Database, MemoryRecord
 from jclaw.core.defaults import AGENT_MAX_TOOL_STEPS
-from jclaw.core.scheduler import next_run_at, parse_schedule, to_utc_iso
 from jclaw.tools.automation.tool import AutomationTool
 from jclaw.tools.base import Decision, DecisionType, Observation, RuntimeState, ToolContext, ToolExecutionState, ToolResult
 from jclaw.tools.browser.tool import BrowserTool
@@ -176,8 +175,6 @@ class AssistantAgent:
             return self._forget(chat_id, remainder)
         if command == "/memory":
             return self._memory(chat_id)
-        if command == "/cron":
-            return self._cron(chat_id, remainder)
         if command == "/approve":
             return self._approve(chat_id, remainder)
         if command == "/deny":
@@ -217,52 +214,12 @@ class AssistantAgent:
         lines = [f"{item.key} = {item.value}" for item in items]
         return "Stored memories:\n" + "\n".join(lines)
 
-    def _cron(self, chat_id: str, remainder: str) -> str:
-        action, _, payload = remainder.strip().partition(" ")
-        action = action or "list"
-
-        if action == "list":
-            jobs = self.db.list_cron_jobs(chat_id)
-            if not jobs:
-                return "No cron jobs configured."
-            lines = [
-                f"{job.id}. {job.schedule} -> {job.prompt} (next {job.next_run_at})"
-                for job in jobs
-            ]
-            return "Cron jobs:\n" + "\n".join(lines)
-
-        if action == "remove":
-            if not payload.strip().isdigit():
-                return "Usage: /cron remove 1"
-            deleted = self.db.remove_cron_job(chat_id, int(payload.strip()))
-            if deleted:
-                return "Cron job removed."
-            return "Cron job not found."
-
-        if action == "add":
-            schedule_text, sep, prompt = payload.partition("|")
-        else:
-            schedule_text, sep, prompt = remainder.partition("|")
-
-        if not sep:
-            return "Usage: /cron add every 30m | your prompt"
-
-        spec = parse_schedule(schedule_text.strip())
-        scheduled_at = to_utc_iso(next_run_at(spec))
-        job_id = self.db.add_cron_job(chat_id, spec.raw, prompt.strip(), scheduled_at)
-        return f"Cron job {job_id} added for {spec.raw}. Next run: {scheduled_at}"
-
     def _help_text(self) -> str:
         return (
             "Commands:\n"
             "/remember key = value\n"
             "/memory\n"
             "/forget key\n"
-            "/cron add in 30 minutes | remind me to stretch\n"
-            "/cron add every 30m | remind me to stretch\n"
-            "/cron add daily 09:00 | ask for my standup update\n"
-            "/cron list\n"
-            "/cron remove 1\n"
             "/approve req_123\n"
             "/deny req_123\n"
             "/grants\n"

@@ -11,17 +11,13 @@ BASE_TIME = datetime.fromisoformat("2026-04-10T10:00:00-04:00")
 @pytest.mark.parametrize(
     ("text", "kind", "expected_minutes"),
     [
-        ("in 1 minute", "once", 1),
-        ("in 30 minutes", "once", 30),
-        ("in 2 hours", "once", 120),
-        ("in 1 day", "once", 1440),
-        ("every 30m", "interval", 30),
-        ("every 2h", "interval", 120),
-        ("every 3 days", "interval", 4320),
-        ("hourly", "interval", 60),
+        ("once:60", "once", 1),
+        ("once:1800", "once", 30),
+        ("interval:1800", "interval", 30),
+        ("interval:7200", "interval", 120),
     ],
 )
-def test_parse_relative_and_interval_schedules(text: str, kind: str, expected_minutes: int) -> None:
+def test_parse_canonical_relative_and_interval_schedules(text: str, kind: str, expected_minutes: int) -> None:
     spec = parse_schedule(text)
     run_at = next_run_at(spec, from_dt=BASE_TIME)
     assert spec.kind == kind
@@ -31,12 +27,11 @@ def test_parse_relative_and_interval_schedules(text: str, kind: str, expected_mi
 @pytest.mark.parametrize(
     ("text", "expected_hour", "expected_day"),
     [
-        ("daily 09:00", 9, 11),
-        ("DAILY 09:00", 9, 11),
-        ("  daily 23:59  ", 23, 10),
+        ("daily:09:00", 9, 11),
+        ("daily:23:59", 23, 10),
     ],
 )
-def test_parse_daily_schedule(text: str, expected_hour: int, expected_day: int) -> None:
+def test_parse_canonical_daily_schedule(text: str, expected_hour: int, expected_day: int) -> None:
     spec = parse_schedule(text)
     run_at = next_run_at(spec, from_dt=BASE_TIME)
     assert spec.kind == "daily"
@@ -47,13 +42,12 @@ def test_parse_daily_schedule(text: str, expected_hour: int, expected_day: int) 
 @pytest.mark.parametrize(
     ("text", "expected_month", "expected_day", "expected_hour", "expected_year"),
     [
-        ("May 24", 5, 24, 9, 2026),
-        ("on May 24", 5, 24, 9, 2026),
-        ("5/24", 5, 24, 9, 2026),
-        ("5/24 3pm", 5, 24, 15, 2026),
+        ("date:5-24 09:00", 5, 24, 9, 2026),
+        ("date:5-24 15:00", 5, 24, 15, 2026),
+        ("date:2026-5-24 15:00", 5, 24, 15, 2026),
     ],
 )
-def test_parse_date_schedule(text: str, expected_month: int, expected_day: int, expected_hour: int, expected_year: int) -> None:
+def test_parse_canonical_date_schedule(text: str, expected_month: int, expected_day: int, expected_hour: int, expected_year: int) -> None:
     spec = parse_schedule(text)
     run_at = next_run_at(spec, from_dt=BASE_TIME)
     assert spec.kind == "date"
@@ -63,8 +57,8 @@ def test_parse_date_schedule(text: str, expected_month: int, expected_day: int, 
     assert run_at.year == expected_year
 
 
-def test_parse_date_schedule_rolls_forward_when_date_has_passed() -> None:
-    spec = parse_schedule("4/1")
+def test_canonical_date_schedule_rolls_forward_when_date_has_passed() -> None:
+    spec = parse_schedule("date:4-1 09:00")
     run_at = next_run_at(spec, from_dt=BASE_TIME)
     assert run_at.year == 2027
     assert run_at.month == 4
@@ -75,19 +69,18 @@ def test_parse_date_schedule_rolls_forward_when_date_has_passed() -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "in thirty minutes",
-        "in -1 minutes",
-        "in 0 minutes",
-        "every 0m",
-        "daily 24:00",
-        "daily 09:60",
-        "sometime soon",
-        "tomorrow morning",
-        "13/40",
+        "",
+        "in 30 minutes",
+        "every 30m",
+        "daily 09:00",
+        "May 24",
+        "date:13-40 09:00",
+        "once:0",
+        "interval:-1",
     ],
 )
-def test_parse_schedule_rejects_unsupported_inputs(text: str) -> None:
-    with pytest.raises(ValueError, match="unsupported schedule"):
+def test_parse_schedule_rejects_unsupported_or_noncanonical_inputs(text: str) -> None:
+    with pytest.raises(ValueError):
         parse_schedule(text)
 
 

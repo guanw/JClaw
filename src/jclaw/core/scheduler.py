@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-import re
 from typing import Any
 
 
@@ -23,92 +22,50 @@ class ScheduleSpec:
     explicit_year: bool = False
 
 
-MONTHS = {
-    "jan": 1,
-    "january": 1,
-    "feb": 2,
-    "february": 2,
-    "mar": 3,
-    "march": 3,
-    "apr": 4,
-    "april": 4,
-    "may": 5,
-    "jun": 6,
-    "june": 6,
-    "jul": 7,
-    "july": 7,
-    "aug": 8,
-    "august": 8,
-    "sep": 9,
-    "sept": 9,
-    "september": 9,
-    "oct": 10,
-    "october": 10,
-    "nov": 11,
-    "november": 11,
-    "dec": 12,
-    "december": 12,
-}
 DEFAULT_DATE_HOUR = 9
 DEFAULT_DATE_MINUTE = 0
 
 
-def parse_schedule(text: str) -> ScheduleSpec:
-    raw = text.strip()
-    lowered = raw.lower()
+def parse_schedule(raw: str) -> ScheduleSpec:
+    text = str(raw).strip()
+    if not text:
+        raise ValueError("canonical schedule is required")
 
-    once_match = re.fullmatch(
-        r"in\s+(\d+)\s*(m|min|mins|minute|minutes|h|hour|hours|d|day|days)",
-        lowered,
-    )
-    if once_match:
-        amount = int(once_match.group(1))
-        if amount <= 0:
-            raise ValueError("unsupported schedule; use 'in 30 minutes', 'every 30m', 'hourly', or 'daily 09:00'")
-        unit = once_match.group(2)
-        multiplier = 60
-        if unit in {"h", "hour", "hours"}:
-            multiplier = 3600
-        elif unit in {"d", "day", "days"}:
-            multiplier = 86400
+    if ":" not in text:
+        raise ValueError("schedule must use canonical form such as once:1800, interval:1800, daily:09:00, or date:4-27 09:00")
+
+    kind, _, remainder = text.partition(":")
+    kind = kind.strip().lower()
+    remainder = remainder.strip()
+
+    if kind in {"once", "interval"}:
+        seconds = _coerce_int_in_range(remainder, field="interval_seconds", minimum=1)
+        return ScheduleSpec(raw=text, kind=kind, interval_seconds=seconds)
+
+    if kind == "daily":
+        hour_text, minute_text = _split_once(remainder, ":", error="daily schedule must use HH:MM")
+        hour = _coerce_int_in_range(hour_text, field="hour", minimum=0, maximum=23)
+        minute = _coerce_int_in_range(minute_text, field="minute", minimum=0, maximum=59)
+        return ScheduleSpec(raw=text, kind="daily", hour=hour, minute=minute)
+
+    if kind == "date":
+        date_part, time_part = _split_once(remainder, " ", error="date schedule must use M-D HH:MM or YYYY-M-D HH:MM")
+        year, month, day, explicit_year = _parse_canonical_date_part(date_part)
+        hour_text, minute_text = _split_once(time_part, ":", error="date schedule time must use HH:MM")
+        hour = _coerce_int_in_range(hour_text, field="hour", minimum=0, maximum=23)
+        minute = _coerce_int_in_range(minute_text, field="minute", minimum=0, maximum=59)
         return ScheduleSpec(
-            raw=raw,
-            kind="once",
-            interval_seconds=amount * multiplier,
+            raw=text,
+            kind="date",
+            year=year,
+            explicit_year=explicit_year,
+            month=month,
+            day=day,
+            hour=hour,
+            minute=minute,
         )
 
-    every_match = re.fullmatch(r"every\s+(\d+)\s*([mhd]|min|mins|minute|minutes|hour|hours|day|days)", lowered)
-    if every_match:
-        amount = int(every_match.group(1))
-        if amount <= 0:
-            raise ValueError("unsupported schedule; use 'in 30 minutes', 'every 30m', 'hourly', or 'daily 09:00'")
-        unit = every_match.group(2)
-        multiplier = 60
-        if unit in {"h", "hour", "hours"}:
-            multiplier = 3600
-        elif unit in {"d", "day", "days"}:
-            multiplier = 86400
-        return ScheduleSpec(raw=raw, kind="interval", interval_seconds=amount * multiplier)
-
-    if lowered == "hourly":
-        return ScheduleSpec(raw=raw, kind="interval", interval_seconds=3600)
-
-    daily_match = re.fullmatch(r"daily\s+([01]?\d|2[0-3]):([0-5]\d)", lowered)
-    if daily_match:
-        return ScheduleSpec(
-            raw=raw,
-            kind="daily",
-            hour=int(daily_match.group(1)),
-            minute=int(daily_match.group(2)),
-        )
-
-    date_spec = _parse_date_schedule(raw)
-    if date_spec is not None:
-        return date_spec
-
-    raise ValueError(
-        "unsupported schedule; use 'in 30 minutes', 'every 30m', 'hourly', 'daily 09:00', 'May 24', or '5/24'"
-    )
+    raise ValueError("schedule kind must be one of once, interval, daily, or date")
 
 
 def parse_schedule_input(*, schedule: str | None = None, when: dict[str, Any] | None = None) -> ScheduleSpec:
@@ -116,11 +73,7 @@ def parse_schedule_input(*, schedule: str | None = None, when: dict[str, Any] | 
         return _parse_structured_when(when)
     if schedule is None or not str(schedule).strip():
         raise ValueError("creating a schedule requires either schedule or when")
-    raw = str(schedule).strip()
-    canonical = _parse_canonical_schedule(raw)
-    if canonical is not None:
-        return canonical
-    return parse_schedule(raw)
+    return parse_schedule(str(schedule))
 
 
 def next_run_at(spec: ScheduleSpec, *, from_dt: datetime | None = None) -> datetime:
@@ -159,88 +112,6 @@ def next_run_at(spec: ScheduleSpec, *, from_dt: datetime | None = None) -> datet
 
 def to_utc_iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
-
-
-def _parse_date_schedule(raw: str) -> ScheduleSpec | None:
-    text = raw.strip()
-    lowered = text.lower()
-    if lowered.startswith("on "):
-        lowered = lowered[3:].strip()
-
-    md_match = re.fullmatch(
-        r"([01]?\d)/([0-3]?\d)(?:/(\d{2,4}))?(?:\s+(?:at\s+)?)?(.+)?",
-        lowered,
-    )
-    if md_match:
-        month = int(md_match.group(1))
-        day = int(md_match.group(2))
-        year = _normalize_year(md_match.group(3))
-        hour, minute = _parse_optional_time(md_match.group(4))
-        return ScheduleSpec(
-            raw=raw,
-            kind="date",
-            month=month,
-            day=day,
-            year=year,
-            explicit_year=year is not None,
-            hour=hour if hour is not None else DEFAULT_DATE_HOUR,
-            minute=minute if minute is not None else DEFAULT_DATE_MINUTE,
-        )
-
-    named_match = re.fullmatch(
-        r"([a-z]+)\s+([0-3]?\d)(?:,?\s+(\d{2,4}))?(?:\s+(?:at\s+)?)?(.+)?",
-        lowered,
-    )
-    if not named_match:
-        return None
-    month_name = named_match.group(1)
-    month = MONTHS.get(month_name)
-    if month is None:
-        return None
-    day = int(named_match.group(2))
-    year = _normalize_year(named_match.group(3))
-    hour, minute = _parse_optional_time(named_match.group(4))
-    return ScheduleSpec(
-        raw=raw,
-        kind="date",
-        month=month,
-        day=day,
-        year=year,
-        explicit_year=year is not None,
-        hour=hour if hour is not None else DEFAULT_DATE_HOUR,
-        minute=minute if minute is not None else DEFAULT_DATE_MINUTE,
-    )
-
-
-def _normalize_year(raw_year: str | None) -> int | None:
-    if raw_year is None or not str(raw_year).strip():
-        return None
-    year = int(raw_year)
-    if year < 100:
-        return 2000 + year
-    return year
-
-
-def _parse_optional_time(raw_time: str | None) -> tuple[int | None, int | None]:
-    if raw_time is None or not str(raw_time).strip():
-        return None, None
-    text = str(raw_time).strip().lower()
-    time_match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", text)
-    if time_match:
-        return int(time_match.group(1)), int(time_match.group(2))
-    ampm_match = re.fullmatch(r"(\d{1,2})(?::([0-5]\d))?\s*(am|pm)", text)
-    if ampm_match:
-        hour = int(ampm_match.group(1))
-        minute = int(ampm_match.group(2) or "00")
-        meridiem = ampm_match.group(3)
-        if hour == 12:
-            hour = 0
-        if meridiem == "pm":
-            hour += 12
-        return hour, minute
-    raise ValueError(
-        "unsupported schedule; use 'in 30 minutes', 'every 30m', 'hourly', 'daily 09:00', 'May 24', or '5/24'"
-    )
 
 
 def _parse_structured_when(payload: dict[str, Any]) -> ScheduleSpec:
@@ -290,9 +161,31 @@ def _parse_structured_when(payload: dict[str, Any]) -> ScheduleSpec:
     raise ValueError("structured schedule kind must be one of once, interval, daily, or date")
 
 
+def _parse_canonical_date_part(text: str) -> tuple[int | None, int, int, bool]:
+    parts = [part.strip() for part in str(text).split("-")]
+    if len(parts) == 2:
+        month = _coerce_int_in_range(parts[0], field="month", minimum=1, maximum=12)
+        day = _coerce_int_in_range(parts[1], field="day", minimum=1, maximum=31)
+        return None, month, day, False
+    if len(parts) == 3:
+        year = _normalize_year(parts[0])
+        month = _coerce_int_in_range(parts[1], field="month", minimum=1, maximum=12)
+        day = _coerce_int_in_range(parts[2], field="day", minimum=1, maximum=31)
+        return year, month, day, True
+    raise ValueError("date schedule must use M-D or YYYY-M-D")
+
+
+def _normalize_year(raw_year: str | None) -> int | None:
+    if raw_year is None or not str(raw_year).strip():
+        return None
+    year = int(raw_year)
+    if year < 100:
+        return 2000 + year
+    return year
+
+
 def _coerce_positive_int(value: Any, *, field: str) -> int:
-    parsed = _coerce_int_in_range(value, field=field, minimum=1)
-    return parsed
+    return _coerce_int_in_range(value, field=field, minimum=1)
 
 
 def _coerce_int_in_range(
@@ -313,6 +206,17 @@ def _coerce_int_in_range(
     return parsed
 
 
+def _split_once(text: str, separator: str, *, error: str) -> tuple[str, str]:
+    if separator not in text:
+        raise ValueError(error)
+    left, right = text.split(separator, 1)
+    left = left.strip()
+    right = right.strip()
+    if not left or not right:
+        raise ValueError(error)
+    return left, right
+
+
 def _structured_raw(kind: str, payload: dict[str, Any]) -> str:
     if kind in {"once", "interval"}:
         return f"{kind}:{payload.get('interval_seconds')}"
@@ -327,38 +231,3 @@ def _structured_raw(kind: str, payload: dict[str, Any]) -> str:
             f"{int(payload.get('hour', DEFAULT_DATE_HOUR)):02d}:{int(payload.get('minute', DEFAULT_DATE_MINUTE)):02d}"
         )
     return kind
-
-
-def _parse_canonical_schedule(raw: str) -> ScheduleSpec | None:
-    once_match = re.fullmatch(r"once:(\d+)", raw)
-    if once_match:
-        return ScheduleSpec(raw=raw, kind="once", interval_seconds=int(once_match.group(1)))
-
-    interval_match = re.fullmatch(r"interval:(\d+)", raw)
-    if interval_match:
-        return ScheduleSpec(raw=raw, kind="interval", interval_seconds=int(interval_match.group(1)))
-
-    daily_match = re.fullmatch(r"daily:(\d{2}):(\d{2})", raw)
-    if daily_match:
-        return ScheduleSpec(
-            raw=raw,
-            kind="daily",
-            hour=int(daily_match.group(1)),
-            minute=int(daily_match.group(2)),
-        )
-
-    date_match = re.fullmatch(r"date:(?:(\d{4})-)?(\d{1,2})-(\d{1,2}) (\d{2}):(\d{2})", raw)
-    if date_match:
-        year = int(date_match.group(1)) if date_match.group(1) else None
-        return ScheduleSpec(
-            raw=raw,
-            kind="date",
-            year=year,
-            explicit_year=year is not None,
-            month=int(date_match.group(2)),
-            day=int(date_match.group(3)),
-            hour=int(date_match.group(4)),
-            minute=int(date_match.group(5)),
-        )
-
-    return None

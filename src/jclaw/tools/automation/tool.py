@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 
 from jclaw.core.db import CronJobRecord, Database
-from jclaw.core.scheduler import next_run_at, parse_schedule, parse_schedule_input, to_utc_iso
+from jclaw.core.scheduler import next_run_at, parse_schedule_input, to_utc_iso
 from jclaw.tools.base import ActionSpec, RuntimeState, ToolContext, ToolResult
 
 
@@ -88,22 +88,21 @@ class AutomationTool:
         )
 
     def _create_schedule(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        schedule = str(params.get("schedule", "")).strip()
         prompt = str(params.get("prompt", "")).strip()
         when = params.get("when")
-        if (not schedule and not when) or not prompt:
+        if not isinstance(when, dict) or not prompt:
             return ToolResult(
                 ok=False,
-                summary="Creating a schedule requires prompt plus schedule or when.",
+                summary="Creating a schedule requires prompt plus a structured when object.",
                 data={"allow_tool_followup": False},
             )
         try:
-            spec = parse_schedule_input(schedule=schedule or None, when=when if isinstance(when, dict) else None)
+            spec = parse_schedule_input(when=when)
         except ValueError as exc:
             return ToolResult(
                 ok=False,
                 summary=str(exc),
-                data={"schedule": schedule, "when": when, "allow_tool_followup": False},
+                data={"when": when, "allow_tool_followup": False},
             )
         next_run = to_utc_iso(next_run_at(spec))
         job_id = self.db.add_cron_job(ctx.chat_id, spec.raw, prompt, next_run)
@@ -130,25 +129,20 @@ class AutomationTool:
         if current is None:
             return ToolResult(ok=False, summary=f"Schedule {job_id} was not found.", data={"allow_tool_followup": False})
 
-        schedule_param = params.get("schedule")
         when_param = params.get("when")
         prompt_param = params.get("prompt")
         enabled_param = params.get("enabled")
 
         schedule = None
         next_run = None
-        if schedule_param not in (None, "") or when_param not in (None, {}):
+        if when_param not in (None, {}):
             try:
-                spec = parse_schedule_input(
-                    schedule=str(schedule_param).strip() if schedule_param not in (None, "") else None,
-                    when=when_param if isinstance(when_param, dict) else None,
-                )
+                spec = parse_schedule_input(when=when_param if isinstance(when_param, dict) else None)
             except ValueError as exc:
                 return ToolResult(
                     ok=False,
                     summary=str(exc),
                     data={
-                        "schedule": str(schedule_param).strip() if schedule_param not in (None, "") else "",
                         "when": when_param,
                         "allow_tool_followup": False,
                     },
@@ -234,15 +228,14 @@ class AutomationTool:
             "create_schedule": ActionSpec(
                 tool=self.name,
                 action="create_schedule",
-                description="Create a recurring or one-off schedule with a schedule string and prompt.",
+                description="Create a recurring or one-off schedule with a structured 'when' object and prompt.",
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "schedule": {"type": "string"},
                         "when": self._when_schema(),
                         "prompt": {"type": "string"},
                     },
-                    "required": ["prompt"],
+                    "required": ["when", "prompt"],
                 },
                 writes=True,
                 produces_artifacts=("automation_job",),
@@ -250,12 +243,11 @@ class AutomationTool:
             "update_schedule": ActionSpec(
                 tool=self.name,
                 action="update_schedule",
-                description="Update an existing schedule's timing, prompt, or enabled state.",
+                description="Update an existing schedule's timing, prompt, or enabled state using a structured 'when' object.",
                 input_schema={
                     "type": "object",
                     "properties": {
                         "job_id": {"type": "integer"},
-                        "schedule": {"type": "string"},
                         "when": self._when_schema(),
                         "prompt": {"type": "string"},
                         "enabled": {"type": "boolean"},

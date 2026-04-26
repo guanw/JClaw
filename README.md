@@ -5,7 +5,7 @@ JClaw is a lightweight AI assistant daemon for macOS that polls Telegram, stores
 The bootstrap in this repo is intentionally lean:
 
 - Telegram long-polling instead of a heavier chat bridge
-- SQLite for history, memory, and cron state
+- SQLite for history, memory, and automation state
 - A compact prompt pipeline to reduce token usage
 - A `launchd` installer so it can stay alive on your MacBook
 
@@ -58,12 +58,12 @@ Create a bot with `@BotFather`, copy the bot token into the config, and send the
 
 JClaw keeps token usage down by:
 
-- handling memory and cron commands locally without an LLM call
+- handling simple memory commands locally without an LLM call
 - sending only a small recent history window
 - retrieving only a few relevant memory snippets
 - instructing the model to answer briefly by default
 
-## Useful Commands
+## Useful Inputs
 
 These can be sent from Telegram or from the CLI with `jclaw send`:
 
@@ -71,7 +71,6 @@ These can be sent from Telegram or from the CLI with `jclaw send`:
 - `/remember project = building a telegram-first assistant`
 - `/memory`
 - `/forget project`
-- `/cron add every 30m | remind me to stretch`
-- `/cron add daily 09:00 | ask me for a standup update`
-- `/cron list`
-- `/cron remove 1`
+- `Remind me every day at 9 AM to stretch`
+- `Remind me to practice interview at 9 AM on April 27`
+- `Remind me in 30 minutes to check the build`

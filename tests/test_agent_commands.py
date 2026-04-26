@@ -355,8 +355,6 @@ def test_command_flow(tmp_path) -> None:
 
     assert "Remembered" in agent.handle_text("chat-1", "/remember owner = guan")
     assert "owner = guan" in agent.handle_text("chat-1", "/memory")
-    assert "Cron job" in agent.handle_text("chat-1", "/cron add every 30m | stretch")
-    assert "1." in agent.handle_text("chat-1", "/cron list")
     db.close()
 
 
@@ -1637,7 +1635,7 @@ def test_llm_selected_tool_routes_to_automation(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"type":"tool_call","tool":"automation","action":"create_schedule","params":{"schedule":"every 30m","prompt":"stretch"},"reason":"The user wants a recurring reminder."}',
+                '{"type":"tool_call","tool":"automation","action":"create_schedule","params":{"when":{"kind":"interval","interval_seconds":1800},"prompt":"stretch"},"reason":"The user wants a recurring reminder."}',
                 '{"type":"complete","tool":"","action":"","params":{},"reason":"The schedule was created successfully."}',
             ]
         ),
@@ -1645,7 +1643,7 @@ def test_llm_selected_tool_routes_to_automation(tmp_path) -> None:
 
     reply = agent.handle_text("chat-1", "remind me every 30 minutes to stretch")
     assert "Created schedule" in reply
-    assert "every 30m" in reply
+    assert "interval:1800" in reply
     assert "stretch" in reply
     db.close()
 
@@ -1670,12 +1668,39 @@ def test_automation_terminal_result_skips_continuation_planner(tmp_path) -> None
         db,
         SequenceLLM(
             [
-                '{"type":"tool_call","tool":"automation","action":"create_schedule","params":{"schedule":"in 30 minutes","prompt":"stretch"},"reason":"The user wants a one-off reminder."}',
+                '{"type":"tool_call","tool":"automation","action":"create_schedule","params":{"when":{"kind":"once","interval_seconds":1800},"prompt":"stretch"},"reason":"The user wants a one-off reminder."}',
             ]
         ),
     )
 
     reply = agent.handle_text("chat-1", "remind me in 30 minutes to stretch")
     assert "Created schedule" in reply
-    assert "in 30 minutes" in reply
+    assert "once:1800" in reply
+    db.close()
+def test_automation_prompt_catalog_prefers_structured_when_only(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(config, db, DummyLLM())
+
+    catalog = json.loads(agent._tool_catalog_for_prompt(agent.tools.list_tools()))  # noqa: SLF001
+    automation = next(item for item in catalog if item["name"] == "automation")
+    create_schema = automation["actions"]["create_schedule"]["input_schema"]["properties"]
+    update_schema = automation["actions"]["update_schedule"]["input_schema"]["properties"]
+
+    assert "when" in create_schema
+    assert "schedule" not in create_schema
+    assert "when" in update_schema
+    assert "schedule" not in update_schema
     db.close()

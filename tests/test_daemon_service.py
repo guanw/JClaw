@@ -82,7 +82,7 @@ def test_run_due_cron_jobs_disables_one_off_job(tmp_path) -> None:
     db = Database(tmp_path / "jclaw.db")
     job_id = db.add_cron_job(
         "chat-1",
-        "in 30 minutes",
+        "once:1800",
         "stretch",
         "2000-01-01T00:00:00+00:00",
     )
