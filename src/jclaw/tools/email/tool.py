@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+from email.utils import getaddresses
 from pathlib import Path
 import re
 from typing import Any, Callable
@@ -118,9 +119,12 @@ class EmailTool:
         runtime: RuntimeState,
     ) -> dict[str, Any]:
         materialized = dict(params)
-        alias = self._normalize_runtime_alias(str(materialized.get("alias", "")).strip())
+        raw_alias = str(materialized.get("alias", "")).strip()
+        alias = self._coerce_runtime_alias(raw_alias)
         if alias:
             materialized["alias"] = alias
+        elif raw_alias:
+            materialized.pop("alias", None)
         for key in ("message_id", "thread_id", "result_set_id"):
             raw_value = str(materialized.get(key, "")).strip()
             if self._is_placeholder_identifier(raw_value):
@@ -338,6 +342,7 @@ class EmailTool:
             message = thread["messages"][-1]
         else:
             return ToolResult(ok=False, summary="draft_reply requires a message_id or thread_id.", data={})
+        message = self._prepare_reply_message(alias, message)
         draft = client.draft_reply(alias, message=message, body_text=body_text)
         return ToolResult(
             ok=True,
@@ -480,7 +485,9 @@ class EmailTool:
         }
 
     def _resolve_alias(self, params: dict[str, Any]) -> str:
-        alias = self._normalize_runtime_alias(str(params.get("alias") or self.default_account_alias).strip())
+        alias = self._coerce_runtime_alias(str(params.get("alias") or "").strip())
+        if not alias:
+            alias = self._coerce_runtime_alias(str(self.default_account_alias).strip())
         record = self.db.get_email_account(alias)
         if record is None:
             raise RuntimeError(f"Email account '{alias}' is not connected.")
@@ -496,6 +503,22 @@ class EmailTool:
             if str(account.email_address).strip().lower() == alias.lower():
                 return str(account.alias).strip()
         return alias
+
+    def _coerce_runtime_alias(self, raw_alias: str) -> str:
+        alias = self._normalize_runtime_alias(raw_alias)
+        if not alias:
+            return ""
+        if self.db.get_email_account(alias) is not None:
+            return alias
+        accounts = self.db.list_email_accounts()
+        if not accounts:
+            return alias
+        if len(accounts) == 1:
+            return str(accounts[0].alias).strip()
+        default_alias = self._normalize_runtime_alias(str(self.default_account_alias).strip())
+        if default_alias and self.db.get_email_account(default_alias) is not None:
+            return default_alias
+        return ""
 
     def _requested_scopes(self, params: dict[str, Any], *, include_compose: bool) -> tuple[str, ...]:
         scopes = {GMAIL_READ_SCOPE}
@@ -651,3 +674,41 @@ class EmailTool:
             "subject": str(message.get("subject", "")).strip(),
             "date": str(message.get("date", "")).strip(),
         }
+
+    def _prepare_reply_message(self, alias: str, message: dict[str, Any]) -> dict[str, Any]:
+        prepared = dict(message)
+        reply_to = self._reply_target_for_message(alias, prepared)
+        if reply_to:
+            prepared["reply_to_address"] = reply_to
+        return prepared
+
+    def _reply_target_for_message(self, alias: str, message: dict[str, Any]) -> str:
+        own_address = self._account_email_address(alias).lower()
+        from_header = str(message.get("from", "")).strip()
+        to_header = str(message.get("to", "")).strip()
+        from_addresses = self._extract_addresses(from_header)
+        to_addresses = self._extract_addresses(to_header)
+        if own_address and any(address.lower() == own_address for address in from_addresses):
+            for address in to_addresses:
+                if address and address.lower() != own_address:
+                    return address
+            if to_header:
+                return to_header
+        if from_header:
+            return from_header
+        if to_header:
+            return to_header
+        return ""
+
+    def _account_email_address(self, alias: str) -> str:
+        record = self.db.get_email_account(alias)
+        if record is None:
+            return ""
+        return str(record.email_address).strip()
+
+    def _extract_addresses(self, raw_header: str) -> list[str]:
+        return [
+            str(address).strip()
+            for _, address in getaddresses([str(raw_header or "")])
+            if str(address).strip()
+        ]

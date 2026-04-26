@@ -104,7 +104,7 @@ class GmailClient:
     def draft_reply(self, alias: str, *, message: dict[str, Any], body_text: str) -> dict[str, Any]:
         service = self._service(alias, ("https://www.googleapis.com/auth/gmail.compose",))
         email = EmailMessage()
-        email["To"] = message.get("from", "")
+        email["To"] = str(message.get("reply_to_address") or message.get("from", "")).strip()
         subject = str(message.get("subject", "")).strip()
         email["Subject"] = subject if subject.lower().startswith("re:") else f"Re: {subject}"
         if message.get("message_id_header"):

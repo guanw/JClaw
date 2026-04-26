@@ -26,6 +26,7 @@ from jclaw.tools.workspace.tool import WorkspaceTool
 
 
 LOGGER = logging.getLogger(__name__)
+MAX_CONTROLLER_OBSERVATIONS = 5
 
 
 class AssistantAgent:
@@ -600,7 +601,8 @@ class AssistantAgent:
         runtime: RuntimeState,
     ) -> dict[str, Any]:
         observations: list[dict[str, Any]] = []
-        for index, step in enumerate(steps, start=1):
+        start_index = max(0, len(steps) - MAX_CONTROLLER_OBSERVATIONS)
+        for index, step in enumerate(steps[start_index:], start=start_index + 1):
             observation = (
                 runtime.observations[index - 1].to_dict()
                 if index - 1 < len(runtime.observations)

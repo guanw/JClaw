@@ -45,13 +45,18 @@ class FakeGmailClient:
         return {"thread_id": thread_id, "messages": list(self.messages)}
 
     def draft_reply(self, alias: str, *, message: dict, body_text: str) -> dict:
-        self.last_draft = {"alias": alias, "message_id": message["id"], "body": body_text}
+        self.last_draft = {
+            "alias": alias,
+            "message_id": message["id"],
+            "body": body_text,
+            "to": str(message.get("reply_to_address") or message["from"]),
+        }
         return {
             "draft_id": "draft-1",
             "message_id": "msg-draft-1",
             "thread_id": message["thread_id"],
             "subject": f"Re: {message['subject']}",
-            "to": message["from"],
+            "to": str(message.get("reply_to_address") or message["from"]),
             "body_preview": body_text,
         }
 
@@ -117,7 +122,12 @@ def test_email_tool_connect_list_search_get_and_draft(tmp_path) -> None:
     assert draft.ok is True
     assert draft.data["draft"]["draft_id"] == "draft-1"
     assert draft.data["artifacts"]["email_draft:latest"]["draft_id"] == "draft-1"
-    assert fake_client.last_draft == {"alias": "gmail", "message_id": "msg-1", "body": "Looks good to me."}
+    assert fake_client.last_draft == {
+        "alias": "gmail",
+        "message_id": "msg-1",
+        "body": "Looks good to me.",
+        "to": "alice@example.com",
+    }
 
     searched = tool.invoke("search_messages", {"alias": "gmail", "query": "tax"}, ToolContext(chat_id="chat-1"))
     assert searched.ok is True
@@ -127,7 +137,12 @@ def test_email_tool_connect_list_search_get_and_draft(tmp_path) -> None:
         ToolContext(chat_id="chat-1"),
     )
     assert draft_from_index.ok is True
-    assert fake_client.last_draft == {"alias": "gmail", "message_id": "msg-1", "body": "Following up tomorrow."}
+    assert fake_client.last_draft == {
+        "alias": "gmail",
+        "message_id": "msg-1",
+        "body": "Following up tomorrow.",
+        "to": "alice@example.com",
+    }
     db.close()
 
 
@@ -254,5 +269,91 @@ def test_email_materialize_params_normalizes_alias_and_placeholder_ids(tmp_path)
     assert thread_params == {
         "alias": "gmail",
         "thread_id": "thread-1",
+    }
+    db.close()
+
+
+def test_email_materialize_params_falls_back_when_alias_is_semantic_noise(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    db.upsert_email_account(
+        alias="gmail",
+        provider="gmail",
+        email_address="guanw0826@gmail.com",
+        scopes=("https://www.googleapis.com/auth/gmail.readonly",),
+        status="connected",
+        metadata={},
+    )
+    tool = EmailTool(
+        db,
+        oauth_client_path=Path("/tmp/client.json"),
+        token_dir=tmp_path / "tokens",
+        default_account_alias="gmail",
+        get_client=lambda alias: FakeGmailClient(),
+    )
+
+    params = tool.materialize_params(
+        "search_messages",
+        {
+            "alias": "abigail",
+            "query": "from:abigail OR to:abigail",
+        },
+        RuntimeState(request="find emails"),
+    )
+
+    assert params["alias"] == "gmail"
+    db.close()
+
+
+def test_email_draft_reply_targets_counterparty_when_selected_message_is_from_self(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    db.upsert_email_account(
+        alias="gmail",
+        provider="gmail",
+        email_address="guanw0826@gmail.com",
+        scopes=("https://www.googleapis.com/auth/gmail.compose", "https://www.googleapis.com/auth/gmail.readonly"),
+        status="connected",
+        metadata={},
+    )
+    fake_client = FakeGmailClient()
+    fake_client.messages = [
+        {
+            "id": "msg-2",
+            "thread_id": "thread-2",
+            "subject": "Re: Eagle chat",
+            "from": "guanw0826@gmail.com",
+            "to": "Abigail Clifford <aclifford@candidatelabs.com>",
+            "cc": "",
+            "date": "Sat, 25 Apr 2026 09:27:25 -0400",
+            "snippet": "Looking forward to chatting next week as we scheduled.",
+            "labels": ["SENT"],
+            "unread": False,
+            "text_body": "Looking forward to chatting next week as we scheduled.",
+            "html_body": "",
+            "message_id_header": "<msg-2@example.com>",
+            "references": "",
+            "in_reply_to": "",
+        }
+    ]
+    tool = EmailTool(
+        db,
+        oauth_client_path=Path("/tmp/client.json"),
+        token_dir=tmp_path / "tokens",
+        default_account_alias="gmail",
+        get_client=lambda alias: fake_client,
+    )
+
+    draft = tool.invoke(
+        "draft_reply",
+        {"alias": "gmail", "message_id": "msg-2", "body": "Hi Abigail, confirming our chat."},
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert draft.ok is True
+    assert draft.data["draft"]["to"] == "aclifford@candidatelabs.com"
+    assert fake_client.last_draft == {
+        "alias": "gmail",
+        "message_id": "msg-2",
+        "body": "Hi Abigail, confirming our chat.",
+        "to": "aclifford@candidatelabs.com",
     }
     db.close()

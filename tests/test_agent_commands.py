@@ -24,7 +24,7 @@ from jclaw.core.defaults import (
     WORKSPACE_SHELL_TIMEOUT_SECONDS,
 )
 from jclaw.core.db import Database
-from jclaw.tools.base import ToolContext, ToolLoopFinalizer, ToolResult
+from jclaw.tools.base import Observation, RuntimeState, ToolContext, ToolLoopFinalizer, ToolResult
 from jclaw.tools.email.tool import EmailTool
 
 
@@ -319,13 +319,18 @@ class FakeAbigailGmailClient:
         return {"thread_id": thread_id, "messages": [item for item in self.messages if item["thread_id"] == thread_id]}
 
     def draft_reply(self, alias: str, *, message: dict, body_text: str) -> dict:
-        self.last_draft = {"alias": alias, "message_id": message["id"], "body": body_text}
+        self.last_draft = {
+            "alias": alias,
+            "message_id": message["id"],
+            "body": body_text,
+            "to": str(message.get("reply_to_address") or message["from"]),
+        }
         return {
             "draft_id": "draft-1",
             "message_id": "draft-msg-1",
             "thread_id": message["thread_id"],
             "subject": f"Re: {message['subject']}",
-            "to": message["from"],
+            "to": str(message.get("reply_to_address") or message["from"]),
             "body_preview": body_text,
         }
 
@@ -646,6 +651,66 @@ def test_email_controller_can_search_select_and_draft_reply(tmp_path) -> None:
         "alias": "gmail",
         "message_id": "msg-2",
         "body": "Hi Abigail, looking forward to our chat next week.",
+        "to": "Abigail Clifford <aclifford@candidatelabs.com>",
+    }
+    db.close()
+
+
+def test_email_controller_ignores_person_name_in_alias_and_uses_connected_mailbox(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    db.upsert_email_account(
+        alias="gmail",
+        provider="gmail",
+        email_address="guanw0826@gmail.com",
+        scopes=(
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.compose",
+        ),
+        status="connected",
+        metadata={},
+    )
+    fake_client = FakeAbigailGmailClient()
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"email","action":"search_messages","params":{"alias":"abigail","query":"from:abigail OR to:abigail","max_results":10},"reason":"Find messages involving Abigail first."}',
+                '{"type":"tool_call","tool":"email","action":"select_message","params":{"selection":"latest"},"reason":"Pick the latest Abigail thread."}',
+                '{"type":"tool_call","tool":"email","action":"draft_reply","params":{"body":"Hi Abigail, looking forward to our chat next week."},"reason":"Draft the requested reply."}',
+                '{"type":"complete","tool":"","action":"","params":{},"reason":"The draft is ready."}',
+            ]
+        ),
+    )
+    agent.tools._tools["email"] = EmailTool(  # noqa: SLF001
+        db,
+        oauth_client_path=Path("/tmp/client.json"),
+        token_dir=tmp_path / "tokens",
+        default_account_alias="gmail",
+        get_client=lambda alias: fake_client,
+    )
+
+    reply = agent.handle_text("chat-1", "Draft reply with Abigail I scheduled sometime next week to chat")
+
+    assert "Created Gmail draft draft-1." in reply
+    assert fake_client.last_draft == {
+        "alias": "gmail",
+        "message_id": "msg-2",
+        "body": "Hi Abigail, looking forward to our chat next week.",
+        "to": "Abigail Clifford <aclifford@candidatelabs.com>",
     }
     db.close()
 
@@ -929,6 +994,45 @@ def test_controller_prompt_includes_structured_runtime_observations(tmp_path) ->
     assert controller_state["observations"][0]["action"] == "step_one"
     assert controller_state["observations"][0]["observation"]["data_preview"]["phase"] == "intermediate"
     assert controller_state["artifact_types"] == []
+    db.close()
+
+
+def test_controller_state_limits_observations_to_latest_five(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(config, db, DummyLLM())
+    runtime = RuntimeState(request="run a long tool flow")
+    steps: list[dict[str, object]] = []
+    for index in range(6):
+        result = ToolResult(ok=True, summary=f"step {index + 1}", data={"phase": index + 1})
+        runtime.append(Observation.from_tool_result(result))
+        steps.append(
+            {
+                "tool": "fake",
+                "action": f"step_{index + 1}",
+                "reason": f"reason {index + 1}",
+                "result": result,
+            }
+        )
+
+    controller_state = agent._controller_state_for_prompt(steps, runtime)  # noqa: SLF001
+
+    assert controller_state["step_count"] == 6
+    assert len(controller_state["observations"]) == 5
+    assert [item["step"] for item in controller_state["observations"]] == [2, 3, 4, 5, 6]
+    assert controller_state["latest_observation"]["summary"] == "step 6"
     db.close()
 
 
