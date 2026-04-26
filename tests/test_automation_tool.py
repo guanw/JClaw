@@ -159,6 +159,24 @@ def test_automation_tool_updates_schedule_from_structured_when(tmp_path) -> None
     db.close()
 
 
+def test_automation_tool_ignores_inferred_past_year_without_explicit_year(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    tool = AutomationTool(db)
+
+    created = tool.invoke(
+        "create_schedule",
+        {
+            "when": {"kind": "date", "year": 2025, "month": 4, "day": 27, "hour": 9, "minute": 0},
+            "prompt": "practice interview",
+        },
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert created.ok is True
+    assert created.data["job"]["schedule"] == "date:4-27 09:00"
+    db.close()
+
+
 def test_automation_tool_rejects_unsupported_schedule_without_creating_job(tmp_path) -> None:
     db = Database(tmp_path / "jclaw.db")
     tool = AutomationTool(db)

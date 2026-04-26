@@ -162,7 +162,7 @@ class AutomationTool:
         if enabled_param is not None:
             enabled = bool(enabled_param)
             if enabled and next_run is None and not current.enabled:
-                base_spec = parse_schedule(schedule or current.schedule)
+                base_spec = parse_schedule_input(schedule=schedule or current.schedule)
                 next_run = to_utc_iso(next_run_at(base_spec, from_dt=datetime.now().astimezone()))
 
         updated = self.db.update_cron_job(
@@ -297,6 +297,7 @@ class AutomationTool:
                 "month": {"type": "integer"},
                 "day": {"type": "integer"},
                 "year": {"type": "integer"},
+                "explicit_year": {"type": "boolean"},
             },
             "required": ["kind"],
         }

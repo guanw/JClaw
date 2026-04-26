@@ -4,6 +4,7 @@ import json
 import logging
 import base64
 import mimetypes
+from datetime import datetime
 from pathlib import Path
 import re
 from typing import Any
@@ -535,6 +536,7 @@ class AssistantAgent:
             "Use blocked when progress is unsafe or impossible without clarification, permission, or missing prerequisites.\n"
             "Use complete when the operational task is finished and the latest tool result should be returned to the user.\n"
             "The runtime state includes normalized observations and the current artifact frontier. Treat the latest observation as authoritative.\n"
+            "The runtime state also includes the authoritative current local date, time, and timezone. Use that instead of guessing today's date or year.\n"
             "Keep params minimal and choose only one next decision.\n"
             "Return strict JSON only.\n"
             "Schema:\n"
@@ -600,6 +602,7 @@ class AssistantAgent:
         steps: list[dict[str, Any]],
         runtime: RuntimeState,
     ) -> dict[str, Any]:
+        now = self._controller_now()
         observations: list[dict[str, Any]] = []
         start_index = max(0, len(steps) - MAX_CONTROLLER_OBSERVATIONS)
         for index, step in enumerate(steps[start_index:], start=start_index + 1):
@@ -620,6 +623,9 @@ class AssistantAgent:
         return {
             "step_count": runtime.step_count,
             "pending_confirmation": runtime.pending_confirmation,
+            "current_local_time": now.isoformat(),
+            "current_local_date": now.date().isoformat(),
+            "current_local_timezone": str(now.tzinfo or ""),
             "artifact_types": sorted(runtime.artifacts_by_type.keys()),
             "artifacts_by_type": {
                 str(key): self._preview_runtime_value(value)
@@ -628,6 +634,9 @@ class AssistantAgent:
             "latest_observation": runtime.last_observation.to_dict() if runtime.last_observation else {},
             "observations": observations,
         }
+
+    def _controller_now(self) -> datetime:
+        return datetime.now().astimezone()
 
     def _preview_runtime_value(self, value: Any, *, depth: int = 0) -> Any:
         if value is None or isinstance(value, bool | int | float):

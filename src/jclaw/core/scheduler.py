@@ -116,7 +116,11 @@ def parse_schedule_input(*, schedule: str | None = None, when: dict[str, Any] | 
         return _parse_structured_when(when)
     if schedule is None or not str(schedule).strip():
         raise ValueError("creating a schedule requires either schedule or when")
-    return parse_schedule(str(schedule))
+    raw = str(schedule).strip()
+    canonical = _parse_canonical_schedule(raw)
+    if canonical is not None:
+        return canonical
+    return parse_schedule(raw)
 
 
 def next_run_at(spec: ScheduleSpec, *, from_dt: datetime | None = None) -> datetime:
@@ -269,6 +273,7 @@ def _parse_structured_when(payload: dict[str, Any]) -> ScheduleSpec:
         day = _coerce_int_in_range(payload.get("day"), field="day", minimum=1, maximum=31)
         year = payload.get("year")
         normalized_year = None if year in (None, "") else _normalize_year(str(year))
+        explicit_year = bool(payload.get("explicit_year")) and normalized_year is not None
         hour = _coerce_int_in_range(payload.get("hour", DEFAULT_DATE_HOUR), field="hour", minimum=0, maximum=23)
         minute = _coerce_int_in_range(payload.get("minute", DEFAULT_DATE_MINUTE), field="minute", minimum=0, maximum=59)
         return ScheduleSpec(
@@ -277,7 +282,7 @@ def _parse_structured_when(payload: dict[str, Any]) -> ScheduleSpec:
             month=month,
             day=day,
             year=normalized_year,
-            explicit_year=normalized_year is not None,
+            explicit_year=explicit_year,
             hour=hour,
             minute=minute,
         )
@@ -315,9 +320,45 @@ def _structured_raw(kind: str, payload: dict[str, Any]) -> str:
         return f"daily:{int(payload.get('hour')):02d}:{int(payload.get('minute', 0)):02d}"
     if kind == "date":
         year = payload.get("year")
-        prefix = f"{year}-" if year not in (None, "") else ""
+        explicit_year = bool(payload.get("explicit_year")) and year not in (None, "")
+        prefix = f"{year}-" if explicit_year else ""
         return (
             f"date:{prefix}{int(payload.get('month'))}-{int(payload.get('day'))} "
             f"{int(payload.get('hour', DEFAULT_DATE_HOUR)):02d}:{int(payload.get('minute', DEFAULT_DATE_MINUTE)):02d}"
         )
     return kind
+
+
+def _parse_canonical_schedule(raw: str) -> ScheduleSpec | None:
+    once_match = re.fullmatch(r"once:(\d+)", raw)
+    if once_match:
+        return ScheduleSpec(raw=raw, kind="once", interval_seconds=int(once_match.group(1)))
+
+    interval_match = re.fullmatch(r"interval:(\d+)", raw)
+    if interval_match:
+        return ScheduleSpec(raw=raw, kind="interval", interval_seconds=int(interval_match.group(1)))
+
+    daily_match = re.fullmatch(r"daily:(\d{2}):(\d{2})", raw)
+    if daily_match:
+        return ScheduleSpec(
+            raw=raw,
+            kind="daily",
+            hour=int(daily_match.group(1)),
+            minute=int(daily_match.group(2)),
+        )
+
+    date_match = re.fullmatch(r"date:(?:(\d{4})-)?(\d{1,2})-(\d{1,2}) (\d{2}):(\d{2})", raw)
+    if date_match:
+        year = int(date_match.group(1)) if date_match.group(1) else None
+        return ScheduleSpec(
+            raw=raw,
+            kind="date",
+            year=year,
+            explicit_year=year is not None,
+            month=int(date_match.group(2)),
+            day=int(date_match.group(3)),
+            hour=int(date_match.group(4)),
+            minute=int(date_match.group(5)),
+        )
+
+    return None

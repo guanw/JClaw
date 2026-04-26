@@ -111,6 +111,44 @@ def test_parse_schedule_input_accepts_structured_date_time() -> None:
     assert run_at.minute == 0
 
 
+def test_parse_schedule_input_ignores_inferred_past_year_without_explicit_year() -> None:
+    spec = parse_schedule_input(
+        when={
+            "kind": "date",
+            "year": 2025,
+            "month": 4,
+            "day": 27,
+            "hour": 9,
+            "minute": 0,
+        }
+    )
+    run_at = next_run_at(spec, from_dt=datetime.fromisoformat("2026-04-26T12:00:00-04:00"))
+
+    assert spec.explicit_year is False
+    assert spec.raw == "date:4-27 09:00"
+    assert run_at.year == 2026
+    assert run_at.month == 4
+    assert run_at.day == 27
+    assert run_at.hour == 9
+
+
+def test_parse_schedule_input_respects_explicit_past_year() -> None:
+    spec = parse_schedule_input(
+        when={
+            "kind": "date",
+            "year": 2025,
+            "explicit_year": True,
+            "month": 4,
+            "day": 27,
+            "hour": 9,
+            "minute": 0,
+        }
+    )
+
+    with pytest.raises(ValueError, match="cannot compute next run for past schedule"):
+        next_run_at(spec, from_dt=datetime.fromisoformat("2026-04-26T12:00:00-04:00"))
+
+
 def test_parse_schedule_input_accepts_structured_daily() -> None:
     spec = parse_schedule_input(when={"kind": "daily", "hour": 14, "minute": 30})
     run_at = next_run_at(spec, from_dt=BASE_TIME)
@@ -130,3 +168,14 @@ def test_parse_schedule_input_rejects_invalid_structured_payload() -> None:
                 "day": 24,
             }
         )
+
+
+def test_parse_schedule_input_accepts_canonical_date_schedule() -> None:
+    spec = parse_schedule_input(schedule="date:4-27 09:00")
+    run_at = next_run_at(spec, from_dt=datetime.fromisoformat("2026-04-26T12:00:00-04:00"))
+
+    assert spec.kind == "date"
+    assert run_at.year == 2026
+    assert run_at.month == 4
+    assert run_at.day == 27
+    assert run_at.hour == 9
