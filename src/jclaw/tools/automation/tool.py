@@ -4,8 +4,8 @@ from datetime import datetime
 from typing import Any
 
 from jclaw.core.db import CronJobRecord, Database
-from jclaw.core.scheduler import next_run_at, parse_schedule, to_utc_iso
-from jclaw.tools.base import ToolContext, ToolResult
+from jclaw.core.scheduler import next_run_at, parse_schedule, parse_schedule_input, to_utc_iso
+from jclaw.tools.base import ActionSpec, RuntimeState, ToolContext, ToolResult
 
 
 class AutomationTool:
@@ -15,27 +15,11 @@ class AutomationTool:
         self.db = db
 
     def describe(self) -> dict[str, Any]:
+        specs = self._action_specs()
         return {
             "name": self.name,
             "description": "Create, inspect, update, and remove recurring or one-off schedules for future JClaw tasks.",
-            "actions": {
-                "list_schedules": {
-                    "description": "List the current recurring schedules for this chat.",
-                    "use_when": ["the user asks what schedules or reminders are currently configured"],
-                },
-                "create_schedule": {
-                    "description": "Create a recurring or one-off schedule with a schedule string and prompt.",
-                    "use_when": ["the user asks to add or schedule a reminder or task, including one-off reminders like 'in 30 minutes'"],
-                },
-                "update_schedule": {
-                    "description": "Update an existing schedule's timing, prompt, or enabled state.",
-                    "use_when": ["the user asks to change, edit, pause, resume, or reschedule an existing recurring task"],
-                },
-                "remove_schedule": {
-                    "description": "Remove an existing schedule by job id.",
-                    "use_when": ["the user asks to remove, cancel, or delete a recurring task"],
-                },
-            },
+            "actions": {name: spec.to_dict() for name, spec in specs.items()},
             "implemented": True,
             "read_only": False,
             "prefer_direct_result": True,
@@ -58,6 +42,20 @@ class AutomationTool:
                 )
         return "\n".join(lines)
 
+    def materialize_params(
+        self,
+        action: str,
+        params: dict[str, Any],
+        runtime: RuntimeState,
+    ) -> dict[str, Any]:
+        materialized = dict(params)
+        raw_job_id = str(materialized.get("job_id", "")).strip().lower()
+        if action in {"update_schedule", "remove_schedule"} and (not raw_job_id or raw_job_id in {"latest", "selected", "automation_job"}):
+            job_id = self._job_id_from_runtime(runtime)
+            if job_id is not None:
+                materialized["job_id"] = job_id
+        return materialized
+
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handlers = {
             "list_schedules": self._list_schedules,
@@ -78,22 +76,35 @@ class AutomationTool:
         return ToolResult(
             ok=True,
             summary=f"Listed {len(jobs)} schedules.",
-            data={"jobs": [self._serialize_job(job) for job in jobs], "allow_tool_followup": False},
+            data={
+                "jobs": [self._serialize_job(job) for job in jobs],
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "automation_job_list:latest": {
+                        "jobs": [self._serialize_job(job) for job in jobs],
+                    }
+                },
+            },
         )
 
     def _create_schedule(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         schedule = str(params.get("schedule", "")).strip()
         prompt = str(params.get("prompt", "")).strip()
-        if not schedule or not prompt:
+        when = params.get("when")
+        if (not schedule and not when) or not prompt:
             return ToolResult(
                 ok=False,
-                summary="Creating a schedule requires both schedule and prompt.",
+                summary="Creating a schedule requires prompt plus schedule or when.",
                 data={"allow_tool_followup": False},
             )
         try:
-            spec = parse_schedule(schedule)
+            spec = parse_schedule_input(schedule=schedule or None, when=when if isinstance(when, dict) else None)
         except ValueError as exc:
-            return ToolResult(ok=False, summary=str(exc), data={"schedule": schedule, "allow_tool_followup": False})
+            return ToolResult(
+                ok=False,
+                summary=str(exc),
+                data={"schedule": schedule, "when": when, "allow_tool_followup": False},
+            )
         next_run = to_utc_iso(next_run_at(spec))
         job_id = self.db.add_cron_job(ctx.chat_id, spec.raw, prompt, next_run)
         job = self.db.get_cron_job(ctx.chat_id, job_id)
@@ -101,7 +112,13 @@ class AutomationTool:
         return ToolResult(
             ok=True,
             summary=f"Created schedule {job_id}.",
-            data={"job": self._serialize_job(job), "allow_tool_followup": False},
+            data={
+                "job": self._serialize_job(job),
+                "allow_tool_followup": False,
+                "artifacts": {
+                    "automation_job:latest": self._serialize_job(job),
+                },
+            },
         )
 
     def _update_schedule(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -114,16 +131,28 @@ class AutomationTool:
             return ToolResult(ok=False, summary=f"Schedule {job_id} was not found.", data={"allow_tool_followup": False})
 
         schedule_param = params.get("schedule")
+        when_param = params.get("when")
         prompt_param = params.get("prompt")
         enabled_param = params.get("enabled")
 
         schedule = None
         next_run = None
-        if schedule_param not in (None, ""):
+        if schedule_param not in (None, "") or when_param not in (None, {}):
             try:
-                spec = parse_schedule(str(schedule_param).strip())
+                spec = parse_schedule_input(
+                    schedule=str(schedule_param).strip() if schedule_param not in (None, "") else None,
+                    when=when_param if isinstance(when_param, dict) else None,
+                )
             except ValueError as exc:
-                return ToolResult(ok=False, summary=str(exc), data={"schedule": str(schedule_param).strip(), "allow_tool_followup": False})
+                return ToolResult(
+                    ok=False,
+                    summary=str(exc),
+                    data={
+                        "schedule": str(schedule_param).strip() if schedule_param not in (None, "") else "",
+                        "when": when_param,
+                        "allow_tool_followup": False,
+                    },
+                )
             schedule = spec.raw
             next_run = to_utc_iso(next_run_at(spec))
 
@@ -151,7 +180,13 @@ class AutomationTool:
         return ToolResult(
             ok=True,
             summary=f"Updated schedule {job_id}.",
-            data={"job": self._serialize_job(job), "allow_tool_followup": False},
+            data={
+                "job": self._serialize_job(job),
+                "allow_tool_followup": False,
+                "artifacts": {
+                    "automation_job:latest": self._serialize_job(job),
+                },
+            },
         )
 
     def _remove_schedule(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -171,4 +206,97 @@ class AutomationTool:
             "prompt": job.prompt,
             "next_run_at": job.next_run_at,
             "enabled": job.enabled,
+        }
+
+    def _job_id_from_runtime(self, runtime: RuntimeState) -> int | None:
+        job_artifact = runtime.artifacts_by_type.get("automation_job")
+        if isinstance(job_artifact, dict) and str(job_artifact.get("id", "")).strip().isdigit():
+            return int(str(job_artifact["id"]).strip())
+        job_list = runtime.artifacts_by_type.get("automation_job_list")
+        if isinstance(job_list, dict):
+            jobs = job_list.get("jobs", [])
+            if isinstance(jobs, list) and len(jobs) == 1:
+                item = jobs[0]
+                if isinstance(item, dict) and str(item.get("id", "")).strip().isdigit():
+                    return int(str(item["id"]).strip())
+        return None
+
+    def _action_specs(self) -> dict[str, ActionSpec]:
+        return {
+            "list_schedules": ActionSpec(
+                tool=self.name,
+                action="list_schedules",
+                description="List the current recurring schedules for this chat.",
+                input_schema={"type": "object", "properties": {}},
+                reads=True,
+                produces_artifacts=("automation_job_list",),
+            ),
+            "create_schedule": ActionSpec(
+                tool=self.name,
+                action="create_schedule",
+                description="Create a recurring or one-off schedule with a schedule string and prompt.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "schedule": {"type": "string"},
+                        "when": self._when_schema(),
+                        "prompt": {"type": "string"},
+                    },
+                    "required": ["prompt"],
+                },
+                writes=True,
+                produces_artifacts=("automation_job",),
+            ),
+            "update_schedule": ActionSpec(
+                tool=self.name,
+                action="update_schedule",
+                description="Update an existing schedule's timing, prompt, or enabled state.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "integer"},
+                        "schedule": {"type": "string"},
+                        "when": self._when_schema(),
+                        "prompt": {"type": "string"},
+                        "enabled": {"type": "boolean"},
+                    },
+                },
+                writes=True,
+                requires_artifacts=("automation_job", "automation_job_list"),
+                produces_artifacts=("automation_job",),
+                binding_inputs=("job_id",),
+            ),
+            "remove_schedule": ActionSpec(
+                tool=self.name,
+                action="remove_schedule",
+                description="Remove an existing schedule by job id.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "integer"},
+                    },
+                    "required": ["job_id"],
+                },
+                writes=True,
+                requires_artifacts=("automation_job", "automation_job_list"),
+                binding_inputs=("job_id",),
+            ),
+        }
+
+    def _when_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["once", "interval", "daily", "date"],
+                },
+                "interval_seconds": {"type": "integer"},
+                "hour": {"type": "integer"},
+                "minute": {"type": "integer"},
+                "month": {"type": "integer"},
+                "day": {"type": "integer"},
+                "year": {"type": "integer"},
+            },
+            "required": ["kind"],
         }

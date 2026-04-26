@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from jclaw.core.db import Database
-from jclaw.tools.base import ToolContext, ToolResult
+from jclaw.tools.base import ActionSpec, ToolContext, ToolResult
 
 
 class MemoryTool:
@@ -14,27 +14,11 @@ class MemoryTool:
         self.search_limit = search_limit
 
     def describe(self) -> dict[str, Any]:
+        specs = self._action_specs()
         return {
             "name": self.name,
             "description": "Store, search, list, and forget long-lived chat memory facts.",
-            "actions": {
-                "remember_fact": {
-                    "description": "Store or update a memory fact as key/value.",
-                    "use_when": ["the user asks JClaw to remember a fact or preference for later"],
-                },
-                "list_memories": {
-                    "description": "List currently stored chat memories.",
-                    "use_when": ["the user asks what JClaw remembers for this chat"],
-                },
-                "search_memories": {
-                    "description": "Search stored chat memories relevant to a query.",
-                    "use_when": ["the user asks whether JClaw remembers something specific or wants a relevant memory lookup"],
-                },
-                "forget_memory": {
-                    "description": "Remove a stored memory by key.",
-                    "use_when": ["the user asks JClaw to forget a stored fact or preference"],
-                },
-            },
+            "actions": {name: spec.to_dict() for name, spec in specs.items()},
             "implemented": True,
             "read_only": False,
             "prefer_direct_result": True,
@@ -68,7 +52,21 @@ class MemoryTool:
         if not key or not value:
             return ToolResult(ok=False, summary="remember_fact requires both key and value.", data={})
         self.db.remember(ctx.chat_id, key, value)
-        return ToolResult(ok=True, summary=f"Remembered '{key}'.", data={"key": key, "value": value, "allow_tool_followup": False})
+        return ToolResult(
+            ok=True,
+            summary=f"Remembered '{key}'.",
+            data={
+                "key": key,
+                "value": value,
+                "allow_tool_followup": False,
+                "artifacts": {
+                    "memory_fact:latest": {
+                        "key": key,
+                        "value": value,
+                    }
+                },
+            },
+        )
 
     def _list_memories(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         items = self.db.list_memories(ctx.chat_id, limit=self.search_limit)
@@ -79,6 +77,11 @@ class MemoryTool:
             summary=f"Listed {len(items)} stored memories.",
             data={
                 "items": [{"key": item.key, "value": item.value} for item in items],
+                "artifacts": {
+                    "memory_result_set:latest": {
+                        "items": [{"key": item.key, "value": item.value} for item in items],
+                    }
+                },
                 "allow_tool_followup": False,
             },
         )
@@ -95,6 +98,12 @@ class MemoryTool:
             summary=f"Found {len(items)} memory match(es) for '{query}'.",
             data={
                 "items": [{"key": item.key, "value": item.value} for item in items],
+                "artifacts": {
+                    "memory_result_set:latest": {
+                        "query": query,
+                        "items": [{"key": item.key, "value": item.value} for item in items],
+                    }
+                },
                 "allow_tool_followup": False,
             },
         )
@@ -107,3 +116,57 @@ class MemoryTool:
         if not deleted:
             return ToolResult(ok=False, summary=f"I didn't have a memory stored for '{key}'.", data={"key": key, "allow_tool_followup": False})
         return ToolResult(ok=True, summary=f"Forgot '{key}'.", data={"key": key, "allow_tool_followup": False})
+
+    def _action_specs(self) -> dict[str, ActionSpec]:
+        return {
+            "remember_fact": ActionSpec(
+                tool=self.name,
+                action="remember_fact",
+                description="Store or update a memory fact as key/value.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string"},
+                        "value": {"type": "string"},
+                    },
+                    "required": ["key", "value"],
+                },
+                writes=True,
+                produces_artifacts=("memory_fact",),
+            ),
+            "list_memories": ActionSpec(
+                tool=self.name,
+                action="list_memories",
+                description="List currently stored chat memories.",
+                input_schema={"type": "object", "properties": {}},
+                reads=True,
+                produces_artifacts=("memory_result_set",),
+            ),
+            "search_memories": ActionSpec(
+                tool=self.name,
+                action="search_memories",
+                description="Search stored chat memories relevant to a query.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                    },
+                    "required": ["query"],
+                },
+                reads=True,
+                produces_artifacts=("memory_result_set",),
+            ),
+            "forget_memory": ActionSpec(
+                tool=self.name,
+                action="forget_memory",
+                description="Remove a stored memory by key.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string"},
+                    },
+                    "required": ["key"],
+                },
+                writes=True,
+            ),
+        }
