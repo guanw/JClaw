@@ -15,7 +15,7 @@ from jclaw.core.defaults import (
     BROWSER_VIEWPORT_HEIGHT,
     BROWSER_VIEWPORT_WIDTH,
 )
-from jclaw.tools.base import ToolContext, ToolLoopFinalizer, ToolResult
+from jclaw.tools.base import ActionSpec, ToolContext, ToolLoopFinalizer, ToolResult
 from jclaw.tools.browser.artifacts import BrowserArtifactStore
 from jclaw.tools.browser.desktop_driver import DesktopBrowserDriver
 from jclaw.tools.browser.models import BrowserReasoner, Target
@@ -86,35 +86,11 @@ class BrowserTool:
         self.playwright.close()
 
     def describe(self) -> dict[str, Any]:
+        specs = self._action_specs()
         return {
             "name": self.name,
             "description": "Browse the web, inspect current pages, interact with websites, and run bounded multi-step browser objectives.",
-            "actions": {
-                "open_url": {
-                    "description": "Open a specific URL in a browser session.",
-                    "use_when": ["the user explicitly wants a page opened or navigated to"],
-                },
-                "search_web": {
-                    "description": "Run a web search query through the browser tool.",
-                    "use_when": ["the user wants current web results or news for a query"],
-                },
-                "read_page": {
-                    "description": "Read the current page state from the active session.",
-                    "use_when": ["the user wants to inspect or summarize the page that is already open"],
-                },
-                "click": {"description": "Click a target on the current page."},
-                "type": {"description": "Type into a page input or form control."},
-                "scroll": {"description": "Scroll the current page."},
-                "wait_for": {"description": "Wait for an element or page condition."},
-                "screenshot": {"description": "Capture a screenshot of the current page."},
-                "extract": {"description": "Extract structured fields from the current page."},
-                "run_objective": {
-                    "description": "Execute a bounded multi-step browser objective.",
-                    "use_when": ["the task needs several browser actions before answering"],
-                },
-                "close_session": {"description": "Close an existing browser session."},
-                "list_sessions": {"description": "List active browser sessions."},
-            },
+            "actions": {name: spec.to_dict() for name, spec in specs.items()},
             "read_only_by_default": False,
             "supports_followup": True,
         }
@@ -635,6 +611,195 @@ class BrowserTool:
             payload["error"] = error
         with (self.root / "events.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+    def _action_specs(self) -> dict[str, ActionSpec]:
+        target_schema = {
+            "type": "object",
+            "properties": {
+                "selector": {"type": "string"},
+                "role": {"type": "string"},
+                "name": {"type": "string"},
+                "text": {"type": "string"},
+                "xpath": {"type": "string"},
+            },
+        }
+        return {
+            "open_url": ActionSpec(
+                tool=self.name,
+                action="open_url",
+                description="Open a specific URL in a browser session.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                        "new_tab": {"type": "boolean"},
+                        "visible": {"type": "boolean"},
+                        "persistent": {"type": "boolean"},
+                        "session_id": {"type": "string"},
+                    },
+                    "required": ["url"],
+                },
+                writes=True,
+            ),
+            "search_web": ActionSpec(
+                tool=self.name,
+                action="search_web",
+                description="Run a web search query through the browser tool.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "max_steps": {"type": "integer"},
+                        "visible": {"type": "boolean"},
+                        "allow_desktop_fallback": {"type": "boolean"},
+                        "keep_session": {"type": "boolean"},
+                        "session_id": {"type": "string"},
+                    },
+                    "required": ["query"],
+                },
+                writes=True,
+            ),
+            "read_page": ActionSpec(
+                tool=self.name,
+                action="read_page",
+                description="Read the current page state from the active session.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                    },
+                },
+                reads=True,
+            ),
+            "click": ActionSpec(
+                tool=self.name,
+                action="click",
+                description="Click a target on the current page.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "target": target_schema,
+                        "session_id": {"type": "string"},
+                    },
+                    "required": ["target"],
+                },
+                writes=True,
+            ),
+            "type": ActionSpec(
+                tool=self.name,
+                action="type",
+                description="Type into a page input or form control.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "target": target_schema,
+                        "text": {"type": "string"},
+                        "submit": {"type": "boolean"},
+                        "session_id": {"type": "string"},
+                    },
+                    "required": ["target", "text"],
+                },
+                writes=True,
+            ),
+            "scroll": ActionSpec(
+                tool=self.name,
+                action="scroll",
+                description="Scroll the current page.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "direction": {"type": "string"},
+                        "amount": {"type": "integer"},
+                        "session_id": {"type": "string"},
+                    },
+                },
+                writes=True,
+            ),
+            "wait_for": ActionSpec(
+                tool=self.name,
+                action="wait_for",
+                description="Wait for an element or page condition.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "target": target_schema,
+                        "timeout_ms": {"type": "integer"},
+                        "session_id": {"type": "string"},
+                    },
+                },
+                reads=True,
+            ),
+            "screenshot": ActionSpec(
+                tool=self.name,
+                action="screenshot",
+                description="Capture a screenshot of the current page.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "full_page": {"type": "boolean"},
+                        "session_id": {"type": "string"},
+                    },
+                },
+                reads=True,
+            ),
+            "extract": ActionSpec(
+                tool=self.name,
+                action="extract",
+                description="Extract structured fields from the current page.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "schema": {"type": "object"},
+                        "fields": {"type": "object"},
+                        "session_id": {"type": "string"},
+                    },
+                },
+                reads=True,
+            ),
+            "run_objective": ActionSpec(
+                tool=self.name,
+                action="run_objective",
+                description="Execute a bounded multi-step browser objective.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "objective": {"type": "string"},
+                        "start_url": {"type": "string"},
+                        "max_steps": {"type": "integer"},
+                        "max_sources": {"type": "integer"},
+                        "visible": {"type": "boolean"},
+                        "allow_desktop_fallback": {"type": "boolean"},
+                        "keep_session": {"type": "boolean"},
+                        "session_id": {"type": "string"},
+                    },
+                    "required": ["objective"],
+                },
+                writes=True,
+            ),
+            "close_session": ActionSpec(
+                tool=self.name,
+                action="close_session",
+                description="Close an existing browser session.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                    },
+                    "required": ["session_id"],
+                },
+                writes=True,
+            ),
+            "list_sessions": ActionSpec(
+                tool=self.name,
+                action="list_sessions",
+                description="List active browser sessions.",
+                input_schema={
+                    "type": "object",
+                    "properties": {},
+                },
+                reads=True,
+            ),
+        }
 
     def _choose_follow_up_url(self, objective: str, page_data: dict[str, Any]) -> str | None:
         ranked_urls = self._rank_follow_up_urls(objective, page_data)

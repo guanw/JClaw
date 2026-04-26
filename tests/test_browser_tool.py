@@ -35,6 +35,9 @@ def test_browser_tool_lists_actions(tmp_path) -> None:
     description = tool.describe()
     assert description["name"] == "browser"
     assert "run_objective" in description["actions"]
+    assert description["actions"]["read_page"]["reads"] is True
+    assert description["actions"]["run_objective"]["writes"] is True
+    assert description["actions"]["open_url"]["input_schema"]["required"] == ["url"]
 
 
 def test_browser_tool_creates_session_for_objective(tmp_path) -> None:
