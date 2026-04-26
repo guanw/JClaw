@@ -32,6 +32,8 @@ def test_analyze_paths_requires_grant_then_extracts_text_file(tmp_path) -> None:
     assert result.data["grounded"] is True
     assert result.data["supported_files"][0]["path"] == str(target.resolve())
     assert result.data["chunks"][0]["path"] == str(target.resolve())
+    assert result.data["allow_tool_followup"] is True
+    assert result.data["artifacts"]["knowledge_context:latest"]["supported_files"][0]["path"] == str(target.resolve())
     db.close()
 
 
@@ -67,6 +69,8 @@ def test_answer_from_paths_returns_grounded_answer_with_citations(tmp_path) -> N
     assert result.data["grounded"] is True
     assert result.data["partial"] is False
     assert result.data["citations"][0]["path"] == str(target.resolve())
+    assert result.data["allow_tool_followup"] is True
+    assert result.data["artifacts"]["knowledge_answer:latest"]["answer"] == "The project owner is guan."
     db.close()
 
 
@@ -179,4 +183,16 @@ def test_answer_from_folder_preserves_deterministic_file_order(tmp_path) -> None
     )
     assert result.ok is True
     assert result.data["answer"] == "The first file is a-contract.txt."
+    db.close()
+
+
+def test_knowledge_tool_describe_exposes_structured_action_specs(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    tool = KnowledgeTool(db, tmp_path / "state", tmp_path / "repo")
+
+    description = tool.describe()
+
+    assert description["actions"]["analyze_paths"]["produces_artifacts"] == ["knowledge_context"]
+    assert description["actions"]["answer_from_paths"]["produces_artifacts"] == ["knowledge_context", "knowledge_answer"]
+    assert description["actions"]["answer_from_paths"]["input_schema"]["required"] == ["question"]
     db.close()

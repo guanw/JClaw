@@ -15,7 +15,7 @@ from jclaw.core.defaults import (
     KNOWLEDGE_MAX_TOTAL_CHUNKS,
     KNOWLEDGE_TEXT_PREVIEW_CHARS,
 )
-from jclaw.tools.base import ToolContext, ToolResult
+from jclaw.tools.base import ActionSpec, ToolContext, ToolResult
 from jclaw.tools.knowledge.models import DocumentChunk, ExtractedDocument
 from jclaw.tools.knowledge.registry import KnowledgeReaderRegistry
 
@@ -65,23 +65,11 @@ class KnowledgeTool:
         self.registry = KnowledgeReaderRegistry(analyze_image=self._analyze_image)
 
     def describe(self) -> dict[str, Any]:
+        specs = self._action_specs()
         return {
             "name": self.name,
             "description": "Read approved local files and answer questions from grounded extracted content with citations.",
-            "actions": {
-                "analyze_paths": {
-                    "description": "Extract and inventory readable content from paths.",
-                    "use_when": ["you need a diagnostic inventory of readable files, not the final user answer"],
-                },
-                "summarize_folder": {
-                    "description": "Summarize readable files inside a folder.",
-                    "use_when": ["the user asks to summarize a folder or the readable files in it"],
-                },
-                "answer_from_paths": {
-                    "description": "Answer a question from local file contents with citations.",
-                    "use_when": ["the user asks a question about local files, documents, notes, code, PDFs, or images"],
-                },
-            },
+            "actions": {name: spec.to_dict() for name, spec in specs.items()},
             "implemented": True,
             "grounded": True,
             "read_only": True,
@@ -181,7 +169,13 @@ class KnowledgeTool:
         return ToolResult(
             ok=True,
             summary=f"Analyzed {len(payload['supported_files'])} readable file(s).",
-            data=payload,
+            data={
+                **payload,
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "knowledge_context:latest": self._knowledge_context_artifact(payload),
+                },
+            },
         )
 
     def _summarize_folder(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -205,14 +199,26 @@ class KnowledgeTool:
             return ToolResult(
                 ok=True,
                 summary="No readable files were found in the requested folder.",
-                data=payload,
+                data={
+                    **payload,
+                    "allow_tool_followup": True,
+                    "artifacts": {
+                        "knowledge_context:latest": self._knowledge_context_artifact(payload),
+                    },
+                },
             )
         summary_result = self._run_summary_model(payload)
         payload.update(summary_result)
         return ToolResult(
             ok=True,
             summary="Summarized readable files in the requested folder.",
-            data=payload,
+            data={
+                **payload,
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "knowledge_context:latest": self._knowledge_context_artifact(payload),
+                },
+            },
         )
 
     def _answer_from_paths(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -245,14 +251,28 @@ class KnowledgeTool:
             return ToolResult(
                 ok=True,
                 summary="No readable evidence was available for the requested question.",
-                data=payload,
+                data={
+                    **payload,
+                    "allow_tool_followup": True,
+                    "artifacts": {
+                        "knowledge_context:latest": self._knowledge_context_artifact(payload),
+                        "knowledge_answer:latest": self._knowledge_answer_artifact(payload),
+                    },
+                },
             )
         answer_result = self._run_answer_model(question, payload)
         payload.update(answer_result)
         return ToolResult(
             ok=True,
             summary="Answered from local file evidence.",
-            data=payload,
+            data={
+                **payload,
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "knowledge_context:latest": self._knowledge_context_artifact(payload),
+                    "knowledge_answer:latest": self._knowledge_answer_artifact(payload),
+                },
+            },
         )
 
     def _coerce_paths(self, params: dict[str, Any]) -> list[Path]:
@@ -591,3 +611,71 @@ class KnowledgeTool:
             payload["error"] = error
         with (self.root / "events.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+    def _action_specs(self) -> dict[str, ActionSpec]:
+        return {
+            "analyze_paths": ActionSpec(
+                tool=self.name,
+                action="analyze_paths",
+                description="Extract and inventory readable content from approved paths.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "paths": {"type": "array", "items": {"type": "string"}},
+                        "path": {"type": "string"},
+                        "question": {"type": "string"},
+                    },
+                },
+                reads=True,
+                produces_artifacts=("knowledge_context",),
+            ),
+            "summarize_folder": ActionSpec(
+                tool=self.name,
+                action="summarize_folder",
+                description="Summarize readable files inside an approved folder.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "root_path": {"type": "string"},
+                        "objective": {"type": "string"},
+                    },
+                },
+                reads=True,
+                produces_artifacts=("knowledge_context",),
+            ),
+            "answer_from_paths": ActionSpec(
+                tool=self.name,
+                action="answer_from_paths",
+                description="Answer a grounded question from approved local file contents.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "paths": {"type": "array", "items": {"type": "string"}},
+                        "path": {"type": "string"},
+                        "question": {"type": "string"},
+                    },
+                    "required": ["question"],
+                },
+                reads=True,
+                produces_artifacts=("knowledge_context", "knowledge_answer"),
+            ),
+        }
+
+    def _knowledge_context_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "requested_paths": payload.get("requested_paths", []),
+            "supported_files": payload.get("supported_files", [])[:5],
+            "unsupported_files": payload.get("unsupported_files", [])[:5],
+            "grounded": payload.get("grounded"),
+            "partial": payload.get("partial"),
+            "citations": payload.get("citations", [])[:5],
+        }
+
+    def _knowledge_answer_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "answer": payload.get("answer", ""),
+            "grounded": payload.get("grounded"),
+            "partial": payload.get("partial"),
+            "citations": payload.get("citations", [])[:5],
+        }

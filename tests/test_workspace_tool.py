@@ -30,6 +30,8 @@ def test_inspect_root_requires_grant_then_lists_entries(tmp_path) -> None:
     assert inspected.data["entry_count"] == 1
     assert inspected.data["entries_truncated"] is False
     assert inspected.data["entries"][0]["name"] == "notes.txt"
+    assert inspected.data["allow_tool_followup"] is True
+    assert inspected.data["artifacts"]["workspace_path:latest"]["target_path"] == str(root.resolve())
     db.close()
 
 
@@ -112,6 +114,8 @@ def test_path_metadata_find_files_and_search_contents(tmp_path) -> None:
     assert searched.ok is True
     assert searched.data["match_count"] == 2
     assert {item["path"] for item in searched.data["matches"]} == {"docs/notes.txt", "docs/todo.md"}
+    assert searched.data["allow_tool_followup"] is True
+    assert searched.data["artifacts"]["workspace_search_results:latest"]["query"] == "keyword"
     db.close()
 
 
@@ -193,6 +197,28 @@ def test_find_files_supports_brace_expansion_patterns(tmp_path) -> None:
     db.close()
 
 
+def test_find_files_supports_comma_separated_patterns(tmp_path) -> None:
+    root = tmp_path / "desktop"
+    root.mkdir(parents=True)
+    (root / "one.png").write_text("png\n", encoding="utf-8")
+    (root / "two.jpg").write_text("jpg\n", encoding="utf-8")
+    (root / "three.pdf").write_text("pdf\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    found = tool.invoke(
+        "find_files",
+        {"root": str(root), "pattern": "*.png,*.jpg,*.jpeg,*.gif,*.webp,*.tiff,*.tif,*.icns"},
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert found.ok is True
+    assert found.data["match_count"] == 2
+    assert {item["path"] for item in found.data["matches"]} == {"one.png", "two.jpg"}
+    db.close()
+
+
 def test_prepare_change_previews_before_apply(tmp_path) -> None:
     root = tmp_path / "repo"
     root.mkdir()
@@ -232,6 +258,36 @@ def test_prepare_change_previews_before_apply(tmp_path) -> None:
     )
     assert applied.ok is True
     assert target.read_text(encoding="utf-8") == "print('goodbye')\n"
+    db.close()
+
+
+def test_git_status_emits_followup_artifact(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+    (root / "notes.txt").write_text("hello\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    status = tool.invoke("git_status", {"path": str(root)}, ToolContext(chat_id="chat-1"))
+
+    assert status.ok is True
+    assert status.data["allow_tool_followup"] is True
+    assert status.data["artifacts"]["workspace_git_status:latest"]["root_path"] == str(root.resolve())
+    db.close()
+
+
+def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    tool = WorkspaceTool(db, tmp_path / "state", tmp_path / "repo", draft_change=lambda payload: None)
+
+    description = tool.describe()
+
+    assert description["actions"]["inspect_root"]["produces_artifacts"] == ["workspace_path"]
+    assert description["actions"]["search_contents"]["produces_artifacts"] == ["workspace_search_results"]
+    assert description["actions"]["git_status"]["produces_artifacts"] == ["workspace_git_status"]
+    assert description["actions"]["prepare_change"]["requires_confirmation"] is True
     db.close()
 
 

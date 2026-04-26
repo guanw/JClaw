@@ -25,7 +25,7 @@ from jclaw.core.defaults import (
     WORKSPACE_SHELL_OUTPUT_CHARS,
     WORKSPACE_SHELL_TIMEOUT_SECONDS,
 )
-from jclaw.tools.base import ToolContext, ToolResult
+from jclaw.tools.base import ActionSpec, ToolContext, ToolResult
 
 
 def _utc_now() -> str:
@@ -73,62 +73,11 @@ class WorkspaceTool:
         )
 
     def describe(self) -> dict[str, Any]:
+        specs = self._action_specs()
         return {
             "name": self.name,
             "description": "Inspect approved local paths and prepare or apply bounded local mutations such as file edits, local git actions, and local shell commands.",
-            "actions": {
-                "inspect_root": {
-                    "description": "Inspect a local path or list a directory.",
-                    "use_when": ["the user wants to inspect, list, or verify local paths on the machine"],
-                },
-                "path_metadata": {
-                    "description": "Inspect detailed metadata for a local path.",
-                    "use_when": ["the user wants metadata such as size, timestamps, or file type for a local path"],
-                },
-                "find_files": {
-                    "description": "Find files by name or glob pattern under an approved local path.",
-                    "use_when": ["the user wants to locate files by name, pattern, or extension in a local folder"],
-                },
-                "search_contents": {
-                    "description": "Search literal text inside readable local files under an approved path.",
-                    "use_when": ["the user wants to find which local files or lines mention a string"],
-                },
-                "prepare_change": {
-                    "description": "Prepare a preview for local file or code changes.",
-                    "use_when": ["the user wants to modify local files or code"],
-                },
-                "rename_path": {
-                    "description": "Prepare a preview to rename a file or directory within the same parent folder.",
-                    "use_when": ["the user wants to rename a local file or folder without moving it elsewhere"],
-                },
-                "move_path": {
-                    "description": "Prepare a preview to move a file or directory to another path inside an approved root.",
-                    "use_when": ["the user wants to relocate a local file or folder"],
-                },
-                "copy_path": {
-                    "description": "Prepare a preview to copy a file or directory to another path inside an approved root.",
-                    "use_when": ["the user wants to duplicate a local file or folder"],
-                },
-                "delete_path": {
-                    "description": "Prepare a preview to delete a local file or directory.",
-                    "use_when": ["the user wants to remove a local file or folder"],
-                },
-                "apply_change_request": {"description": "Apply a previously approved file change request."},
-                "apply_path_request": {"description": "Apply a previously approved path mutation request."},
-                "git_status": {
-                    "description": "Read local git status and diff summary.",
-                    "use_when": ["the user wants local repository status without mutation"],
-                },
-                "prepare_git_action": {
-                    "description": "Prepare a preview for local git mutations such as add, restore, or commit.",
-                },
-                "apply_git_request": {"description": "Apply a previously approved git mutation request."},
-                "prepare_shell_action": {
-                    "description": "Prepare a preview for a bounded non-interactive shell command in an approved root.",
-                },
-                "apply_shell_request": {"description": "Apply a previously approved shell request."},
-                "abort_request": {"description": "Abort a pending workspace approval request."},
-            },
+            "actions": {name: spec.to_dict() for name, spec in specs.items()},
             "dangerous": True,
             "preview_required": True,
             "prefer_direct_result": True,
@@ -296,6 +245,16 @@ class WorkspaceTool:
                 "entries_truncated": entries_truncated,
                 "git_root": None if git_root is None else str(git_root),
                 "approved_path": str(target_path),
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "workspace_path:latest": {
+                        "root_path": str(root_path),
+                        "target_path": str(target_path),
+                        "kind": kind,
+                        "exists": target_exists,
+                        "git_root": None if git_root is None else str(git_root),
+                    },
+                },
             },
         )
 
@@ -336,6 +295,15 @@ class WorkspaceTool:
                 "exists": True,
                 "kind": kind,
                 "metadata": metadata,
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "workspace_path:latest": {
+                        "root_path": str(root_path),
+                        "target_path": str(target_path),
+                        "kind": kind,
+                        "metadata": metadata,
+                    },
+                },
             },
         )
 
@@ -387,6 +355,15 @@ class WorkspaceTool:
                 "target_path": str(search_root),
                 "matches": matches,
                 "match_count": match_count,
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "workspace_search_results:latest": {
+                        "root_path": str(root_path),
+                        "target_path": str(search_root),
+                        "match_count": match_count,
+                        "matches": matches[:10],
+                    },
+                },
             },
         )
 
@@ -460,6 +437,16 @@ class WorkspaceTool:
                 "target_path": str(search_root),
                 "matches": matches,
                 "match_count": match_count,
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "workspace_search_results:latest": {
+                        "root_path": str(root_path),
+                        "target_path": str(search_root),
+                        "match_count": match_count,
+                        "matches": matches[:10],
+                        "query": query,
+                    },
+                },
             },
         )
 
@@ -700,6 +687,14 @@ class WorkspaceTool:
                 "root_path": str(git_root),
                 "status": status["stdout"],
                 "diff_stat": diff_stat["stdout"],
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "workspace_git_status:latest": {
+                        "root_path": str(git_root),
+                        "status": status["stdout"],
+                        "diff_stat": diff_stat["stdout"],
+                    },
+                },
             },
         )
 
@@ -1032,6 +1027,9 @@ class WorkspaceTool:
         cleaned = pattern.strip()
         if not cleaned:
             return []
+        if "{" not in cleaned and "}" not in cleaned and "," in cleaned:
+            parts = [part.strip() for part in cleaned.split(",") if part.strip()]
+            return parts or [cleaned]
         if "{" not in cleaned or "}" not in cleaned:
             return [cleaned]
         prefix, remainder = cleaned.split("{", 1)
@@ -1294,3 +1292,107 @@ class WorkspaceTool:
             payload["error"] = error
         with (self.root / "events.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+    def _action_specs(self) -> dict[str, ActionSpec]:
+        return {
+            "inspect_root": ActionSpec(
+                tool=self.name,
+                action="inspect_root",
+                description="Inspect a local path or list a directory.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "root_path": {"type": "string"},
+                        "objective": {"type": "string"},
+                    },
+                },
+                reads=True,
+                produces_artifacts=("workspace_path",),
+            ),
+            "path_metadata": ActionSpec(
+                tool=self.name,
+                action="path_metadata",
+                description="Inspect detailed metadata for a local path.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "root_path": {"type": "string"},
+                        "objective": {"type": "string"},
+                    },
+                },
+                reads=True,
+                produces_artifacts=("workspace_path",),
+            ),
+            "find_files": ActionSpec(
+                tool=self.name,
+                action="find_files",
+                description="Find files by name or glob pattern under an approved local path.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "root_path": {"type": "string"},
+                        "root": {"type": "string"},
+                        "pattern": {"type": "string"},
+                        "query": {"type": "string"},
+                        "objective": {"type": "string"},
+                    },
+                },
+                reads=True,
+                produces_artifacts=("workspace_search_results",),
+            ),
+            "search_contents": ActionSpec(
+                tool=self.name,
+                action="search_contents",
+                description="Search literal text inside readable local files under an approved path.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "root_path": {"type": "string"},
+                        "root": {"type": "string"},
+                        "query": {"type": "string"},
+                        "text": {"type": "string"},
+                        "regex": {"type": "boolean"},
+                        "case_sensitive": {"type": "boolean"},
+                        "file_pattern": {"type": "string"},
+                        "objective": {"type": "string"},
+                    },
+                },
+                reads=True,
+                produces_artifacts=("workspace_search_results",),
+            ),
+            "prepare_change": ActionSpec(
+                tool=self.name,
+                action="prepare_change",
+                description="Prepare a preview for local file or code changes.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "objective": {"type": "string"},
+                        "instruction": {"type": "string"},
+                        "path": {"type": "string"},
+                        "root_path": {"type": "string"},
+                    },
+                },
+                writes=True,
+                requires_confirmation=True,
+            ),
+            "git_status": ActionSpec(
+                tool=self.name,
+                action="git_status",
+                description="Read local git status and diff summary.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "root_path": {"type": "string"},
+                        "objective": {"type": "string"},
+                    },
+                },
+                reads=True,
+                produces_artifacts=("workspace_git_status",),
+            ),
+        }
