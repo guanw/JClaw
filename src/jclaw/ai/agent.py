@@ -356,7 +356,7 @@ class AssistantAgent:
                 )
                 if signature in seen_signatures:
                     LOGGER.info("tool loop detected repeated step; stopping")
-                    return "Stopped because the tool plan repeated without making progress."
+                    return "Stopped because the tool loop repeated without making progress."
                 seen_signatures.add(signature)
 
                 try:
@@ -522,10 +522,10 @@ class AssistantAgent:
         if controller_state["observations"]:
             LOGGER.info("tool continuation raw response: %s", raw)
         else:
-            LOGGER.info("tool initial planner raw response: %s", raw)
+            LOGGER.info("tool initial controller raw response: %s", raw)
         parsed = self._parse_json_object(raw)
         if not parsed:
-            parsed = self._repair_controller_decision(
+            parsed = self._repair_controller_response(
                 raw,
                 text=text,
                 controller_state=controller_state,
@@ -546,7 +546,7 @@ class AssistantAgent:
             )
         else:
             LOGGER.info(
-                "tool initial planner selected type=%s tool=%s action=%s reason=%s",
+                "tool initial controller selected type=%s tool=%s action=%s reason=%s",
                 decision.type.value,
                 decision.tool,
                 decision.action,
@@ -566,7 +566,7 @@ class AssistantAgent:
             observation = (
                 runtime.observations[index - 1].to_dict()
                 if index - 1 < len(runtime.observations)
-                else self._tool_result_for_planner(step["result"])
+                else self._tool_result_for_controller(step["result"])
             )
             observations.append(
                 {
@@ -615,9 +615,9 @@ class AssistantAgent:
             return preview
         return str(value)
 
-    def _tool_result_for_planner(self, result: ToolResult) -> dict[str, Any]:
+    def _tool_result_for_controller(self, result: ToolResult) -> dict[str, Any]:
         data = result.data
-        planner_data: dict[str, Any] = {
+        controller_data: dict[str, Any] = {
             "summary": result.summary,
             "needs_confirmation": result.needs_confirmation,
         }
@@ -638,12 +638,12 @@ class AssistantAgent:
             "request_kind",
         ):
             if key in data:
-                planner_data[key] = data[key]
+                controller_data[key] = data[key]
         if "entries" in data:
-            planner_data["entries"] = data["entries"][:10]
+            controller_data["entries"] = data["entries"][:10]
         if "citations" in data:
-            planner_data["citations"] = data["citations"][:4]
-        return planner_data
+            controller_data["citations"] = data["citations"][:4]
+        return controller_data
 
     def _tool_catalog_for_prompt(self, available_tools: list[dict[str, Any]]) -> str:
         catalog: list[dict[str, Any]] = []
@@ -721,7 +721,7 @@ class AssistantAgent:
             return False
         return True
 
-    def _repair_controller_decision(
+    def _repair_controller_response(
         self,
         raw: str,
         *,
@@ -789,7 +789,7 @@ class AssistantAgent:
         if not isinstance(files, list) or not files:
             return None
         prompt = (
-            "You are JClaw's workspace change planner.\n"
+            "You are JClaw's workspace change drafter.\n"
             "You are given an objective and a bounded set of candidate files from a local workspace.\n"
             "Draft file edits using only the provided files. Do not invent extra files.\n"
             "Return strict JSON only with schema:\n"
@@ -803,7 +803,7 @@ class AssistantAgent:
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=True)},
             ]
         )
-        LOGGER.info("workspace change planner raw response: %s", raw)
+        LOGGER.info("workspace change drafter raw response: %s", raw)
         parsed = self._parse_json_object(raw)
         if not parsed:
             return None

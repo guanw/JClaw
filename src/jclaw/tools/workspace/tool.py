@@ -492,7 +492,7 @@ class WorkspaceTool:
         if self._draft_change is None:
             return ToolResult(
                 ok=False,
-                summary="Workspace drafting is unavailable because no change planner is configured.",
+                summary="Workspace drafting is unavailable because no change drafter is configured.",
                 data={"root_path": str(root_path)},
             )
 
@@ -512,7 +512,7 @@ class WorkspaceTool:
             }
         )
         if not draft or not isinstance(draft, dict):
-            return ToolResult(ok=False, summary="I couldn't prepare a change plan from the current workspace state.", data={})
+            return ToolResult(ok=False, summary="I couldn't prepare a workspace draft from the current workspace state.", data={})
 
         edits = self._normalize_draft_edits(root_path=root_path, draft=draft)
         if not edits:

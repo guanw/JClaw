@@ -1648,7 +1648,7 @@ def test_llm_selected_tool_routes_to_automation(tmp_path) -> None:
     db.close()
 
 
-def test_automation_terminal_result_skips_continuation_planner(tmp_path) -> None:
+def test_automation_terminal_result_skips_continuation_controller_turn(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),
         telegram=TelegramConfig(),

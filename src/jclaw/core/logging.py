@@ -15,11 +15,11 @@ class JClawConsoleFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         rendered = super().format(record)
         if record.name == "jclaw.ai.agent":
-            if "tool initial planner raw response:" in rendered:
-                return self._highlight(rendered, "tool initial planner raw response:", self.MAGENTA)
+            if "tool initial controller raw response:" in rendered:
+                return self._highlight(rendered, "tool initial controller raw response:", self.MAGENTA)
             if "tool continuation raw response:" in rendered:
                 return self._highlight(rendered, "tool continuation raw response:", self.CYAN)
-            if "tool initial planner selected" in rendered:
+            if "tool initial controller selected" in rendered:
                 return self._wrap(rendered, self.YELLOW)
             if "tool continuation selected" in rendered:
                 return self._wrap(rendered, self.GREEN)
