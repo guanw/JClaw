@@ -243,7 +243,19 @@ class BrowserTool:
         url = str(params.get("url", "about:blank"))
         data = driver.open_url(session.session_id, url, new_tab=bool(params.get("new_tab", False)))
         session.current_url = url
-        return ToolResult(ok=True, summary=f"Opened {url}", data=data)
+        data = {
+            **data,
+            "session_id": session.session_id,
+            "url": str(data.get("url", "")).strip() or url,
+        }
+        return ToolResult(
+            ok=True,
+            summary=f"Opened {url}",
+            data={
+                **data,
+                **self._browser_result_payload(data, include_candidates=True),
+            },
+        )
 
     def _search_web(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         query = str(params.get("query", "")).strip()
@@ -269,13 +281,39 @@ class BrowserTool:
         session = self._ensure_session(params, ctx)
         driver = self._driver(params)
         data = driver.read_page(session.session_id)
-        return ToolResult(ok=True, summary="Read current page state.", data=data)
+        data = {
+            **data,
+            "session_id": session.session_id,
+            "url": str(data.get("url", "")).strip() or session.current_url or "about:blank",
+        }
+        session.current_url = str(data.get("url", "")).strip() or session.current_url
+        return ToolResult(
+            ok=True,
+            summary="Read current page state.",
+            data={
+                **data,
+                **self._browser_result_payload(data, include_candidates=True),
+            },
+        )
 
     def _click(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
         driver = self._driver(params)
         data = driver.click(session.session_id, self._target(params))
-        return ToolResult(ok=True, summary="Clicked target.", data=data)
+        data = {
+            **data,
+            "session_id": session.session_id,
+            "url": str(data.get("url", "")).strip() or session.current_url or "about:blank",
+        }
+        session.current_url = str(data.get("url", "")).strip() or session.current_url
+        return ToolResult(
+            ok=True,
+            summary="Clicked target.",
+            data={
+                **data,
+                **self._browser_result_payload(data, include_candidates=True),
+            },
+        )
 
     def _type(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -286,7 +324,20 @@ class BrowserTool:
             str(params.get("text", "")),
             submit=bool(params.get("submit", False)),
         )
-        return ToolResult(ok=True, summary="Typed into target.", data=data)
+        data = {
+            **data,
+            "session_id": session.session_id,
+            "url": str(data.get("url", "")).strip() or session.current_url or "about:blank",
+        }
+        session.current_url = str(data.get("url", "")).strip() or session.current_url
+        return ToolResult(
+            ok=True,
+            summary="Typed into target.",
+            data={
+                **data,
+                **self._browser_result_payload(data, include_candidates=True),
+            },
+        )
 
     def _scroll(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -296,7 +347,20 @@ class BrowserTool:
             direction=str(params.get("direction", "down")),
             amount=int(params.get("amount", 600)),
         )
-        return ToolResult(ok=True, summary="Scrolled page.", data=data)
+        data = {
+            **data,
+            "session_id": session.session_id,
+            "url": str(data.get("url", "")).strip() or session.current_url or "about:blank",
+        }
+        session.current_url = str(data.get("url", "")).strip() or session.current_url
+        return ToolResult(
+            ok=True,
+            summary="Scrolled page.",
+            data={
+                **data,
+                **self._browser_result_payload(data, include_candidates=True),
+            },
+        )
 
     def _wait_for(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -304,7 +368,20 @@ class BrowserTool:
         raw_target = params.get("target")
         target = self._target(params) if raw_target else None
         data = driver.wait_for(session.session_id, target, timeout_ms=int(params.get("timeout_ms", 5000)))
-        return ToolResult(ok=True, summary="Waited for page state.", data=data)
+        data = {
+            **data,
+            "session_id": session.session_id,
+            "url": str(data.get("url", "")).strip() or session.current_url or "about:blank",
+        }
+        session.current_url = str(data.get("url", "")).strip() or session.current_url
+        return ToolResult(
+            ok=True,
+            summary="Waited for page state.",
+            data={
+                **data,
+                **self._browser_result_payload(data, include_candidates=True),
+            },
+        )
 
     def _screenshot(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -319,7 +396,21 @@ class BrowserTool:
         else:
             shot = driver.screenshot(session.session_id, full_page=bool(params.get("full_page", False)))
         data = {"artifact_id": artifact.artifact_id, "path": artifact.path, **shot}
-        return ToolResult(ok=True, summary="Created screenshot artifact.", data=data)
+        return ToolResult(
+            ok=True,
+            summary="Created screenshot artifact.",
+            data={
+                **data,
+                **self._browser_result_payload(
+                    data,
+                    include_candidates=False,
+                    include_screenshot={
+                        "artifact_id": artifact.artifact_id,
+                        "path": artifact.path,
+                    },
+                ),
+            },
+        )
 
     def _extract(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         session = self._ensure_session(params, ctx)
@@ -351,6 +442,15 @@ class BrowserTool:
                 "evidence_refs": extracted.get("evidence_refs", []),
                 "missing_information": extracted.get("missing_information", ""),
                 **page_data,
+                **self._browser_result_payload(
+                    page_data,
+                    include_candidates=True,
+                    include_extract={
+                        "fields": extracted.get("fields", {}),
+                        "evidence_refs": extracted.get("evidence_refs", []),
+                        "missing_information": extracted.get("missing_information", ""),
+                    },
+                ),
             },
         )
         self._cleanup_session_if_needed(session.session_id, ctx=ctx, action="extract", params=params)
@@ -558,6 +658,22 @@ class BrowserTool:
                 "observations": [self._compact_observation_for_trace(item) for item in observations],
                 **current_read.data,
                 "mode": self._driver(params).mode,
+                **self._browser_result_payload(
+                    current_read.data,
+                    include_candidates=True,
+                    include_extract={
+                        "objective": objective,
+                        "termination_reason": termination_reason,
+                        "evidence_refs": self._validate_evidence_refs(
+                            final_decision.get("evidence_refs", []) if final_decision else [],
+                            observations,
+                        ),
+                        "missing_information": str(final_decision.get("missing_information", "")).strip()
+                        if final_decision
+                        else "",
+                        "sources": sources[:3],
+                    },
+                ),
             },
         )
         self._cleanup_session_if_needed(session.session_id, ctx=ctx, action="run_objective", params=params)
@@ -584,7 +700,16 @@ class BrowserTool:
         return ToolResult(
             ok=True,
             summary=f"Listed {len(sessions)} browser sessions.",
-            data={"sessions": [session.as_dict() for session in sessions]},
+            data={
+                "sessions": [session.as_dict() for session in sessions],
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "browser_sessions:latest": {
+                        "count": len(sessions),
+                        "sessions": [session.as_dict() for session in sessions[:5]],
+                    }
+                },
+            },
         )
 
     def _trace_event(
@@ -640,6 +765,7 @@ class BrowserTool:
                     "required": ["url"],
                 },
                 writes=True,
+                produces_artifacts=("browser_page", "browser_candidates"),
             ),
             "search_web": ActionSpec(
                 tool=self.name,
@@ -658,6 +784,7 @@ class BrowserTool:
                     "required": ["query"],
                 },
                 writes=True,
+                produces_artifacts=("browser_page", "browser_candidates", "browser_extract"),
             ),
             "read_page": ActionSpec(
                 tool=self.name,
@@ -670,6 +797,7 @@ class BrowserTool:
                     },
                 },
                 reads=True,
+                produces_artifacts=("browser_page", "browser_candidates"),
             ),
             "click": ActionSpec(
                 tool=self.name,
@@ -684,6 +812,7 @@ class BrowserTool:
                     "required": ["target"],
                 },
                 writes=True,
+                produces_artifacts=("browser_page", "browser_candidates"),
             ),
             "type": ActionSpec(
                 tool=self.name,
@@ -700,6 +829,7 @@ class BrowserTool:
                     "required": ["target", "text"],
                 },
                 writes=True,
+                produces_artifacts=("browser_page", "browser_candidates"),
             ),
             "scroll": ActionSpec(
                 tool=self.name,
@@ -714,6 +844,7 @@ class BrowserTool:
                     },
                 },
                 writes=True,
+                produces_artifacts=("browser_page", "browser_candidates"),
             ),
             "wait_for": ActionSpec(
                 tool=self.name,
@@ -728,6 +859,7 @@ class BrowserTool:
                     },
                 },
                 reads=True,
+                produces_artifacts=("browser_page", "browser_candidates"),
             ),
             "screenshot": ActionSpec(
                 tool=self.name,
@@ -741,6 +873,7 @@ class BrowserTool:
                     },
                 },
                 reads=True,
+                produces_artifacts=("browser_page", "browser_screenshot"),
             ),
             "extract": ActionSpec(
                 tool=self.name,
@@ -755,6 +888,7 @@ class BrowserTool:
                     },
                 },
                 reads=True,
+                produces_artifacts=("browser_page", "browser_candidates", "browser_extract"),
             ),
             "run_objective": ActionSpec(
                 tool=self.name,
@@ -775,6 +909,7 @@ class BrowserTool:
                     "required": ["objective"],
                 },
                 writes=True,
+                produces_artifacts=("browser_page", "browser_candidates", "browser_extract"),
             ),
             "close_session": ActionSpec(
                 tool=self.name,
@@ -798,8 +933,80 @@ class BrowserTool:
                     "properties": {},
                 },
                 reads=True,
+                produces_artifacts=("browser_sessions",),
             ),
         }
+
+    def _browser_result_payload(
+        self,
+        page_data: dict[str, Any],
+        *,
+        include_candidates: bool,
+        include_extract: dict[str, Any] | None = None,
+        include_screenshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        artifacts: dict[str, Any] = {
+            "browser_page:latest": self._browser_page_artifact(page_data),
+        }
+        if include_candidates:
+            artifacts["browser_candidates:latest"] = self._browser_candidates_artifact(page_data)
+        if include_extract is not None:
+            artifacts["browser_extract:latest"] = self._browser_extract_artifact(include_extract)
+        if include_screenshot is not None:
+            artifacts["browser_screenshot:latest"] = dict(include_screenshot)
+        return {
+            "allow_tool_followup": True,
+            "artifacts": artifacts,
+        }
+
+    def _browser_page_artifact(self, page_data: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "session_id": str(page_data.get("session_id", "")),
+            "tab_id": str(page_data.get("tab_id", "")),
+            "url": str(page_data.get("url", "")),
+            "title": str(page_data.get("title", ""))[:200],
+            "page_kind": str(page_data.get("page_kind", "")),
+            "mode": str(page_data.get("mode", "")),
+        }
+
+    def _browser_candidates_artifact(self, page_data: dict[str, Any]) -> dict[str, Any]:
+        candidates: list[dict[str, Any]] = []
+        for item in self._extract_candidate_elements(page_data)[:8]:
+            href = str(item.get("href", "")).strip()
+            candidates.append(
+                {
+                    "id": str(item.get("id", "")),
+                    "role": str(item.get("role", "")),
+                    "text": str(item.get("text", ""))[:140],
+                    "href": self._normalize_url(href) if href else "",
+                    "area": str(item.get("area", "")),
+                    "clickable": bool(item.get("clickable", False)),
+                }
+            )
+        return {"count": len(candidates), "actions": candidates}
+
+    def _browser_extract_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
+        artifact: dict[str, Any] = {}
+        if "fields" in payload:
+            artifact["fields"] = payload.get("fields", {})
+        if "objective" in payload:
+            artifact["objective"] = str(payload.get("objective", ""))
+        if "termination_reason" in payload:
+            artifact["termination_reason"] = str(payload.get("termination_reason", ""))
+        if "evidence_refs" in payload:
+            artifact["evidence_refs"] = [str(item) for item in payload.get("evidence_refs", [])[:5]]
+        if "missing_information" in payload:
+            artifact["missing_information"] = str(payload.get("missing_information", ""))[:240]
+        if "sources" in payload:
+            artifact["sources"] = [
+                {
+                    "url": str(item.get("url", "")),
+                    "title": str(item.get("title", ""))[:160],
+                }
+                for item in payload.get("sources", [])[:3]
+                if isinstance(item, dict)
+            ]
+        return artifact
 
     def _choose_follow_up_url(self, objective: str, page_data: dict[str, Any]) -> str | None:
         ranked_urls = self._rank_follow_up_urls(objective, page_data)
