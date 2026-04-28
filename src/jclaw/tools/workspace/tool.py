@@ -131,6 +131,18 @@ class WorkspaceTool:
             for key in ("size_bytes", "modified_at", "created_at", "suffix", "mode"):
                 if key in data["metadata"]:
                     lines.append(f"- {key}: {data['metadata'][key]}")
+        if "start_line" in data and "end_line" in data:
+            lines.append(f"Lines: {data['start_line']}-{data['end_line']}")
+        if "line_count" in data:
+            lines.append(f"Line count: {data['line_count']}")
+        if "char_count" in data:
+            lines.append(f"Characters: {data['char_count']}")
+        if "bytes_read" in data:
+            lines.append(f"Bytes read: {data['bytes_read']}")
+        if "truncated" in data:
+            lines.append(f"Truncated: {data['truncated']}")
+        if data.get("content"):
+            lines.append(f"Content:\n{str(data['content'])[:4000]}")
         if data.get("matches"):
             lines.append("Matches:")
             for item in data["matches"][:10]:
@@ -142,6 +154,9 @@ class WorkspaceTool:
                 lines.append(f"Shown {len(data['matches'])} of {data['match_count']} matches.")
         if data.get("diff_preview"):
             lines.append(f"Diff preview:\n{str(data['diff_preview'])[:1500]}")
+        if "diff" in data:
+            diff_text = str(data["diff"])
+            lines.append(f"Diff:\n{diff_text[:4000]}")
         if data.get("command"):
             lines.append(f"Command: {data['command']}")
         if data.get("preview"):
@@ -164,6 +179,8 @@ class WorkspaceTool:
             "path_metadata": self._path_metadata,
             "find_files": self._find_files,
             "search_contents": self._search_contents,
+            "read_file": self._read_file,
+            "read_snippet": self._read_snippet,
             "prepare_change": self._prepare_change,
             "rename_path": self._rename_path,
             "move_path": self._move_path,
@@ -172,6 +189,7 @@ class WorkspaceTool:
             "apply_change_request": self._apply_change_request,
             "apply_path_request": self._apply_path_request,
             "git_status": self._git_status,
+            "git_diff": self._git_diff,
             "prepare_git_action": self._prepare_git_action,
             "apply_git_request": self._apply_git_request,
             "prepare_shell_action": self._prepare_shell_action,
@@ -450,6 +468,145 @@ class WorkspaceTool:
             },
         )
 
+    def _read_file(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        objective = str(params.get("objective", "Read local file")).strip()
+        if params.get("path") in (None, ""):
+            return ToolResult(ok=False, summary="Reading a file requires a path.", data={})
+        target_path = self._resolve_target_path(params.get("path"))
+        root_path = self._default_root_for_path(target_path)
+        permission = self._ensure_grant(
+            root_path,
+            capabilities=("read",),
+            ctx=ctx,
+            objective=objective,
+            kind="grant",
+            continuation_action="read_file",
+            continuation_params=params,
+        )
+        if permission is not None:
+            return permission
+        file_state = self._read_text_file_state(target_path)
+        if file_state["error"]:
+            return ToolResult(
+                ok=False,
+                summary=str(file_state["error"]),
+                data={"root_path": str(root_path), "target_path": str(target_path)},
+            )
+        git_root = self._detect_git_root(target_path)
+        line_count = int(file_state["line_count"])
+        content = str(file_state["content"])
+        artifact = {
+            "root_path": str(root_path),
+            "target_path": str(target_path),
+            "kind": "file",
+            "start_line": 1,
+            "end_line": line_count,
+            "line_count": line_count,
+            "content": content,
+            "truncated": bool(file_state["truncated"]),
+            "git_root": None if git_root is None else str(git_root),
+        }
+        return ToolResult(
+            ok=True,
+            summary=f"Read {target_path}.",
+            data={
+                "root_path": str(root_path),
+                "target_path": str(target_path),
+                "exists": True,
+                "kind": "file",
+                "content": content,
+                "line_count": line_count,
+                "char_count": int(file_state["char_count"]),
+                "bytes_read": int(file_state["bytes_read"]),
+                "truncated": bool(file_state["truncated"]),
+                "git_root": None if git_root is None else str(git_root),
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "workspace_file:latest": artifact,
+                },
+            },
+        )
+
+    def _read_snippet(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        objective = str(params.get("objective", "Read local file snippet")).strip()
+        if params.get("path") in (None, ""):
+            return ToolResult(ok=False, summary="Reading a snippet requires a path.", data={})
+        target_path = self._resolve_target_path(params.get("path"))
+        root_path = self._default_root_for_path(target_path)
+        permission = self._ensure_grant(
+            root_path,
+            capabilities=("read",),
+            ctx=ctx,
+            objective=objective,
+            kind="grant",
+            continuation_action="read_snippet",
+            continuation_params=params,
+        )
+        if permission is not None:
+            return permission
+        try:
+            start_line = int(params.get("start_line", 0))
+            end_line = int(params.get("end_line", 0))
+        except (TypeError, ValueError):
+            return ToolResult(ok=False, summary="Reading a snippet requires integer start_line and end_line.", data={})
+        if start_line < 1 or end_line < 1 or start_line > end_line:
+            return ToolResult(ok=False, summary="Invalid line range for read_snippet.", data={})
+        file_state = self._read_text_file_state(target_path, include_full_text=True)
+        if file_state["error"]:
+            return ToolResult(
+                ok=False,
+                summary=str(file_state["error"]),
+                data={"root_path": str(root_path), "target_path": str(target_path)},
+            )
+        line_count = int(file_state["line_count"])
+        if start_line > line_count:
+            return ToolResult(
+                ok=False,
+                summary=f"Requested snippet starts after end of file ({line_count} lines).",
+                data={"root_path": str(root_path), "target_path": str(target_path), "line_count": line_count},
+            )
+        actual_end_line = min(end_line, line_count)
+        all_lines = str(file_state["full_text"]).splitlines(keepends=True)
+        raw_content = "".join(all_lines[start_line - 1 : actual_end_line])
+        raw_content_bytes = raw_content.encode("utf-8")
+        snippet_bytes_read = min(len(raw_content_bytes), self.max_internal_read_bytes)
+        content = raw_content_bytes[: self.max_internal_read_bytes].decode("utf-8", errors="ignore")
+        snippet_truncated = len(raw_content_bytes) > self.max_internal_read_bytes
+        git_root = self._detect_git_root(target_path)
+        artifact = {
+            "root_path": str(root_path),
+            "target_path": str(target_path),
+            "kind": "file",
+            "start_line": start_line,
+            "end_line": actual_end_line,
+            "line_count": line_count,
+            "content": content,
+            "truncated": snippet_truncated,
+            "git_root": None if git_root is None else str(git_root),
+        }
+        return ToolResult(
+            ok=True,
+            summary=f"Read lines {start_line}-{actual_end_line} from {target_path}.",
+            data={
+                "root_path": str(root_path),
+                "target_path": str(target_path),
+                "exists": True,
+                "kind": "file",
+                "content": content,
+                "start_line": start_line,
+                "end_line": actual_end_line,
+                "line_count": line_count,
+                "char_count": len(content),
+                "bytes_read": snippet_bytes_read,
+                "truncated": snippet_truncated,
+                "git_root": None if git_root is None else str(git_root),
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "workspace_file:latest": artifact,
+                },
+            },
+        )
+
     def _prepare_change(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         objective = str(params.get("objective") or params.get("instruction") or "").strip()
         if not objective:
@@ -678,22 +835,91 @@ class WorkspaceTool:
         git_root = self._detect_git_root(root_path)
         if git_root is None:
             return ToolResult(ok=False, summary=f"{root_path} is not inside a local git repository.", data={})
-        status = self._run_command(["git", "-C", str(git_root), "status", "--short", "--branch"])
-        diff_stat = self._run_command(["git", "-C", str(git_root), "diff", "--stat"])
+        git_data = self._collect_git_inspection(git_root=git_root)
         return ToolResult(
             ok=True,
             summary=f"Collected local git status for {git_root}.",
             data={
                 "root_path": str(git_root),
-                "status": status["stdout"],
-                "diff_stat": diff_stat["stdout"],
+                "status": git_data["status"],
+                "diff_stat": git_data["diff_stat"],
                 "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_git_status:latest": {
                         "root_path": str(git_root),
-                        "status": status["stdout"],
-                        "diff_stat": diff_stat["stdout"],
+                        "status": git_data["status"],
+                        "diff_stat": git_data["diff_stat"],
                     },
+                },
+            },
+        )
+
+    def _git_diff(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        objective = str(params.get("objective", "Inspect git diff")).strip()
+        raw_target = params.get("path") or params.get("root_path")
+        target_path = self._resolve_target_path(raw_target)
+        root_path = self._default_root_for_path(target_path)
+        permission = self._ensure_grant(
+            root_path,
+            capabilities=("git",),
+            ctx=ctx,
+            objective=objective,
+            kind="grant",
+            continuation_action="git_diff",
+            continuation_params=params,
+        )
+        if permission is not None:
+            return permission
+        git_root = self._detect_git_root(target_path)
+        if git_root is None:
+            return ToolResult(ok=False, summary=f"{root_path} is not inside a local git repository.", data={})
+
+        pathspec: list[str] = []
+        if raw_target not in (None, ""):
+            try:
+                relative = target_path.relative_to(git_root)
+            except ValueError:
+                return ToolResult(ok=False, summary="Target path is outside the detected git root.", data={})
+            if str(relative) != ".":
+                pathspec = [str(relative)]
+        git_data = self._collect_git_inspection(git_root=git_root, pathspec=pathspec)
+        unstaged_text = str(git_data["unstaged"]).strip()
+        staged_text = str(git_data["staged"]).strip()
+        diff_sections: list[str] = []
+        if unstaged_text:
+            diff_sections.append(f"### Unstaged\n{unstaged_text}")
+        if staged_text:
+            diff_sections.append(f"### Staged\n{staged_text}")
+        combined_diff = "\n\n".join(diff_sections)
+        has_unstaged = bool(unstaged_text)
+        has_staged = bool(staged_text)
+        if combined_diff:
+            summary = f"Collected local git diff for {git_root}."
+        else:
+            summary = f"No local git diff found for {git_root}."
+        artifact = {
+            "root_path": str(git_root),
+            "target_path": str(target_path),
+            "git_root": str(git_root),
+            "status": git_data["status"],
+            "diff": combined_diff,
+            "has_unstaged": has_unstaged,
+            "has_staged": has_staged,
+        }
+        return ToolResult(
+            ok=True,
+            summary=summary,
+            data={
+                "root_path": str(git_root),
+                "target_path": str(target_path),
+                "git_root": str(git_root),
+                "status": git_data["status"],
+                "diff": combined_diff,
+                "has_unstaged": has_unstaged,
+                "has_staged": has_staged,
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "workspace_diff:latest": artifact,
                 },
             },
         )
@@ -1201,6 +1427,43 @@ class WorkspaceTool:
             "stderr": result.stderr[: self.shell_output_chars],
         }
 
+    def _read_text_file_state(self, path: Path, *, include_full_text: bool = False) -> dict[str, Any]:
+        if not path.exists():
+            return {"error": f"{path} does not exist."}
+        if not path.is_file():
+            return {"error": f"{path} is not a file."}
+        sample = path.read_bytes()[:8192]
+        if b"\x00" in sample:
+            return {"error": f"{path} appears to be a binary file and cannot be read as text."}
+        raw = path.read_bytes()
+        text = raw.decode("utf-8", errors="ignore")
+        max_bytes = min(len(raw), self.max_internal_read_bytes)
+        content = raw[: self.max_internal_read_bytes].decode("utf-8", errors="ignore")
+        state = {
+            "error": "",
+            "content": content,
+            "line_count": len(text.splitlines()),
+            "char_count": len(content),
+            "bytes_read": max_bytes,
+            "truncated": len(raw) > self.max_internal_read_bytes,
+        }
+        if include_full_text:
+            state["full_text"] = text
+        return state
+
+    def _collect_git_inspection(self, *, git_root: Path, pathspec: list[str] | None = None) -> dict[str, str]:
+        scoped_pathspec = pathspec or []
+        status = self._run_command(["git", "-C", str(git_root), "status", "--short", "--branch"])
+        diff_stat = self._run_command(["git", "-C", str(git_root), "diff", "--stat", "--", *scoped_pathspec])
+        unstaged = self._run_command(["git", "-C", str(git_root), "diff", "--", *scoped_pathspec])
+        staged = self._run_command(["git", "-C", str(git_root), "diff", "--cached", "--", *scoped_pathspec])
+        return {
+            "status": status["stdout"],
+            "diff_stat": diff_stat["stdout"],
+            "unstaged": unstaged["stdout"],
+            "staged": staged["stdout"],
+        }
+
     def _read_text(self, path: Path) -> str:
         if not path.exists():
             return ""
@@ -1364,6 +1627,38 @@ class WorkspaceTool:
                 reads=True,
                 produces_artifacts=("workspace_search_results",),
             ),
+            "read_file": ActionSpec(
+                tool=self.name,
+                action="read_file",
+                description="Read a local text file for coding-oriented inspection when no specific line range is requested. Do not use this when the user asks for explicit line numbers or a line range; use read_snippet instead.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "objective": {"type": "string"},
+                    },
+                    "required": ["path"],
+                },
+                reads=True,
+                produces_artifacts=("workspace_file",),
+            ),
+            "read_snippet": ActionSpec(
+                tool=self.name,
+                action="read_snippet",
+                description="Read a focused inclusive line range from a local text file. Use this when the user asks for explicit line numbers, a line range, or phrases like 'show me lines 10-40'.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "start_line": {"type": "integer"},
+                        "end_line": {"type": "integer"},
+                        "objective": {"type": "string"},
+                    },
+                    "required": ["path", "start_line", "end_line"],
+                },
+                reads=True,
+                produces_artifacts=("workspace_file",),
+            ),
             "prepare_change": ActionSpec(
                 tool=self.name,
                 action="prepare_change",
@@ -1394,5 +1689,20 @@ class WorkspaceTool:
                 },
                 reads=True,
                 produces_artifacts=("workspace_git_status",),
+            ),
+            "git_diff": ActionSpec(
+                tool=self.name,
+                action="git_diff",
+                description="Read local git diff details for the current repository or a scoped path.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "root_path": {"type": "string"},
+                        "objective": {"type": "string"},
+                    },
+                },
+                reads=True,
+                produces_artifacts=("workspace_diff",),
             ),
         }

@@ -105,6 +105,33 @@ def test_run_due_cron_jobs_disables_one_off_job(tmp_path) -> None:
     db.close()
 
 
+def test_run_due_cron_jobs_disables_explicit_date_job_after_execution(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    job_id = db.add_cron_job(
+        "chat-1",
+        "date:2026-4-27 09:00",
+        "practice interview",
+        "2000-01-01T00:00:00+00:00",
+    )
+    daemon = object.__new__(JClawDaemon)
+    daemon.db = db
+
+    sent_messages: list[tuple[str, str]] = []
+    daemon.channel = SimpleNamespace(
+        send_message=lambda chat_id, text, reply_to_message_id=None: sent_messages.append((chat_id, text)),
+        close=lambda: None,
+    )
+    daemon.agent = SimpleNamespace(handle_cron=lambda chat_id, prompt: f"Reminder: {prompt}")
+
+    daemon._run_due_cron_jobs()
+
+    job = db.get_cron_job("chat-1", job_id)
+    assert sent_messages == [("chat-1", "Reminder: practice interview")]
+    assert job is not None
+    assert job.enabled is False
+    db.close()
+
+
 def test_handle_message_edits_placeholder_with_final_reply() -> None:
     daemon = object.__new__(JClawDaemon)
     daemon.config = SimpleNamespace(telegram=SimpleNamespace(allowed_chat_ids=()))

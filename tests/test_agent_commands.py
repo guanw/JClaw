@@ -1061,6 +1061,178 @@ def test_controller_state_includes_authoritative_local_datetime(tmp_path) -> Non
     db.close()
 
 
+def test_controller_state_preserves_workspace_file_and_diff_artifact_previews(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(config, db, DummyLLM())
+    runtime = RuntimeState(request="inspect source code")
+    long_content = "x" * 5000
+    long_diff = "y" * 5000
+    result = ToolResult(
+        ok=True,
+        summary="Read file and diff.",
+        data={
+            "content": long_content,
+            "diff": long_diff,
+            "artifacts": {
+                "workspace_file:latest": {
+                    "root_path": "/repo",
+                    "target_path": "/repo/app.py",
+                    "kind": "file",
+                    "start_line": 1,
+                    "end_line": 100,
+                    "line_count": 100,
+                    "content": long_content,
+                    "truncated": False,
+                    "git_root": "/repo",
+                },
+                "workspace_diff:latest": {
+                    "root_path": "/repo",
+                    "target_path": "/repo/app.py",
+                    "git_root": "/repo",
+                    "status": "M app.py",
+                    "diff": long_diff,
+                    "has_unstaged": True,
+                    "has_staged": False,
+                },
+            },
+        },
+    )
+    runtime.append(Observation.from_tool_result(result))
+    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+        [{"tool": "workspace", "action": "read_file", "reason": "Inspect file", "result": result}],
+        runtime,
+    )
+
+    file_preview = controller_state["artifacts_by_type"]["workspace_file"]["content"]
+    diff_preview = controller_state["artifacts_by_type"]["workspace_diff"]["diff"]
+    assert len(file_preview) > 220
+    assert len(file_preview) == 4003
+    assert len(diff_preview) > 220
+    assert len(diff_preview) == 4003
+    db.close()
+
+
+def test_tool_result_for_controller_includes_workspace_read_fields(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(config, db, DummyLLM())
+    result = ToolResult(
+        ok=True,
+        summary="Read source file.",
+        data={
+            "root_path": "/repo",
+            "target_path": "/repo/app.py",
+            "content": "print('hello')\n",
+            "line_count": 1,
+            "start_line": 1,
+            "end_line": 1,
+            "char_count": 15,
+            "bytes_read": 15,
+            "truncated": False,
+            "git_root": "/repo",
+            "status": "M app.py",
+            "diff": "### Unstaged\n...",
+            "has_unstaged": True,
+            "has_staged": False,
+        },
+    )
+
+    controller_view = agent._tool_result_for_controller(result)  # noqa: SLF001
+
+    assert controller_view["content"] == "print('hello')\n"
+    assert controller_view["line_count"] == 1
+    assert controller_view["start_line"] == 1
+    assert controller_view["end_line"] == 1
+    assert controller_view["bytes_read"] == 15
+    assert controller_view["git_root"] == "/repo"
+    assert controller_view["diff"] == "### Unstaged\n..."
+    assert controller_view["has_unstaged"] is True
+    assert controller_view["has_staged"] is False
+    db.close()
+
+
+def test_tool_catalog_and_controller_prompt_bias_workspace_line_requests_to_read_snippet(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+
+    class PromptCapturingLLM(SequenceLLM):
+        def __init__(self) -> None:
+            super().__init__(
+                [
+                    '{"type":"tool_call","tool":"workspace","action":"read_snippet","params":{"path":"src/jclaw/tools/workspace/tool.py","start_line":1290,"end_line":1415},"answer":"","reason":"The user requested a specific line range."}'
+                ]
+            )
+            self.last_system_prompt = ""
+
+        def chat(self, messages: list[dict[str, str]]) -> str:  # type: ignore[override]
+            self.last_system_prompt = messages[0]["content"]
+            return super().chat(messages)
+
+    llm = PromptCapturingLLM()
+    agent = AssistantAgent(config, db, llm)
+
+    catalog = json.loads(agent._tool_catalog_for_prompt(agent.tools.list_tools()))  # noqa: SLF001
+    workspace_tool = next(item for item in catalog if item["name"] == "workspace")
+    read_file = workspace_tool["actions"]["read_file"]["description"]
+    read_snippet = workspace_tool["actions"]["read_snippet"]["description"]
+
+    assert "Do not use this when the user asks for explicit line numbers" in read_file
+    assert "Use this when the user asks for explicit line numbers" in read_snippet
+
+    decision = agent._decide_next_tool_step(  # noqa: SLF001
+        "chat-1",
+        "Show me lines 1290 to 1415 of src/jclaw/tools/workspace/tool.py",
+        user_name="tester",
+        steps=[],
+        runtime=RuntimeState(request="Show me lines 1290 to 1415 of src/jclaw/tools/workspace/tool.py"),
+    )
+
+    assert "prefer the focused range read" in llm.last_system_prompt
+    assert decision is not None
+    assert decision.tool == "workspace"
+    assert decision.action == "read_snippet"
+    assert decision.params["start_line"] == 1290
+    assert decision.params["end_line"] == 1415
+    db.close()
+
+
 def test_tool_loop_returns_failure_reply_when_tool_raises(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),

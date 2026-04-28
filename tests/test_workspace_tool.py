@@ -219,6 +219,238 @@ def test_find_files_supports_comma_separated_patterns(tmp_path) -> None:
     db.close()
 
 
+def test_read_file_requires_grant_then_returns_workspace_file_artifact(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "app.py"
+    target.write_text("print('hello')\nprint('world')\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    gated = tool.invoke("read_file", {"path": str(target)}, ToolContext(chat_id="chat-1"))
+    assert gated.needs_confirmation is True
+    assert gated.data["request_kind"] == "grant"
+
+    _grant_all(db, root)
+    result = tool.invoke("read_file", {"path": str(target)}, ToolContext(chat_id="chat-1"))
+    assert result.ok is True
+    assert result.data["content"] == "print('hello')\nprint('world')\n"
+    assert result.data["line_count"] == 2
+    assert result.data["truncated"] is False
+    assert result.data["allow_tool_followup"] is True
+    assert result.data["artifacts"]["workspace_file:latest"]["start_line"] == 1
+    assert result.data["artifacts"]["workspace_file:latest"]["end_line"] == 2
+    db.close()
+
+
+def test_read_file_rejects_missing_and_non_file_paths(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    missing_arg = tool.invoke("read_file", {}, ToolContext(chat_id="chat-1"))
+    assert missing_arg.ok is False
+    assert "requires a path" in missing_arg.summary.lower()
+
+    missing_file = tool.invoke("read_file", {"path": str(root / "missing.py")}, ToolContext(chat_id="chat-1"))
+    assert missing_file.ok is False
+    assert "does not exist" in missing_file.summary.lower()
+
+    directory = tool.invoke("read_file", {"path": str(root)}, ToolContext(chat_id="chat-1"))
+    assert directory.ok is False
+    assert "is not a file" in directory.summary.lower()
+    db.close()
+
+
+def test_read_file_rejects_binary_like_files(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "image.bin"
+    target.write_bytes(b"\x89PNG\x00binary")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    result = tool.invoke("read_file", {"path": str(target)}, ToolContext(chat_id="chat-1"))
+    assert result.ok is False
+    assert "binary file" in result.summary.lower()
+    db.close()
+
+
+def test_read_file_marks_truncation_when_content_exceeds_internal_limit(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "long.txt"
+    target.write_text("abcdef\n" * 20, encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(
+        db,
+        tmp_path / "state",
+        root,
+        draft_change=lambda payload: None,
+        options={"max_internal_read_bytes": 20},
+    )
+
+    result = tool.invoke("read_file", {"path": str(target)}, ToolContext(chat_id="chat-1"))
+    assert result.ok is True
+    assert result.data["truncated"] is True
+    assert result.data["bytes_read"] == 20
+    assert len(result.data["content"]) <= 20
+    db.close()
+
+
+def test_read_snippet_returns_inclusive_line_range_and_clamps_to_eof(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "app.py"
+    target.write_text("a\nb\nc\nd\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    snippet = tool.invoke(
+        "read_snippet",
+        {"path": str(target), "start_line": 2, "end_line": 3},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert snippet.ok is True
+    assert snippet.data["content"] == "b\nc\n"
+    assert snippet.data["start_line"] == 2
+    assert snippet.data["end_line"] == 3
+
+    clamped = tool.invoke(
+        "read_snippet",
+        {"path": str(target), "start_line": 3, "end_line": 10},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert clamped.ok is True
+    assert clamped.data["content"] == "c\nd\n"
+    assert clamped.data["end_line"] == 4
+    assert clamped.data["truncated"] is False
+    db.close()
+
+
+def test_read_snippet_rejects_invalid_ranges(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "app.py"
+    target.write_text("a\nb\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    invalid = tool.invoke(
+        "read_snippet",
+        {"path": str(target), "start_line": 3, "end_line": 2},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert invalid.ok is False
+
+    out_of_range = tool.invoke(
+        "read_snippet",
+        {"path": str(target), "start_line": 5, "end_line": 6},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert out_of_range.ok is False
+    assert "starts after end of file" in out_of_range.summary.lower()
+    db.close()
+
+
+def test_read_snippet_can_read_late_lines_from_large_file_without_whole_file_truncation(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "big.py"
+    lines = [f"line_{index:04d} = {index}\n" for index in range(1, 2201)]
+    target.write_text("".join(lines), encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(
+        db,
+        tmp_path / "state",
+        root,
+        draft_change=lambda payload: None,
+        options={"max_internal_read_bytes": 200},
+    )
+
+    snippet = tool.invoke(
+        "read_snippet",
+        {"path": str(target), "start_line": 1290, "end_line": 1295},
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert snippet.ok is True
+    assert "line_1290 = 1290" in snippet.data["content"]
+    assert "line_1295 = 1295" in snippet.data["content"]
+    assert snippet.data["truncated"] is False
+    assert snippet.data["start_line"] == 1290
+    assert snippet.data["end_line"] == 1295
+    db.close()
+
+
+def test_read_snippet_truncates_only_the_requested_range_when_snippet_is_too_large(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "big.py"
+    lines = [f"{index:04d} abcdefghijklmnopqrstuvwxyz\n" for index in range(1, 200)]
+    target.write_text("".join(lines), encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(
+        db,
+        tmp_path / "state",
+        root,
+        draft_change=lambda payload: None,
+        options={"max_internal_read_bytes": 80},
+    )
+
+    snippet = tool.invoke(
+        "read_snippet",
+        {"path": str(target), "start_line": 1, "end_line": 10},
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert snippet.ok is True
+    assert snippet.data["truncated"] is True
+    assert snippet.data["bytes_read"] == 80
+    assert len(snippet.data["content"].encode("utf-8")) <= 80
+    db.close()
+
+
+def test_format_result_includes_snippet_content_and_diff_text(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "app.py"
+    target.write_text("a\nb\nc\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    snippet = tool.invoke(
+        "read_snippet",
+        {"path": str(target), "start_line": 2, "end_line": 3},
+        ToolContext(chat_id="chat-1"),
+    )
+    snippet_text = tool.format_result("read_snippet", snippet)
+    assert "Content:" in snippet_text
+    assert "b\nc\n" in snippet_text
+
+    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "JClaw Test"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "jclaw@example.com"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "add", "app.py"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "Initial"], cwd=root, check=True, capture_output=True, text=True)
+    target.write_text("a\nb\nchanged\n", encoding="utf-8")
+
+    diff = tool.invoke("git_diff", {"path": str(target)}, ToolContext(chat_id="chat-1"))
+    diff_text = tool.format_result("git_diff", diff)
+    assert "Diff:" in diff_text
+    assert "changed" in diff_text
+    db.close()
+
+
 def test_prepare_change_previews_before_apply(tmp_path) -> None:
     root = tmp_path / "repo"
     root.mkdir()
@@ -278,6 +510,43 @@ def test_git_status_emits_followup_artifact(tmp_path) -> None:
     db.close()
 
 
+def test_git_diff_returns_unstaged_and_staged_diffs_and_scopes_to_path(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "JClaw Test"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "jclaw@example.com"], cwd=root, check=True, capture_output=True, text=True)
+    target = root / "app.py"
+    other = root / "other.py"
+    target.write_text("print('one')\n", encoding="utf-8")
+    other.write_text("print('other')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py", "other.py"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "Initial"], cwd=root, check=True, capture_output=True, text=True)
+
+    target.write_text("print('two')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=root, check=True, capture_output=True, text=True)
+    other.write_text("print('other changed')\n", encoding="utf-8")
+
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    diff = tool.invoke("git_diff", {"path": str(target)}, ToolContext(chat_id="chat-1"))
+    assert diff.ok is True
+    assert diff.data["has_staged"] is True
+    assert diff.data["has_unstaged"] is False
+    assert "### Staged" in diff.data["diff"]
+    assert "app.py" in diff.data["diff"]
+    assert "other.py" not in diff.data["diff"]
+
+    full_diff = tool.invoke("git_diff", {"path": str(root)}, ToolContext(chat_id="chat-1"))
+    assert full_diff.ok is True
+    assert full_diff.data["has_unstaged"] is True
+    assert "### Unstaged" in full_diff.data["diff"]
+    assert "other.py" in full_diff.data["diff"]
+    db.close()
+
+
 def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> None:
     db = Database(tmp_path / "jclaw.db")
     tool = WorkspaceTool(db, tmp_path / "state", tmp_path / "repo", draft_change=lambda payload: None)
@@ -287,6 +556,9 @@ def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> No
     assert description["actions"]["inspect_root"]["produces_artifacts"] == ["workspace_path"]
     assert description["actions"]["search_contents"]["produces_artifacts"] == ["workspace_search_results"]
     assert description["actions"]["git_status"]["produces_artifacts"] == ["workspace_git_status"]
+    assert description["actions"]["read_file"]["produces_artifacts"] == ["workspace_file"]
+    assert description["actions"]["read_snippet"]["produces_artifacts"] == ["workspace_file"]
+    assert description["actions"]["git_diff"]["produces_artifacts"] == ["workspace_diff"]
     assert description["actions"]["prepare_change"]["requires_confirmation"] is True
     db.close()
 

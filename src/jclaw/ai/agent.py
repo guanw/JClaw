@@ -494,6 +494,7 @@ class AssistantAgent:
             "Use complete when the operational task is finished and the latest tool result should be returned to the user.\n"
             "The runtime state includes normalized observations and the current artifact frontier. Treat the latest observation as authoritative.\n"
             "The runtime state also includes the authoritative current local date, time, and timezone. Use that instead of guessing today's date or year.\n"
+            "When a tool offers both a whole-resource read and a focused range read, prefer the focused range read whenever the user asks for explicit line numbers, a line range, or another clearly bounded subsection.\n"
             "Keep params minimal and choose only one next decision.\n"
             "Return strict JSON only.\n"
             "Schema:\n"
@@ -607,10 +608,20 @@ class AssistantAgent:
             return [self._preview_runtime_value(item, depth=depth + 1) for item in value[:3]]
         if isinstance(value, dict):
             preview: dict[str, Any] = {}
+            is_workspace_file = {"target_path", "start_line", "end_line", "line_count", "content"}.issubset(value.keys())
+            is_workspace_diff = {"git_root", "status", "diff", "has_unstaged", "has_staged"}.issubset(value.keys())
             for index, (key, item) in enumerate(value.items()):
                 if index >= 8:
                     preview["__truncated__"] = True
                     break
+                if isinstance(item, str) and key == "content" and is_workspace_file:
+                    text = item.strip()
+                    preview[str(key)] = f"{text[:4000]}..." if len(text) > 4000 else text
+                    continue
+                if isinstance(item, str) and key == "diff" and is_workspace_diff:
+                    text = item.strip()
+                    preview[str(key)] = f"{text[:4000]}..." if len(text) > 4000 else text
+                    continue
                 preview[str(key)] = self._preview_runtime_value(item, depth=depth + 1)
             return preview
         return str(value)
@@ -636,6 +647,18 @@ class AssistantAgent:
             "summary_text",
             "request_id",
             "request_kind",
+            "content",
+            "line_count",
+            "start_line",
+            "end_line",
+            "char_count",
+            "bytes_read",
+            "truncated",
+            "git_root",
+            "status",
+            "diff",
+            "has_unstaged",
+            "has_staged",
         ):
             if key in data:
                 controller_data[key] = data[key]
