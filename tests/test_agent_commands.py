@@ -1173,6 +1173,62 @@ def test_controller_state_preserves_workspace_patch_artifact_preview(tmp_path) -
     db.close()
 
 
+def test_controller_state_preserves_workspace_command_result_preview(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(config, db, DummyLLM())
+    runtime = RuntimeState(request="run tests")
+    long_stdout = "o" * 5000
+    long_stderr = "e" * 5000
+    result = ToolResult(
+        ok=False,
+        summary="Command failed: python -m pytest",
+        data={
+            "command": "python -m pytest",
+            "cwd": "/repo",
+            "exit_code": 1,
+            "stdout": long_stdout,
+            "stderr": long_stderr,
+            "artifacts": {
+                "workspace_command_result:latest": {
+                    "root_path": "/repo",
+                    "command": "python -m pytest",
+                    "cwd": "/repo",
+                    "exit_code": 1,
+                    "stdout": long_stdout,
+                    "stderr": long_stderr,
+                    "ok": False,
+                }
+            },
+        },
+    )
+    runtime.append(Observation.from_tool_result(result))
+
+    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+        [{"tool": "workspace", "action": "run_command", "reason": "Run tests", "result": result}],
+        runtime,
+    )
+
+    command_preview = controller_state["artifacts_by_type"]["workspace_command_result"]
+    assert len(command_preview["stdout"]) > 220
+    assert len(command_preview["stdout"]) == 4003
+    assert len(command_preview["stderr"]) > 220
+    assert len(command_preview["stderr"]) == 4003
+    db.close()
+
+
 def test_tool_result_for_controller_includes_workspace_read_fields(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),

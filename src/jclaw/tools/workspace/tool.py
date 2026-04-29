@@ -183,6 +183,7 @@ class WorkspaceTool:
             "write_file": self._write_file,
             "apply_patch": self._apply_patch,
             "create_file": self._create_file,
+            "run_command": self._run_command_action,
             "rename_path": self._rename_path,
             "move_path": self._move_path,
             "copy_path": self._copy_path,
@@ -1157,6 +1158,59 @@ class WorkspaceTool:
             },
         )
 
+    def _run_command_action(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        command = str(params.get("command") or "").strip()
+        if not command:
+            return ToolResult(ok=False, summary="No shell command was provided.", data={})
+        target_path = self._resolve_target_path(params.get("cwd") or params.get("path") or params.get("root_path"))
+        root_path = self._default_root_for_path(target_path)
+        permission = self._ensure_grant(
+            root_path,
+            capabilities=("shell",),
+            ctx=ctx,
+            objective=command,
+            kind="grant",
+            continuation_action="run_command",
+            continuation_params=params,
+        )
+        if permission is not None:
+            return permission
+
+        validation_error = self._validate_shell_command(command)
+        if validation_error is not None:
+            return ToolResult(ok=False, summary=validation_error, data={"root_path": str(root_path), "command": command})
+
+        argv = shlex.split(command)
+        command_cwd = target_path if target_path.exists() and target_path.is_dir() else root_path
+        result = self._run_command_result(argv, cwd=command_cwd, timeout=self.shell_timeout_seconds)
+        ok = result["exit_code"] == 0
+        summary = f"Command {'succeeded' if ok else 'failed'}: {command}"
+        artifact = {
+            "root_path": str(root_path),
+            "command": command,
+            "cwd": str(command_cwd),
+            "exit_code": result["exit_code"],
+            "stdout": result["stdout"],
+            "stderr": result["stderr"],
+            "ok": ok,
+        }
+        return ToolResult(
+            ok=ok,
+            summary=summary,
+            data={
+                "root_path": str(root_path),
+                "command": command,
+                "cwd": str(command_cwd),
+                "exit_code": result["exit_code"],
+                "stdout": result["stdout"],
+                "stderr": result["stderr"],
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "workspace_command_result:latest": artifact,
+                },
+            },
+        )
+
     def _abort_request(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         request_id = str(params.get("request_id", "")).strip()
         request = self.db.get_approval_request(request_id)
@@ -1575,11 +1629,25 @@ class WorkspaceTool:
         cwd: Path | None = None,
         timeout: int | None = None,
     ) -> dict[str, str]:
+        result = self._run_command_result(argv, cwd=cwd, timeout=timeout, check=True)
+        return {
+            "stdout": str(result["stdout"]),
+            "stderr": str(result["stderr"]),
+        }
+
+    def _run_command_result(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path | None = None,
+        timeout: int | None = None,
+        check: bool = False,
+    ) -> dict[str, str | int]:
         result = subprocess.run(
             argv,
             cwd=str(cwd) if cwd else None,
             capture_output=True,
-            check=True,
+            check=check,
             text=True,
             timeout=timeout,
             env={
@@ -1595,6 +1663,7 @@ class WorkspaceTool:
             },
         )
         return {
+            "exit_code": result.returncode,
             "stdout": result.stdout[: self.shell_output_chars],
             "stderr": result.stderr[: self.shell_output_chars],
         }
@@ -1888,6 +1957,24 @@ class WorkspaceTool:
                 },
                 writes=True,
                 produces_artifacts=("workspace_patch", "workspace_file"),
+            ),
+            "run_command": ActionSpec(
+                tool=self.name,
+                action="run_command",
+                description="Run a single allowed local shell command inside the approved workspace and return its exit code and output.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "cwd": {"type": "string"},
+                        "path": {"type": "string"},
+                        "root_path": {"type": "string"},
+                        "objective": {"type": "string"},
+                    },
+                    "required": ["command"],
+                },
+                writes=True,
+                produces_artifacts=("workspace_command_result",),
             ),
             "git_status": ActionSpec(
                 tool=self.name,

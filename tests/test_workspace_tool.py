@@ -628,6 +628,7 @@ def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> No
     assert description["actions"]["write_file"]["produces_artifacts"] == ["workspace_patch", "workspace_file"]
     assert description["actions"]["apply_patch"]["produces_artifacts"] == ["workspace_patch", "workspace_file"]
     assert description["actions"]["create_file"]["produces_artifacts"] == ["workspace_patch", "workspace_file"]
+    assert description["actions"]["run_command"]["produces_artifacts"] == ["workspace_command_result"]
     assert "prepare_change" not in description["actions"]
     db.close()
 
@@ -786,4 +787,60 @@ def test_prepare_shell_action_enforces_policy_and_apply_runs_locally(tmp_path) -
     )
     assert applied.ok is True
     assert str(root.resolve()) in applied.data["stdout"]
+    db.close()
+
+
+def test_run_command_returns_structured_success_and_failure_results(tmp_path) -> None:
+    root = tmp_path / "repo"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    success = tool.invoke(
+        "run_command",
+        {"command": "pwd", "cwd": str(nested)},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert success.ok is True
+    assert success.data["exit_code"] == 0
+    assert success.data["cwd"] == str(nested.resolve())
+    assert success.data["stdout"].strip() == str(nested.resolve())
+    assert success.data["artifacts"]["workspace_command_result:latest"]["ok"] is True
+
+    failure = tool.invoke(
+        "run_command",
+        {"command": "bash -lc 'echo boom >&2; exit 7'", "path": str(root)},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert failure.ok is False
+    assert failure.data["exit_code"] == 7
+    assert "boom" in failure.data["stderr"]
+    assert failure.data["artifacts"]["workspace_command_result:latest"]["ok"] is False
+    db.close()
+
+
+def test_run_command_requires_grant_and_enforces_policy(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    db = Database(tmp_path / "jclaw.db")
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    gated = tool.invoke(
+        "run_command",
+        {"command": "pwd", "path": str(root)},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert gated.needs_confirmation is True
+    assert gated.data["request_kind"] == "grant"
+
+    _grant_all(db, root)
+    blocked = tool.invoke(
+        "run_command",
+        {"command": "curl https://example.com", "path": str(root)},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert blocked.ok is False
+    assert "not allowed" in blocked.summary.lower() or "blocked" in blocked.summary.lower()
     db.close()

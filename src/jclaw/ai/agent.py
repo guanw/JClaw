@@ -605,6 +605,7 @@ class AssistantAgent:
             is_workspace_file = {"target_path", "start_line", "end_line", "line_count", "content"}.issubset(value.keys())
             is_workspace_diff = {"git_root", "status", "diff", "has_unstaged", "has_staged"}.issubset(value.keys())
             is_workspace_patch = {"target_path", "operation", "touched_files", "diff"}.issubset(value.keys())
+            is_workspace_command_result = {"command", "cwd", "exit_code", "stdout", "stderr", "ok"}.issubset(value.keys())
             for index, (key, item) in enumerate(value.items()):
                 if index >= 8:
                     preview["__truncated__"] = True
@@ -618,6 +619,10 @@ class AssistantAgent:
                     preview[str(key)] = f"{text[:4000]}..." if len(text) > 4000 else text
                     continue
                 if isinstance(item, str) and key == "diff" and is_workspace_patch:
+                    text = item.strip()
+                    preview[str(key)] = f"{text[:4000]}..." if len(text) > 4000 else text
+                    continue
+                if isinstance(item, str) and key in {"stdout", "stderr"} and is_workspace_command_result:
                     text = item.strip()
                     preview[str(key)] = f"{text[:4000]}..." if len(text) > 4000 else text
                     continue
@@ -649,6 +654,10 @@ class AssistantAgent:
             "touched_files",
             "diff_preview",
             "content",
+            "cwd",
+            "exit_code",
+            "stdout",
+            "stderr",
             "line_count",
             "start_line",
             "end_line",
