@@ -118,6 +118,12 @@ class WorkspaceTool:
                     "entries": 10,
                     "touched_files": 10,
                 },
+                "result_previews": {
+                    "content": 4000,
+                    "diff": 4000,
+                    "stdout": 4000,
+                    "stderr": 4000,
+                },
                 "artifact_previews": {
                     "workspace_file": {"content": 4000},
                     "workspace_diff": {"diff": 4000},
@@ -1090,7 +1096,15 @@ class WorkspaceTool:
             root_path=str(git_root),
             capabilities=("git",),
             objective=objective or str(plan["summary"]),
-            payload=plan,
+            payload={
+                **plan,
+                "continuation": {
+                    "tool": self.name,
+                    "approve_action": "apply_git_request",
+                    "abort_action": "abort_request",
+                    "params": {},
+                },
+            },
         )
         return ToolResult(
             ok=True,
@@ -1153,7 +1167,16 @@ class WorkspaceTool:
         if validation_error is not None:
             return ToolResult(ok=False, summary=validation_error, data={"root_path": str(root_path)})
 
-        payload = {"command": command, "cwd": str(root_path)}
+        payload = {
+            "command": command,
+            "cwd": str(root_path),
+            "continuation": {
+                "tool": self.name,
+                "approve_action": "apply_shell_request",
+                "abort_action": "abort_request",
+                "params": {},
+            },
+        }
         request = self.db.create_approval_request(
             kind="shell_mutation",
             chat_id=ctx.chat_id,
@@ -1370,7 +1393,15 @@ class WorkspaceTool:
             root_path=str(mutation_root),
             capabilities=("write",),
             objective=objective or f"{operation} path",
-            payload=payload,
+            payload={
+                **payload,
+                "continuation": {
+                    "tool": self.name,
+                    "approve_action": "apply_path_request",
+                    "abort_action": "abort_request",
+                    "params": {},
+                },
+            },
         )
         destination_summary = "" if destination_path is None else f" -> {destination_path.relative_to(mutation_root)}"
         return ToolResult(
@@ -1490,6 +1521,12 @@ class WorkspaceTool:
         payload = {
             "summary": f"Prepared overwrite for {relative_path}.",
             "edits": [edit],
+            "continuation": {
+                "tool": self.name,
+                "approve_action": "apply_change_request",
+                "abort_action": "abort_request",
+                "params": {},
+            },
         }
         request = self.db.create_approval_request(
             kind="file_mutation",

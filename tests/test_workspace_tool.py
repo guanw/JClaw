@@ -634,6 +634,7 @@ def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> No
     assert description["controller_contract"]["artifact_previews"]["workspace_patch"]["diff"] == 4000
     assert description["controller_contract"]["artifact_previews"]["workspace_command_result"]["stdout"] == 4000
     assert "content" in description["controller_contract"]["result_fields"]
+    assert description["controller_contract"]["result_previews"]["content"] == 4000
     assert "prepare_change" not in description["actions"]
     db.close()
 
@@ -745,6 +746,11 @@ def test_prepare_and_apply_local_git_commit(tmp_path) -> None:
         ToolContext(chat_id="chat-1"),
     )
     assert preview.needs_confirmation is True
+    request = db.get_approval_request(preview.data["request_id"])
+    assert request is not None
+    assert request.payload["continuation"]["tool"] == "workspace"
+    assert request.payload["continuation"]["approve_action"] == "apply_git_request"
+    assert request.payload["continuation"]["abort_action"] == "abort_request"
 
     applied = tool.invoke(
         "apply_git_request",
@@ -784,6 +790,10 @@ def test_prepare_shell_action_enforces_policy_and_apply_runs_locally(tmp_path) -
         ToolContext(chat_id="chat-1"),
     )
     assert preview.needs_confirmation is True
+    request = db.get_approval_request(preview.data["request_id"])
+    assert request is not None
+    assert request.payload["continuation"]["approve_action"] == "apply_shell_request"
+    assert request.payload["continuation"]["abort_action"] == "abort_request"
 
     applied = tool.invoke(
         "apply_shell_request",

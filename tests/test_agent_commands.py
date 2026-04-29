@@ -1110,7 +1110,12 @@ def test_controller_state_preserves_workspace_file_and_diff_artifact_previews(tm
             },
         },
     )
-    runtime.append(Observation.from_tool_result(result))
+    runtime.append(
+        Observation.from_tool_result(
+            result,
+            controller_contract=agent.tools.get("workspace").describe()["controller_contract"],
+        )
+    )
     controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
         [{"tool": "workspace", "action": "read_file", "reason": "Inspect file", "result": result}],
         runtime,
@@ -1122,6 +1127,9 @@ def test_controller_state_preserves_workspace_file_and_diff_artifact_previews(tm
     assert len(file_preview) == 4003
     assert len(diff_preview) > 220
     assert len(diff_preview) == 4003
+    latest_preview = controller_state["latest_observation"]["data_preview"]["content"]
+    assert len(latest_preview) > 220
+    assert len(latest_preview) == 4003
     db.close()
 
 
@@ -1539,6 +1547,42 @@ def test_workspace_path_mutation_approval_applies_request(tmp_path) -> None:
     apply_reply = agent.handle_text("chat-1", f"/approve {preview.data['request_id']}")
     assert "Applied approved path request" in apply_reply
     assert (repo_root / "renamed.txt").exists()
+    db.close()
+
+
+def test_workspace_abort_request_uses_request_continuation(tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    target = repo_root / "notes.txt"
+    target.write_text("hello\n", encoding="utf-8")
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=repo_root,
+    )
+    db = Database(config.daemon.db_path)
+    db.upsert_grant(str(repo_root.resolve()), ("write",), "chat-1")
+    agent = AssistantAgent(config, db, DummyLLM())
+
+    preview = agent.tools.get("workspace").invoke(
+        "rename_path",
+        {"path": str(target), "new_name": "renamed.txt"},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert preview.needs_confirmation is True
+
+    abort_reply = agent.handle_text("chat-1", f"/abort {preview.data['request_id']}")
+    assert f"Aborted request {preview.data['request_id']}." in abort_reply
+    assert target.exists()
+    assert not (repo_root / "renamed.txt").exists()
     db.close()
 
 

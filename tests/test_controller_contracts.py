@@ -89,6 +89,29 @@ def test_observation_from_tool_result_truncates_large_preview_values() -> None:
     assert len(observation.data_preview["error"]) == 223
 
 
+def test_observation_from_tool_result_uses_controller_contract_preview_rules() -> None:
+    result = ToolResult(
+        ok=True,
+        summary="Read source file.",
+        data={
+            "content": "x" * 5000,
+            "line_count": 200,
+            "artifacts": {},
+        },
+    )
+
+    observation = Observation.from_tool_result(
+        result,
+        controller_contract={
+            "result_fields": ["content", "line_count"],
+            "result_previews": {"content": 4000},
+        },
+    )
+
+    assert observation.data_preview["line_count"] == 200
+    assert len(observation.data_preview["content"]) == 4003
+
+
 def test_decision_from_dict_validates_tool_call_shape() -> None:
     decision = Decision.from_dict(
         {

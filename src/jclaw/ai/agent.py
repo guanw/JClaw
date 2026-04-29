@@ -237,38 +237,26 @@ class AssistantAgent:
                 f"Granted {', '.join(grant.capabilities)} access for {grant.root_path}. "
                 f"Grant id: {grant.id}"
             )
-            continuation = request.payload.get("continuation", {})
-            if not isinstance(continuation, dict):
-                return grant_message
-            tool = str(continuation.get("tool", "")).strip()
-            action = str(continuation.get("action", "")).strip()
-            params = continuation.get("params", {})
-            if not tool or not action or not isinstance(params, dict):
-                return grant_message
-            result = self.tools.invoke(
-                tool,
-                action,
-                params,
-                ToolContext(chat_id=chat_id, user_id="approval"),
+            continuation_result = self._dispatch_request_continuation(
+                request,
+                key="approve_action",
+                fallback_key="action",
+                chat_id=chat_id,
+                user_id="approval",
             )
-            formatted = self.tools.get(tool).format_result(action, result)
-            return f"{grant_message}\n\n{formatted}"
-        action_map = {
-            "file_mutation": "apply_change_request",
-            "path_mutation": "apply_path_request",
-            "git_mutation": "apply_git_request",
-            "shell_mutation": "apply_shell_request",
-        }
-        action = action_map.get(request.kind)
-        if action is None:
-            return f"Approval request kind '{request.kind}' is not supported."
-        result = self.tools.invoke(
-            "workspace",
-            action,
-            {"request_id": request_id},
-            ToolContext(chat_id=chat_id, user_id="approval"),
+            if continuation_result is None:
+                return grant_message
+            return f"{grant_message}\n\n{continuation_result}"
+        continuation_result = self._dispatch_request_continuation(
+            request,
+            key="approve_action",
+            fallback_key="action",
+            chat_id=chat_id,
+            user_id="approval",
         )
-        return self.tools.get("workspace").format_result(action, result)
+        if continuation_result is None:
+            return f"Approval request kind '{request.kind}' is not supported."
+        return continuation_result
 
     def _deny(self, chat_id: str, remainder: str) -> str:
         request_id = remainder.strip()
@@ -305,13 +293,47 @@ class AssistantAgent:
         request = self.db.get_approval_request(request_id)
         if request is None or request.chat_id != chat_id:
             return "Request not found."
-        result = self.tools.invoke(
-            "workspace",
-            "abort_request",
-            {"request_id": request_id},
-            ToolContext(chat_id=chat_id, user_id="abort"),
+        if request.status != "pending":
+            return f"Request {request_id} is already {request.status}."
+        continuation_result = self._dispatch_request_continuation(
+            request,
+            key="abort_action",
+            chat_id=chat_id,
+            user_id="abort",
         )
-        return self._format_tool_result(result)
+        if continuation_result is not None:
+            return continuation_result
+        self.db.update_approval_request_status(request_id, "aborted")
+        return f"Aborted request {request_id}."
+
+    def _dispatch_request_continuation(
+        self,
+        request: Any,
+        *,
+        key: str,
+        chat_id: str,
+        user_id: str,
+        fallback_key: str = "",
+    ) -> str | None:
+        continuation = request.payload.get("continuation", {})
+        if not isinstance(continuation, dict):
+            return None
+        tool = str(continuation.get("tool", "")).strip()
+        action = str(continuation.get(key, "")).strip()
+        if not action and fallback_key:
+            action = str(continuation.get(fallback_key, "")).strip()
+        params = continuation.get("params", {})
+        if not tool or not action or not isinstance(params, dict):
+            return None
+        continuation_params = dict(params)
+        continuation_params.setdefault("request_id", request.request_id)
+        result = self.tools.invoke(
+            tool,
+            action,
+            continuation_params,
+            ToolContext(chat_id=chat_id, user_id=user_id),
+        )
+        return self.tools.get(tool).format_result(action, result)
 
     def _handle_tool_request(self, chat_id: str, text: str, *, user_name: str) -> str | None:
         return self._run_tool_loop(chat_id, text, user_name=user_name)
@@ -388,7 +410,12 @@ class AssistantAgent:
                     }
                 )
                 runtime.last_decision = decision
-                runtime.append(Observation.from_tool_result(result))
+                runtime.append(
+                    Observation.from_tool_result(
+                        result,
+                        controller_contract=self._tool_controller_contract(decision.tool),
+                    )
+                )
                 if result.needs_confirmation:
                     return self._compose_tool_reply(
                         chat_id,

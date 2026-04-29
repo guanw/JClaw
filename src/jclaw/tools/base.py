@@ -100,7 +100,7 @@ class Observation:
         }
 
     @classmethod
-    def from_tool_result(cls, result: ToolResult) -> "Observation":
+    def from_tool_result(cls, result: ToolResult, *, controller_contract: dict[str, Any] | None = None) -> "Observation":
         data = result.data if isinstance(result.data, dict) else {}
         artifacts = data.get("artifacts", {})
         normalized_artifacts = dict(artifacts) if isinstance(artifacts, dict) else {}
@@ -116,7 +116,7 @@ class Observation:
             summary=result.summary,
             artifacts=normalized_artifacts,
             artifact_types=artifact_types,
-            data_preview=cls._build_data_preview(data),
+            data_preview=cls._build_data_preview(data, controller_contract=controller_contract),
             missing_requirements=cls._normalize_string_list(data.get("missing_requirements", [])),
             suggested_next_actions=cls._normalize_string_list(data.get("suggested_next_actions", [])),
             needs_confirmation=result.needs_confirmation,
@@ -136,9 +136,31 @@ class Observation:
         return [str(item).strip() for item in value if str(item).strip()]
 
     @classmethod
-    def _build_data_preview(cls, data: dict[str, Any]) -> dict[str, Any]:
+    def _build_data_preview(cls, data: dict[str, Any], *, controller_contract: dict[str, Any] | None = None) -> dict[str, Any]:
+        contract = controller_contract if isinstance(controller_contract, dict) else {}
+        result_fields = [str(item) for item in contract.get("result_fields", []) if str(item).strip()]
+        list_fields = contract.get("list_fields", {})
+        result_previews = contract.get("result_previews", {})
         excluded_keys = {"artifacts", "missing_requirements", "suggested_next_actions"}
         preview: dict[str, Any] = {}
+        if result_fields or (isinstance(list_fields, dict) and bool(list_fields)):
+            for key in result_fields:
+                if key in excluded_keys or key not in data:
+                    continue
+                preview[key] = cls._preview_value(data[key], field_name=key, preview_limits=result_previews)
+            if isinstance(list_fields, dict):
+                for key, limit in list_fields.items():
+                    if key in excluded_keys or key not in data or not isinstance(data[key], list):
+                        continue
+                    try:
+                        count = int(limit)
+                    except (TypeError, ValueError):
+                        continue
+                    preview[str(key)] = [
+                        cls._preview_value(item, preview_limits=result_previews, depth=1)
+                        for item in data[key][:count]
+                    ]
+            return preview
         for index, (key, value) in enumerate(data.items()):
             if key in excluded_keys:
                 continue
@@ -149,23 +171,40 @@ class Observation:
         return preview
 
     @classmethod
-    def _preview_value(cls, value: Any, *, depth: int = 0) -> Any:
+    def _preview_value(
+        cls,
+        value: Any,
+        *,
+        depth: int = 0,
+        field_name: str = "",
+        preview_limits: dict[str, Any] | None = None,
+    ) -> Any:
         if value is None or isinstance(value, bool | int | float):
             return value
         if isinstance(value, str):
             text = value.strip()
-            return f"{text[:220]}..." if len(text) > 220 else text
+            limit_value = (preview_limits or {}).get(field_name)
+            limit = int(limit_value) if isinstance(limit_value, int | float) and int(limit_value) > 0 else 220
+            return f"{text[:limit]}..." if len(text) > limit else text
         if depth >= 2:
             return f"<{type(value).__name__}>"
         if isinstance(value, list):
-            return [cls._preview_value(item, depth=depth + 1) for item in value[:3]]
+            return [
+                cls._preview_value(item, depth=depth + 1, preview_limits=preview_limits)
+                for item in value[:3]
+            ]
         if isinstance(value, dict):
             preview: dict[str, Any] = {}
             for index, (key, item) in enumerate(value.items()):
                 if index >= 8:
                     preview["__truncated__"] = True
                     break
-                preview[str(key)] = cls._preview_value(item, depth=depth + 1)
+                preview[str(key)] = cls._preview_value(
+                    item,
+                    depth=depth + 1,
+                    field_name=str(key),
+                    preview_limits=preview_limits,
+                )
             return preview
         return str(value)
 

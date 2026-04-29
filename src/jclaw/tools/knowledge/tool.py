@@ -97,6 +97,9 @@ class KnowledgeTool:
                     "unsupported_files": 10,
                     "citations": 4,
                 },
+                "result_previews": {
+                    "summary_text": self.text_preview_chars,
+                },
             },
         }
 
