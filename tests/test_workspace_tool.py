@@ -451,6 +451,79 @@ def test_format_result_includes_snippet_content_and_diff_text(tmp_path) -> None:
     db.close()
 
 
+def test_list_file_symbols_returns_python_symbols(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "app.py"
+    target.write_text(
+        "class Greeter:\n"
+        "    def hello(self):\n"
+        "        return 'hi'\n\n"
+        "def top_level():\n"
+        "    return Greeter()\n",
+        encoding="utf-8",
+    )
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    result = tool.invoke("list_file_symbols", {"path": str(target)}, ToolContext(chat_id="chat-1"))
+
+    assert result.ok is True
+    assert result.data["match_count"] == 3
+    assert {item["name"] for item in result.data["symbols"]} == {"Greeter", "hello", "top_level"}
+    assert result.data["artifacts"]["workspace_symbol_search:latest"]["mode"] == "list_file_symbols"
+    db.close()
+
+
+def test_find_symbol_returns_exact_python_definitions(tmp_path) -> None:
+    root = tmp_path / "repo"
+    pkg = root / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "one.py").write_text("def target():\n    return 1\n", encoding="utf-8")
+    (pkg / "two.py").write_text("class Wrapper:\n    def target(self):\n        return 2\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    result = tool.invoke("find_symbol", {"name": "target", "path": str(root)}, ToolContext(chat_id="chat-1"))
+
+    assert result.ok is True
+    assert result.data["match_count"] == 2
+    assert {item["path"] for item in result.data["matches"]} == {"pkg/one.py", "pkg/two.py"}
+    assert all(item["name"] == "target" for item in result.data["matches"])
+    db.close()
+
+
+def test_find_references_returns_python_occurrences_with_match_type(tmp_path) -> None:
+    root = tmp_path / "repo"
+    pkg = root / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "one.py").write_text(
+        "def target():\n"
+        "    return 1\n\n"
+        "value = target()\n",
+        encoding="utf-8",
+    )
+    (pkg / "two.py").write_text(
+        "from pkg.one import target\n"
+        "result = target()\n",
+        encoding="utf-8",
+    )
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    result = tool.invoke("find_references", {"name": "target", "path": str(root)}, ToolContext(chat_id="chat-1"))
+
+    assert result.ok is True
+    assert result.data["match_count"] == 4
+    assert result.data["matches"][0]["match_type"] == "definition"
+    assert any(item["match_type"] == "reference" for item in result.data["matches"])
+    assert result.data["artifacts"]["workspace_symbol_search:latest"]["mode"] == "find_references"
+    db.close()
+
+
 def test_create_file_writes_immediately_and_emits_patch_and_file_artifacts(tmp_path) -> None:
     root = tmp_path / "repo"
     root.mkdir()
@@ -624,16 +697,21 @@ def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> No
     assert description["actions"]["git_status"]["produces_artifacts"] == ["workspace_git_status"]
     assert description["actions"]["read_file"]["produces_artifacts"] == ["workspace_file"]
     assert description["actions"]["read_snippet"]["produces_artifacts"] == ["workspace_file"]
+    assert description["actions"]["list_file_symbols"]["produces_artifacts"] == ["workspace_symbol_search"]
+    assert description["actions"]["find_symbol"]["produces_artifacts"] == ["workspace_symbol_search"]
+    assert description["actions"]["find_references"]["produces_artifacts"] == ["workspace_symbol_search"]
     assert description["actions"]["git_diff"]["produces_artifacts"] == ["workspace_diff"]
     assert description["actions"]["write_file"]["produces_artifacts"] == ["workspace_patch", "workspace_file"]
     assert description["actions"]["apply_patch"]["produces_artifacts"] == ["workspace_patch", "workspace_file"]
     assert description["actions"]["create_file"]["produces_artifacts"] == ["workspace_patch", "workspace_file"]
     assert description["actions"]["run_command"]["produces_artifacts"] == ["workspace_command_result"]
+    assert description["controller_contract"]["artifact_previews"]["workspace_symbol_search"]["query"] == 220
     assert description["controller_contract"]["artifact_previews"]["workspace_file"]["content"] == 4000
     assert description["controller_contract"]["artifact_previews"]["workspace_diff"]["diff"] == 4000
     assert description["controller_contract"]["artifact_previews"]["workspace_patch"]["diff"] == 4000
     assert description["controller_contract"]["artifact_previews"]["workspace_command_result"]["stdout"] == 4000
     assert "content" in description["controller_contract"]["result_fields"]
+    assert "match_count" in description["controller_contract"]["result_fields"]
     assert description["controller_contract"]["result_previews"]["content"] == 4000
     assert "prepare_change" not in description["actions"]
     db.close()
