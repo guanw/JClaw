@@ -2,24 +2,17 @@ from __future__ import annotations
 
 import mimetypes
 from pathlib import Path
-from typing import Callable
 
 from jclaw.tools.knowledge.base import KnowledgeReader
-from jclaw.tools.knowledge.readers.image_reader import ImageReader
 from jclaw.tools.knowledge.readers.pdf_reader import PdfReaderTool
 from jclaw.tools.knowledge.readers.text_reader import TextReader
 
 
 class KnowledgeReaderRegistry:
-    def __init__(
-        self,
-        *,
-        analyze_image: Callable[[Path], dict[str, object] | None] | None = None,
-    ) -> None:
+    def __init__(self) -> None:
         self._readers: list[KnowledgeReader] = [
             TextReader(),
             PdfReaderTool(),
-            ImageReader(analyze_image),
         ]
 
     def get_reader(self, path: Path) -> KnowledgeReader | None:

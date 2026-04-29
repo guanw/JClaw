@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
-from typing import Any, Callable
+from typing import Any
 
 from jclaw.core.db import Database
 from jclaw.core.defaults import (
@@ -42,9 +42,9 @@ class KnowledgeTool:
         base_dir: str | Path,
         repo_root: str | Path,
         *,
-        summarize_documents: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
-        answer_question: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
-        analyze_image: Callable[[Path], dict[str, object] | None] | None = None,
+        summarize_documents: Any | None = None,
+        answer_question: Any | None = None,
+        analyze_image: Any | None = None,
         options: dict[str, Any] | None = None,
     ) -> None:
         self.db = db
@@ -52,9 +52,6 @@ class KnowledgeTool:
         self.root.mkdir(parents=True, exist_ok=True)
         self.repo_root = Path(repo_root).expanduser().resolve()
         self.home_dir = Path.home().expanduser().resolve()
-        self._summarize_documents = summarize_documents
-        self._answer_question = answer_question
-        self._analyze_image = analyze_image
         options = options or {}
         self.max_file_read_bytes = int(options.get("max_file_read_bytes", KNOWLEDGE_MAX_FILE_READ_BYTES))
         self.max_folder_scan_files = int(options.get("max_folder_scan_files", KNOWLEDGE_MAX_FOLDER_SCAN_FILES))
@@ -62,7 +59,7 @@ class KnowledgeTool:
         self.max_total_chunks = int(options.get("max_total_chunks", KNOWLEDGE_MAX_TOTAL_CHUNKS))
         self.text_preview_chars = int(options.get("text_preview_chars", KNOWLEDGE_TEXT_PREVIEW_CHARS))
         self.max_answer_citations = int(options.get("max_answer_citations", KNOWLEDGE_MAX_ANSWER_CITATIONS))
-        self.registry = KnowledgeReaderRegistry(analyze_image=self._analyze_image)
+        self.registry = KnowledgeReaderRegistry()
 
     def describe(self) -> dict[str, Any]:
         specs = self._action_specs()
@@ -85,14 +82,6 @@ class KnowledgeTool:
                 ".toml",
                 ".csv",
                 ".pdf",
-                ".png",
-                ".jpg",
-                ".jpeg",
-                ".webp",
-                ".gif",
-                ".tiff",
-                ".tif",
-                ".icns",
             ],
             "supports_followup": True,
         }
@@ -104,11 +93,7 @@ class KnowledgeTool:
             lines.append(f"Grounded: {data['grounded']}")
         if "partial" in data:
             lines.append(f"Partial: {data['partial']}")
-        if data.get("answer"):
-            lines.append(f"Answer:\n{str(data['answer'])[:2000]}")
-        if data.get("summary_text"):
-            lines.append(f"Summary:\n{str(data['summary_text'])[:2000]}")
-        if data.get("unsupported_files") and (data.get("partial") or not data.get("answer") and not data.get("summary_text")):
+        if data.get("unsupported_files") and data.get("partial"):
             lines.append("Unsupported files:")
             for item in data["unsupported_files"][:10]:
                 lines.append(f"- {item['path']}: {item['reason']}")
@@ -130,8 +115,6 @@ class KnowledgeTool:
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handlers = {
             "analyze_paths": self._analyze_paths,
-            "summarize_folder": self._summarize_folder,
-            "answer_from_paths": self._answer_from_paths,
         }
         if action not in handlers:
             raise ValueError(f"unsupported knowledge action: {action}")
@@ -174,103 +157,6 @@ class KnowledgeTool:
                 "allow_tool_followup": True,
                 "artifacts": {
                     "knowledge_context:latest": self._knowledge_context_artifact(payload),
-                },
-            },
-        )
-
-    def _summarize_folder(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        raw_path = params.get("path") or params.get("root_path")
-        if not raw_path:
-            return ToolResult(ok=False, summary="No folder path was provided.", data={})
-        folder_path = self._resolve_target_path(raw_path)
-        permission = self._ensure_read_grants(
-            [folder_path],
-            ctx=ctx,
-            objective=str(params.get("objective", "Summarize folder contents")).strip(),
-            continuation_action="summarize_folder",
-            continuation_params=params,
-        )
-        if permission is not None:
-            return permission
-        docs, unsupported, scan_meta = self._collect_documents([folder_path])
-        payload = self._build_analysis_payload(docs, unsupported, scan_meta)
-        if not docs:
-            payload.update({"grounded": False, "partial": bool(unsupported), "answer": ""})
-            return ToolResult(
-                ok=True,
-                summary="No readable files were found in the requested folder.",
-                data={
-                    **payload,
-                    "allow_tool_followup": True,
-                    "artifacts": {
-                        "knowledge_context:latest": self._knowledge_context_artifact(payload),
-                    },
-                },
-            )
-        summary_result = self._run_summary_model(payload)
-        payload.update(summary_result)
-        return ToolResult(
-            ok=True,
-            summary="Summarized readable files in the requested folder.",
-            data={
-                **payload,
-                "allow_tool_followup": True,
-                "artifacts": {
-                    "knowledge_context:latest": self._knowledge_context_artifact(payload),
-                },
-            },
-        )
-
-    def _answer_from_paths(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        question = str(params.get("question", "")).strip()
-        if not question:
-            return ToolResult(ok=False, summary="No question was provided for knowledge lookup.", data={})
-        requested_paths = self._coerce_paths(params)
-        if not requested_paths:
-            return ToolResult(ok=False, summary="No paths were provided for knowledge lookup.", data={})
-        permission = self._ensure_read_grants(
-            requested_paths,
-            ctx=ctx,
-            objective=question,
-            continuation_action="answer_from_paths",
-            continuation_params=params,
-        )
-        if permission is not None:
-            return permission
-        docs, unsupported, scan_meta = self._collect_documents(requested_paths)
-        payload = self._build_analysis_payload(docs, unsupported, scan_meta)
-        if not docs:
-            payload.update(
-                {
-                    "answer": "I could not find readable evidence in the requested paths.",
-                    "grounded": False,
-                    "partial": bool(unsupported),
-                    "citations": [],
-                }
-            )
-            return ToolResult(
-                ok=True,
-                summary="No readable evidence was available for the requested question.",
-                data={
-                    **payload,
-                    "allow_tool_followup": True,
-                    "artifacts": {
-                        "knowledge_context:latest": self._knowledge_context_artifact(payload),
-                        "knowledge_answer:latest": self._knowledge_answer_artifact(payload),
-                    },
-                },
-            )
-        answer_result = self._run_answer_model(question, payload)
-        payload.update(answer_result)
-        return ToolResult(
-            ok=True,
-            summary="Answered from local file evidence.",
-            data={
-                **payload,
-                "allow_tool_followup": True,
-                "artifacts": {
-                    "knowledge_context:latest": self._knowledge_context_artifact(payload),
-                    "knowledge_answer:latest": self._knowledge_answer_artifact(payload),
                 },
             },
         )
@@ -404,89 +290,6 @@ class KnowledgeTool:
             "scanned_files": scan_meta["scanned_files"],
             "scan_truncated": scan_meta["scan_truncated"],
         }
-
-    def _run_summary_model(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self._summarize_documents is None:
-            citations = self._select_citations(payload["chunks"], [])
-            return {
-                "answer": "",
-                "summary_text": "Readable files were extracted, but no knowledge summarizer is configured.",
-                "citations": citations,
-                "grounded": False,
-                "partial": True,
-            }
-        result = self._summarize_documents(payload)
-        summary_text = ""
-        cited_ids: list[str] = []
-        if isinstance(result, dict):
-            summary_text = str(result.get("summary", "")).strip()
-            raw_ids = result.get("cited_chunk_ids", [])
-            if isinstance(raw_ids, list):
-                cited_ids = [str(item).strip() for item in raw_ids if str(item).strip()]
-        citations = self._select_citations(payload["chunks"], cited_ids)
-        return {
-            "answer": "",
-            "summary_text": summary_text or "Summary unavailable.",
-            "citations": citations,
-            "grounded": bool(citations),
-            "partial": payload["partial"] or not bool(citations),
-        }
-
-    def _run_answer_model(self, question: str, payload: dict[str, Any]) -> dict[str, Any]:
-        if self._answer_question is None:
-            citations = self._select_citations(payload["chunks"], [])
-            return {
-                "answer": "Knowledge answering is unavailable because no answer model is configured.",
-                "citations": citations,
-                "grounded": False,
-                "partial": True,
-            }
-        result = self._answer_question({"question": question, **payload})
-        answer = ""
-        cited_ids: list[str] = []
-        grounded = False
-        partial = True
-        if isinstance(result, dict):
-            answer = str(result.get("answer", "")).strip()
-            raw_ids = result.get("cited_chunk_ids", [])
-            if isinstance(raw_ids, list):
-                cited_ids = [str(item).strip() for item in raw_ids if str(item).strip()]
-            grounded = bool(result.get("grounded", False))
-            partial = bool(result.get("partial", False))
-        citations = self._select_citations(payload["chunks"], cited_ids)
-        if not citations:
-            grounded = False
-            partial = True
-        if not answer:
-            answer = "I could not answer the question from the extracted file evidence."
-        return {
-            "answer": answer,
-            "citations": citations,
-            "grounded": grounded,
-            "partial": partial or payload["partial"],
-        }
-
-    def _select_citations(
-        self,
-        chunks: list[dict[str, Any]],
-        cited_ids: list[str],
-    ) -> list[dict[str, Any]]:
-        chunk_map = {str(item["chunk_id"]): item for item in chunks}
-        citations: list[dict[str, Any]] = []
-        for chunk_id in cited_ids[: self.max_answer_citations]:
-            chunk = chunk_map.get(chunk_id)
-            if not chunk:
-                continue
-            citations.append(
-                {
-                    "chunk_id": chunk_id,
-                    "path": str(chunk["path"]),
-                    "excerpt": str(chunk["text"])[: self.text_preview_chars],
-                    "start_offset": int(chunk["start_offset"]),
-                    "end_offset": int(chunk["end_offset"]),
-                }
-            )
-        return citations
 
     def _chunk_documents(self, documents: list[ExtractedDocument]) -> list[DocumentChunk]:
         chunks: list[DocumentChunk] = []
@@ -629,37 +432,6 @@ class KnowledgeTool:
                 reads=True,
                 produces_artifacts=("knowledge_context",),
             ),
-            "summarize_folder": ActionSpec(
-                tool=self.name,
-                action="summarize_folder",
-                description="Summarize readable files inside an approved folder.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "root_path": {"type": "string"},
-                        "objective": {"type": "string"},
-                    },
-                },
-                reads=True,
-                produces_artifacts=("knowledge_context",),
-            ),
-            "answer_from_paths": ActionSpec(
-                tool=self.name,
-                action="answer_from_paths",
-                description="Answer a grounded question from approved local file contents.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "paths": {"type": "array", "items": {"type": "string"}},
-                        "path": {"type": "string"},
-                        "question": {"type": "string"},
-                    },
-                    "required": ["question"],
-                },
-                reads=True,
-                produces_artifacts=("knowledge_context", "knowledge_answer"),
-            ),
         }
 
     def _knowledge_context_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -667,14 +439,6 @@ class KnowledgeTool:
             "requested_paths": payload.get("requested_paths", []),
             "supported_files": payload.get("supported_files", [])[:5],
             "unsupported_files": payload.get("unsupported_files", [])[:5],
-            "grounded": payload.get("grounded"),
-            "partial": payload.get("partial"),
-            "citations": payload.get("citations", [])[:5],
-        }
-
-    def _knowledge_answer_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "answer": payload.get("answer", ""),
             "grounded": payload.get("grounded"),
             "partial": payload.get("partial"),
             "citations": payload.get("citations", [])[:5],

@@ -1125,6 +1125,54 @@ def test_controller_state_preserves_workspace_file_and_diff_artifact_previews(tm
     db.close()
 
 
+def test_controller_state_preserves_workspace_patch_artifact_preview(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(config, db, DummyLLM())
+    runtime = RuntimeState(request="patch source code")
+    long_patch = "z" * 5000
+    result = ToolResult(
+        ok=True,
+        summary="Applied patch.",
+        data={
+            "touched_files": ["app.py"],
+            "diff_preview": long_patch,
+            "artifacts": {
+                "workspace_patch:latest": {
+                    "root_path": "/repo",
+                    "target_path": "/repo/app.py",
+                    "operation": "apply_patch",
+                    "touched_files": ["app.py"],
+                    "diff": long_patch,
+                }
+            },
+        },
+    )
+    runtime.append(Observation.from_tool_result(result))
+
+    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+        [{"tool": "workspace", "action": "apply_patch", "reason": "Patch file", "result": result}],
+        runtime,
+    )
+
+    patch_preview = controller_state["artifacts_by_type"]["workspace_patch"]["diff"]
+    assert len(patch_preview) > 220
+    assert len(patch_preview) == 4003
+    db.close()
+
+
 def test_tool_result_for_controller_includes_workspace_read_fields(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),
@@ -1357,7 +1405,7 @@ def test_workspace_and_knowledge_defaults_are_centralized(tmp_path) -> None:
     assert config.knowledge.max_answer_citations == KNOWLEDGE_MAX_ANSWER_CITATIONS
 
 
-def test_workspace_preview_pauses_until_approval(tmp_path) -> None:
+def test_workspace_write_file_preview_pauses_until_approval(tmp_path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     target = repo_root / "app.py"
@@ -1381,8 +1429,7 @@ def test_workspace_preview_pauses_until_approval(tmp_path) -> None:
         db,
         SequenceLLM(
             [
-                '{"type":"tool_call","tool":"workspace","action":"prepare_change","params":{"objective":"Update app.py","path":"app.py"},"reason":"Local code change requested."}',
-                '{"summary":"Update app.py","edits":[{"path":"app.py","reason":"Update greeting","new_content":"print(\\"goodbye\\")\\n"}]}',
+                '{"type":"tool_call","tool":"workspace","action":"write_file","params":{"path":"app.py","content":"print(\\"goodbye\\")\\n","objective":"Replace app.py with the updated greeting."},"reason":"Local code change requested."}',
             ]
         ),
     )
@@ -1393,10 +1440,9 @@ def test_workspace_preview_pauses_until_approval(tmp_path) -> None:
     assert target.read_text(encoding="utf-8") == "print('hello')\n"
 
     approval_reply = agent.handle_text("chat-1", f"/approve {request_id}")
-    assert "Granted" in approval_reply
-    assert "Prepared a change preview" in approval_reply
+    assert "Granted write, read access" in approval_reply or "Granted read, write access" in approval_reply
+    assert "Prepared an overwrite preview" in approval_reply
     preview_request_id = approval_reply.split("Request: ", 1)[1].splitlines()[0]
-    assert target.read_text(encoding="utf-8") == "print('hello')\n"
 
     apply_reply = agent.handle_text("chat-1", f"/approve {preview_request_id}")
     assert "Applied approved file change request" in apply_reply
@@ -1591,126 +1637,6 @@ def test_workspace_grant_approval_resumes_inspect_root(tmp_path) -> None:
     db.close()
 
 
-def test_llm_selected_tool_routes_to_knowledge_and_returns_raw_result(tmp_path) -> None:
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    target = repo_root / "notes.txt"
-    target.write_text("Project owner is guan.\n", encoding="utf-8")
-    config = Config(
-        provider=ProviderConfig(),
-        telegram=TelegramConfig(),
-        daemon=DaemonConfig(
-            state_dir=tmp_path,
-            db_path=tmp_path / "jclaw.db",
-            stdout_log=tmp_path / "stdout.log",
-            stderr_log=tmp_path / "stderr.log",
-        ),
-        memory=MemoryConfig(),
-        config_path=tmp_path / "config.toml",
-        repo_root=repo_root,
-    )
-    db = Database(config.daemon.db_path)
-    db.upsert_grant(str(repo_root.resolve()), ("read",), "chat-1")
-    agent = AssistantAgent(
-        config,
-        db,
-        SequenceLLM(
-            [
-                '{"type":"tool_call","tool":"knowledge","action":"answer_from_paths","params":{"paths":["notes.txt"],"question":"Who is the project owner?"},"reason":"The user is asking about local file contents."}',
-                '{"answer":"The project owner is guan.","cited_chunk_ids":["notes.txt:1"],"grounded":true,"partial":false}',
-                "Hallucinated post-processing that should not be used.",
-            ]
-        ),
-    )
-
-    reply = agent.handle_text("chat-1", "who is the project owner in notes.txt?")
-    assert "Answer:" in reply
-    assert "The project owner is guan." in reply
-    assert "Citations:" in reply
-    assert "notes.txt [notes.txt:1]" in reply
-    assert "Supported files:" not in reply
-    assert "Hallucinated post-processing" not in reply
-    db.close()
-
-
-def test_knowledge_summary_recovers_from_truncated_json(tmp_path) -> None:
-    config = Config(
-        provider=ProviderConfig(),
-        telegram=TelegramConfig(),
-        daemon=DaemonConfig(
-            state_dir=tmp_path,
-            db_path=tmp_path / "jclaw.db",
-            stdout_log=tmp_path / "stdout.log",
-            stderr_log=tmp_path / "stderr.log",
-        ),
-        memory=MemoryConfig(),
-        config_path=tmp_path / "config.toml",
-        repo_root=Path("/Users/guanw/Documents/JClaw"),
-    )
-    db = Database(config.daemon.db_path)
-    agent = AssistantAgent(
-        config,
-        db,
-        SequenceLLM(
-            [
-                '```json\n{"summary":"The documents concern a real estate transaction.","cited_chunk_ids":["file.pdf:1","file.pdf:2',
-            ]
-        ),
-    )
-
-    result = agent._summarize_knowledge_documents_via_llm(  # noqa: SLF001
-        {
-            "chunks": [
-                {"chunk_id": "file.pdf:1", "path": "/tmp/file.pdf", "text": "sample", "start_offset": 0, "end_offset": 6},
-            ]
-        }
-    )
-    assert result is not None
-    assert result["summary"] == "The documents concern a real estate transaction."
-    db.close()
-
-
-def test_tool_loop_can_chain_workspace_then_knowledge(tmp_path) -> None:
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    folder = repo_root / "Desktop" / "819"
-    folder.mkdir(parents=True)
-    (folder / "a-contract.txt").write_text("Purchase price is $1,250,000.\n", encoding="utf-8")
-    (folder / "b-notes.txt").write_text("Secondary note.\n", encoding="utf-8")
-
-    config = Config(
-        provider=ProviderConfig(),
-        telegram=TelegramConfig(),
-        daemon=DaemonConfig(
-            state_dir=tmp_path,
-            db_path=tmp_path / "jclaw.db",
-            stdout_log=tmp_path / "stdout.log",
-            stderr_log=tmp_path / "stderr.log",
-        ),
-        memory=MemoryConfig(),
-        config_path=tmp_path / "config.toml",
-        repo_root=repo_root,
-    )
-    db = Database(config.daemon.db_path)
-    db.upsert_grant(str(repo_root.resolve()), ("read",), "chat-1")
-    agent = AssistantAgent(
-        config,
-        db,
-        SequenceLLM(
-            [
-                '{"type":"tool_call","tool":"workspace","action":"inspect_root","params":{"path":"Desktop/819","objective":"Inspect Desktop/819"},"reason":"Need to inspect the folder first."}',
-                '{"type":"tool_call","tool":"knowledge","action":"answer_from_paths","params":{"paths":["Desktop/819"],"question":"Summarize the first file found in this folder."},"reason":"Now answer from the folder contents."}',
-                '{"answer":"The first file says the purchase price is $1,250,000.","cited_chunk_ids":["a-contract.txt:1"],"grounded":true,"partial":false}',
-                '{"type":"complete","tool":"","action":"","params":{},"reason":"The grounded answer satisfies the request."}',
-            ]
-        ),
-    )
-
-    reply = agent.handle_text("chat-1", "summarize the first file you found in Desktop/819 folder")
-    assert "Answer:" in reply
-    assert "purchase price is $1,250,000" in reply
-    assert "a-contract.txt [a-contract.txt:1]" in reply
-    db.close()
 
 
 def test_tool_loop_continuation_is_generic_not_tool_specific(tmp_path) -> None:

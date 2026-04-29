@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import base64
-import mimetypes
 from datetime import datetime
 from pathlib import Path
 import re
@@ -71,7 +69,6 @@ class AssistantAgent:
                     self.db,
                     config.daemon.state_dir / "tools" / "workspace",
                     config.repo_root,
-                    draft_change=self._draft_workspace_change_via_llm,
                     options={
                         "max_steps": config.workspace.max_steps,
                         "shell_timeout_seconds": config.workspace.shell_timeout_seconds,
@@ -89,9 +86,6 @@ class AssistantAgent:
                     self.db,
                     config.daemon.state_dir / "tools" / "knowledge",
                     config.repo_root,
-                    summarize_documents=self._summarize_knowledge_documents_via_llm,
-                    answer_question=self._answer_from_knowledge_documents_via_llm,
-                    analyze_image=self._analyze_knowledge_image_via_llm,
                     options={
                         "max_file_read_bytes": config.knowledge.max_file_read_bytes,
                         "max_folder_scan_files": config.knowledge.max_folder_scan_files,
@@ -610,6 +604,7 @@ class AssistantAgent:
             preview: dict[str, Any] = {}
             is_workspace_file = {"target_path", "start_line", "end_line", "line_count", "content"}.issubset(value.keys())
             is_workspace_diff = {"git_root", "status", "diff", "has_unstaged", "has_staged"}.issubset(value.keys())
+            is_workspace_patch = {"target_path", "operation", "touched_files", "diff"}.issubset(value.keys())
             for index, (key, item) in enumerate(value.items()):
                 if index >= 8:
                     preview["__truncated__"] = True
@@ -619,6 +614,10 @@ class AssistantAgent:
                     preview[str(key)] = f"{text[:4000]}..." if len(text) > 4000 else text
                     continue
                 if isinstance(item, str) and key == "diff" and is_workspace_diff:
+                    text = item.strip()
+                    preview[str(key)] = f"{text[:4000]}..." if len(text) > 4000 else text
+                    continue
+                if isinstance(item, str) and key == "diff" and is_workspace_patch:
                     text = item.strip()
                     preview[str(key)] = f"{text[:4000]}..." if len(text) > 4000 else text
                     continue
@@ -647,6 +646,8 @@ class AssistantAgent:
             "summary_text",
             "request_id",
             "request_kind",
+            "touched_files",
+            "diff_preview",
             "content",
             "line_count",
             "start_line",
@@ -806,198 +807,3 @@ class AssistantAgent:
             return parsed if isinstance(parsed, dict) else None
         except json.JSONDecodeError:
             return None
-
-    def _draft_workspace_change_via_llm(self, payload: dict[str, Any]) -> dict[str, Any] | None:
-        files = payload.get("files", [])
-        if not isinstance(files, list) or not files:
-            return None
-        prompt = (
-            "You are JClaw's workspace change drafter.\n"
-            "You are given an objective and a bounded set of candidate files from a local workspace.\n"
-            "Draft file edits using only the provided files. Do not invent extra files.\n"
-            "Return strict JSON only with schema:\n"
-            '{"summary": string, "edits": [{"path": string, "reason": string, "new_content": string}]}\n'
-            "Use the provided relative file paths exactly.\n"
-            "If no safe or useful change can be prepared, return an empty edits list."
-        )
-        raw = self.llm.chat(
-            [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=True)},
-            ]
-        )
-        LOGGER.info("workspace change drafter raw response: %s", raw)
-        parsed = self._parse_json_object(raw)
-        if not parsed:
-            return None
-        edits = parsed.get("edits", [])
-        if not isinstance(edits, list):
-            return None
-        return {
-            "summary": str(parsed.get("summary", "Prepared workspace change.")),
-            "edits": edits,
-        }
-
-    def _summarize_knowledge_documents_via_llm(self, payload: dict[str, Any]) -> dict[str, Any] | None:
-        chunks = payload.get("chunks", [])
-        if not isinstance(chunks, list) or not chunks:
-            return None
-        compact_payload = {
-            **payload,
-            "chunks": chunks[:8],
-        }
-        prompt = (
-            "You are JClaw's knowledge summarizer.\n"
-            "Summarize only from the provided local file chunks.\n"
-            "Do not invent facts or files. If the evidence is weak, say so.\n"
-            "Return minified JSON only. Do not use markdown fences.\n"
-            "Keep the summary under 120 words.\n"
-            "Cite at most 3 chunk ids.\n"
-            "Schema:\n"
-            '{"summary": string, "cited_chunk_ids": [string]}\n'
-            "Only cite chunk ids that appear in the payload."
-        )
-        raw = self.llm.chat(
-            [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps(compact_payload, ensure_ascii=True)},
-            ]
-        )
-        LOGGER.info("knowledge summarizer raw response: %s", raw)
-        parsed = self._parse_json_object(raw)
-        return self._coerce_knowledge_summary_response(raw, parsed)
-
-    def _answer_from_knowledge_documents_via_llm(self, payload: dict[str, Any]) -> dict[str, Any] | None:
-        chunks = payload.get("chunks", [])
-        question = str(payload.get("question", "")).strip()
-        if not isinstance(chunks, list) or not chunks or not question:
-            return None
-        compact_payload = {
-            **payload,
-            "chunks": chunks[:8],
-        }
-        prompt = (
-            "You are JClaw's grounded knowledge answerer.\n"
-            "Answer only from the provided local file chunks.\n"
-            "If the evidence is insufficient, say that directly.\n"
-            "Do not invent facts, file contents, or citations.\n"
-            "Return minified JSON only. Do not use markdown fences.\n"
-            "Keep the answer under 120 words.\n"
-            "Cite at most 3 chunk ids.\n"
-            "Schema:\n"
-            '{"answer": string, "cited_chunk_ids": [string], "grounded": boolean, "partial": boolean}\n'
-            "Only cite chunk ids that appear in the payload."
-        )
-        raw = self.llm.chat(
-            [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps(compact_payload, ensure_ascii=True)},
-            ]
-        )
-        LOGGER.info("knowledge answerer raw response: %s", raw)
-        parsed = self._parse_json_object(raw)
-        return self._coerce_knowledge_answer_response(raw, parsed)
-
-    def _coerce_knowledge_summary_response(
-        self,
-        raw: str,
-        parsed: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        if parsed:
-            cited_chunk_ids = parsed.get("cited_chunk_ids", [])
-            if not isinstance(cited_chunk_ids, list):
-                cited_chunk_ids = []
-            return {
-                "summary": str(parsed.get("summary", "")).strip(),
-                "cited_chunk_ids": [str(item).strip() for item in cited_chunk_ids if str(item).strip()][:3],
-            }
-        summary = self._extract_json_string_field(raw, "summary")
-        cited_chunk_ids = self._extract_json_string_list_field(raw, "cited_chunk_ids")
-        if not summary and not cited_chunk_ids:
-            return None
-        return {
-            "summary": summary,
-            "cited_chunk_ids": cited_chunk_ids[:3],
-        }
-
-    def _coerce_knowledge_answer_response(
-        self,
-        raw: str,
-        parsed: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        if parsed:
-            cited_chunk_ids = parsed.get("cited_chunk_ids", [])
-            if not isinstance(cited_chunk_ids, list):
-                cited_chunk_ids = []
-            return {
-                "answer": str(parsed.get("answer", "")).strip(),
-                "cited_chunk_ids": [str(item).strip() for item in cited_chunk_ids if str(item).strip()][:3],
-                "grounded": bool(parsed.get("grounded", False)),
-                "partial": bool(parsed.get("partial", True)),
-            }
-        answer = self._extract_json_string_field(raw, "answer")
-        cited_chunk_ids = self._extract_json_string_list_field(raw, "cited_chunk_ids")
-        if not answer and not cited_chunk_ids:
-            return None
-        return {
-            "answer": answer,
-            "cited_chunk_ids": cited_chunk_ids[:3],
-            "grounded": bool(answer),
-            "partial": True,
-        }
-
-    def _extract_json_string_field(self, raw: str, field_name: str) -> str:
-        pattern = rf'"{re.escape(field_name)}"\s*:\s*"((?:[^"\\]|\\.)*)'
-        match = re.search(pattern, raw, flags=re.DOTALL)
-        if not match:
-            return ""
-        value = match.group(1)
-        value = value.replace('\\"', '"').replace("\\n", "\n").replace("\\\\", "\\")
-        return value.strip()
-
-    def _extract_json_string_list_field(self, raw: str, field_name: str) -> list[str]:
-        marker = f'"{field_name}"'
-        start = raw.find(marker)
-        if start == -1:
-            return []
-        bracket_start = raw.find("[", start)
-        if bracket_start == -1:
-            return []
-        chunk = raw[bracket_start:]
-        return re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', chunk)
-
-    def _analyze_knowledge_image_via_llm(self, path: Path) -> dict[str, object] | None:
-        mime_type, _ = mimetypes.guess_type(path.name)
-        mime = mime_type or "image/png"
-        image_bytes = path.read_bytes()
-        data_url = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
-        prompt = (
-            "You are JClaw's image understanding helper.\n"
-            "Describe the image and extract any visible text that matters for later file-grounded Q&A.\n"
-            "Be concise and factual. Do not infer beyond the visible content.\n"
-            "Return strict JSON only with schema:\n"
-            '{"text": string, "warnings": [string]}\n'
-        )
-        raw = self.llm.chat_content(
-            [
-                {"role": "system", "content": prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Analyze this local image for visible content and text."},
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                    ],
-                },
-            ]
-        )
-        LOGGER.info("knowledge image analyzer raw response: %s", raw)
-        parsed = self._parse_json_object(raw)
-        if not parsed:
-            return None
-        warnings = parsed.get("warnings", [])
-        if not isinstance(warnings, list):
-            warnings = []
-        return {
-            "text": str(parsed.get("text", "")).strip(),
-            "warnings": [str(item).strip() for item in warnings if str(item).strip()],
-        }

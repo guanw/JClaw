@@ -451,36 +451,102 @@ def test_format_result_includes_snippet_content_and_diff_text(tmp_path) -> None:
     db.close()
 
 
-def test_prepare_change_previews_before_apply(tmp_path) -> None:
+def test_create_file_writes_immediately_and_emits_patch_and_file_artifacts(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "new.py"
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    created = tool.invoke(
+        "create_file",
+        {"path": str(target), "content": "print('hi')\n"},
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert created.ok is True
+    assert target.read_text(encoding="utf-8") == "print('hi')\n"
+    assert created.data["artifacts"]["workspace_patch:latest"]["operation"] == "create_file"
+    assert created.data["artifacts"]["workspace_file:latest"]["content"] == "print('hi')\n"
+    db.close()
+
+
+def test_apply_patch_writes_immediately_for_narrow_exact_match_edit(tmp_path) -> None:
     root = tmp_path / "repo"
     root.mkdir()
     target = root / "app.py"
     target.write_text("print('hello')\n", encoding="utf-8")
     db = Database(tmp_path / "jclaw.db")
     _grant_all(db, root)
-    tool = WorkspaceTool(
-        db,
-        tmp_path / "state",
-        root,
-        draft_change=lambda payload: {
-            "summary": "Update greeting.",
-            "edits": [
-                {
-                    "path": "app.py",
-                    "reason": "Change greeting text.",
-                    "new_content": "print('goodbye')\n",
-                }
-            ],
-        },
-    )
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
 
-    preview = tool.invoke(
-        "prepare_change",
-        {"objective": "Update the greeting in app.py", "path": str(target)},
+    patched = tool.invoke(
+        "apply_patch",
+        {
+            "path": str(target),
+            "hunks": [{"old_text": "hello", "new_text": "goodbye"}],
+        },
         ToolContext(chat_id="chat-1"),
     )
+
+    assert patched.ok is True
+    assert target.read_text(encoding="utf-8") == "print('goodbye')\n"
+    assert patched.data["artifacts"]["workspace_patch:latest"]["operation"] == "apply_patch"
+    assert "goodbye" in patched.data["diff_preview"]
+    db.close()
+
+
+def test_apply_patch_rejects_ambiguous_or_missing_matches(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "app.py"
+    target.write_text("value = 1\nvalue = 1\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    ambiguous = tool.invoke(
+        "apply_patch",
+        {
+            "path": str(target),
+            "hunks": [{"old_text": "value = 1", "new_text": "value = 2"}],
+        },
+        ToolContext(chat_id="chat-1"),
+    )
+    assert ambiguous.ok is False
+    assert "multiple locations" in ambiguous.summary.lower()
+
+    missing = tool.invoke(
+        "apply_patch",
+        {
+            "path": str(target),
+            "hunks": [{"old_text": "not present", "new_text": "value = 2"}],
+        },
+        ToolContext(chat_id="chat-1"),
+    )
+    assert missing.ok is False
+    assert "did not match" in missing.summary.lower()
+    db.close()
+
+
+def test_write_file_existing_non_empty_file_requires_approval_then_apply(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "app.py"
+    target.write_text("print('hello')\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    preview = tool.invoke(
+        "write_file",
+        {"path": str(target), "content": "print('goodbye')\n"},
+        ToolContext(chat_id="chat-1"),
+    )
+
     assert preview.needs_confirmation is True
-    assert "app.py" in preview.data["touched_files"]
+    assert "Approval required" in preview.summary
     assert "goodbye" not in target.read_text(encoding="utf-8")
 
     applied = tool.invoke(
@@ -559,7 +625,10 @@ def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> No
     assert description["actions"]["read_file"]["produces_artifacts"] == ["workspace_file"]
     assert description["actions"]["read_snippet"]["produces_artifacts"] == ["workspace_file"]
     assert description["actions"]["git_diff"]["produces_artifacts"] == ["workspace_diff"]
-    assert description["actions"]["prepare_change"]["requires_confirmation"] is True
+    assert description["actions"]["write_file"]["produces_artifacts"] == ["workspace_patch", "workspace_file"]
+    assert description["actions"]["apply_patch"]["produces_artifacts"] == ["workspace_patch", "workspace_file"]
+    assert description["actions"]["create_file"]["produces_artifacts"] == ["workspace_patch", "workspace_file"]
+    assert "prepare_change" not in description["actions"]
     db.close()
 
 

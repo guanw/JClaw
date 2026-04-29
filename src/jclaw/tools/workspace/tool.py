@@ -10,7 +10,7 @@ from pathlib import Path
 import shlex
 import shutil
 import subprocess
-from typing import Any, Callable
+from typing import Any
 
 from jclaw.core.db import Database
 from jclaw.core.defaults import (
@@ -50,7 +50,7 @@ class WorkspaceTool:
         base_dir: str | Path,
         repo_root: str | Path,
         *,
-        draft_change: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+        draft_change: Any | None = None,
         options: dict[str, Any] | None = None,
     ) -> None:
         self.db = db
@@ -58,7 +58,6 @@ class WorkspaceTool:
         self.root.mkdir(parents=True, exist_ok=True)
         self.repo_root = Path(repo_root).expanduser().resolve()
         self.home_dir = Path.home().expanduser().resolve()
-        self._draft_change = draft_change
         options = options or {}
         self.max_steps = int(options.get("max_steps", WORKSPACE_MAX_STEPS))
         self.shell_timeout_seconds = int(options.get("shell_timeout_seconds", WORKSPACE_SHELL_TIMEOUT_SECONDS))
@@ -181,7 +180,9 @@ class WorkspaceTool:
             "search_contents": self._search_contents,
             "read_file": self._read_file,
             "read_snippet": self._read_snippet,
-            "prepare_change": self._prepare_change,
+            "write_file": self._write_file,
+            "apply_patch": self._apply_patch,
+            "create_file": self._create_file,
             "rename_path": self._rename_path,
             "move_path": self._move_path,
             "copy_path": self._copy_path,
@@ -607,12 +608,13 @@ class WorkspaceTool:
             },
         )
 
-    def _prepare_change(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        objective = str(params.get("objective") or params.get("instruction") or "").strip()
-        if not objective:
-            return ToolResult(ok=False, summary="No change objective was provided.", data={})
-
-        target_path = self._resolve_target_path(params.get("path") or params.get("root_path"))
+    def _write_file(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        objective = str(params.get("objective", "Write local file")).strip()
+        if params.get("path") in (None, ""):
+            return ToolResult(ok=False, summary="Writing a file requires a path.", data={})
+        if "content" not in params:
+            return ToolResult(ok=False, summary="Writing a file requires content.", data={})
+        target_path = self._resolve_target_path(params.get("path"))
         root_path = self._default_root_for_path(target_path)
         permission = self._ensure_grant(
             root_path,
@@ -620,76 +622,162 @@ class WorkspaceTool:
             ctx=ctx,
             objective=objective,
             kind="grant",
-            continuation_action="prepare_change",
+            continuation_action="write_file",
             continuation_params=params,
         )
         if permission is not None:
             return permission
 
-        candidate_files = self._select_candidate_files(root_path=root_path, target_path=target_path, objective=objective)
-        if not candidate_files:
-            return ToolResult(
-                ok=False,
-                summary="I couldn't identify files to change. Specify a path inside an approved root.",
-                data={"root_path": str(root_path)},
-            )
-        if self._draft_change is None:
-            return ToolResult(
-                ok=False,
-                summary="Workspace drafting is unavailable because no change drafter is configured.",
-                data={"root_path": str(root_path)},
-            )
+        new_content = str(params.get("content", ""))
+        if target_path.exists():
+            file_state = self._read_text_file_state(target_path, include_full_text=True)
+            if file_state["error"]:
+                return ToolResult(
+                    ok=False,
+                    summary=str(file_state["error"]),
+                    data={"root_path": str(root_path), "target_path": str(target_path)},
+                )
+            before = str(file_state["full_text"])
+            if before == new_content:
+                return ToolResult(
+                    ok=True,
+                    summary=f"No changes needed for {target_path}.",
+                    data={
+                        "root_path": str(root_path),
+                        "target_path": str(target_path),
+                        "touched_files": [],
+                        "allow_tool_followup": True,
+                    },
+                )
+            if before:
+                return self._prepare_file_edit_request(
+                    root_path=root_path,
+                    target_path=target_path,
+                    before=before,
+                    after=new_content,
+                    ctx=ctx,
+                    objective=objective or f"Overwrite {target_path.name}",
+                )
 
-        file_payload = []
-        for candidate in candidate_files[: self.max_files_per_change]:
-            file_payload.append(
-                {
-                    "path": str(candidate.relative_to(root_path)),
-                    "content": self._read_text(candidate),
-                }
-            )
-        draft = self._draft_change(
-            {
-                "objective": objective,
-                "root_path": str(root_path),
-                "files": file_payload,
-            }
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(new_content, encoding="utf-8")
+        return self._direct_file_edit_result(
+            root_path=root_path,
+            target_path=target_path,
+            before="",
+            after=new_content,
+            summary=f"Wrote {target_path}.",
+            operation="write_file",
         )
-        if not draft or not isinstance(draft, dict):
-            return ToolResult(ok=False, summary="I couldn't prepare a workspace draft from the current workspace state.", data={})
 
-        edits = self._normalize_draft_edits(root_path=root_path, draft=draft)
-        if not edits:
+    def _create_file(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        objective = str(params.get("objective", "Create local file")).strip()
+        if params.get("path") in (None, ""):
+            return ToolResult(ok=False, summary="Creating a file requires a path.", data={})
+        if "content" not in params:
+            return ToolResult(ok=False, summary="Creating a file requires content.", data={})
+        target_path = self._resolve_target_path(params.get("path"))
+        root_path = self._default_root_for_path(target_path)
+        permission = self._ensure_grant(
+            root_path,
+            capabilities=("write",),
+            ctx=ctx,
+            objective=objective,
+            kind="grant",
+            continuation_action="create_file",
+            continuation_params=params,
+        )
+        if permission is not None:
+            return permission
+        if target_path.exists():
+            return ToolResult(
+                ok=False,
+                summary=f"{target_path} already exists. Use write_file or apply_patch instead.",
+                data={"root_path": str(root_path), "target_path": str(target_path)},
+            )
+        content = str(params.get("content", ""))
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(content, encoding="utf-8")
+        return self._direct_file_edit_result(
+            root_path=root_path,
+            target_path=target_path,
+            before="",
+            after=content,
+            summary=f"Created {target_path}.",
+            operation="create_file",
+        )
+
+    def _apply_patch(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        objective = str(params.get("objective", "Apply local patch")).strip()
+        if params.get("path") in (None, ""):
+            return ToolResult(ok=False, summary="Applying a patch requires a path.", data={})
+        raw_hunks = params.get("hunks")
+        if not isinstance(raw_hunks, list) or not raw_hunks:
+            return ToolResult(ok=False, summary="Applying a patch requires a non-empty hunks list.", data={})
+        target_path = self._resolve_target_path(params.get("path"))
+        root_path = self._default_root_for_path(target_path)
+        permission = self._ensure_grant(
+            root_path,
+            capabilities=("read", "write"),
+            ctx=ctx,
+            objective=objective,
+            kind="grant",
+            continuation_action="apply_patch",
+            continuation_params=params,
+        )
+        if permission is not None:
+            return permission
+        file_state = self._read_text_file_state(target_path, include_full_text=True)
+        if file_state["error"]:
+            return ToolResult(
+                ok=False,
+                summary=str(file_state["error"]),
+                data={"root_path": str(root_path), "target_path": str(target_path)},
+            )
+        before = str(file_state["full_text"])
+        after = before
+        for index, raw_hunk in enumerate(raw_hunks, start=1):
+            if not isinstance(raw_hunk, dict):
+                return ToolResult(ok=False, summary=f"Patch hunk {index} must be an object.", data={})
+            old_text = raw_hunk.get("old_text")
+            new_text = raw_hunk.get("new_text", "")
+            if not isinstance(old_text, str):
+                return ToolResult(ok=False, summary=f"Patch hunk {index} requires string old_text.", data={})
+            if not isinstance(new_text, str):
+                return ToolResult(ok=False, summary=f"Patch hunk {index} requires string new_text.", data={})
+            match_count = after.count(old_text)
+            if match_count == 0:
+                return ToolResult(
+                    ok=False,
+                    summary=f"Patch hunk {index} did not match the current file contents.",
+                    data={"root_path": str(root_path), "target_path": str(target_path)},
+                )
+            if match_count > 1:
+                return ToolResult(
+                    ok=False,
+                    summary=f"Patch hunk {index} matched multiple locations. Narrow the patch context.",
+                    data={"root_path": str(root_path), "target_path": str(target_path)},
+                )
+            after = after.replace(old_text, new_text, 1)
+        if after == before:
             return ToolResult(
                 ok=True,
-                summary="No file changes were prepared.",
-                data={"root_path": str(root_path), "implemented": True, "edits": []},
+                summary=f"No patch changes were needed for {target_path}.",
+                data={
+                    "root_path": str(root_path),
+                    "target_path": str(target_path),
+                    "touched_files": [],
+                    "allow_tool_followup": True,
+                },
             )
-
-        payload = {
-            "summary": str(draft.get("summary", "Prepared workspace edits.")),
-            "edits": edits,
-        }
-        request = self.db.create_approval_request(
-            kind="file_mutation",
-            chat_id=ctx.chat_id,
-            root_path=str(root_path),
-            capabilities=("read", "write"),
-            objective=objective,
-            payload=payload,
-        )
-        touched_files = [edit["relative_path"] for edit in edits]
-        return ToolResult(
-            ok=True,
-            summary=f"Prepared a change preview for {len(edits)} file(s). Approval required: {request.request_id}",
-            data={
-                "request_id": request.request_id,
-                "request_kind": request.kind,
-                "root_path": str(root_path),
-                "touched_files": touched_files,
-                "diff_preview": self._build_diff_preview(edits),
-            },
-            needs_confirmation=True,
+        target_path.write_text(after, encoding="utf-8")
+        return self._direct_file_edit_result(
+            root_path=root_path,
+            target_path=target_path,
+            before=before,
+            after=after,
+            summary=f"Applied patch to {target_path}.",
+            operation="apply_patch",
         )
 
     def _apply_change_request(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -715,7 +803,12 @@ class WorkspaceTool:
         return ToolResult(
             ok=True,
             summary=f"Applied approved file change request {request.request_id}.",
-            data={"request_id": request.request_id, "root_path": request.root_path, "touched_files": touched_files},
+            data={
+                "request_id": request.request_id,
+                "root_path": request.root_path,
+                "touched_files": touched_files,
+                "allow_tool_followup": True,
+            },
         )
 
     def _rename_path(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -1265,35 +1358,6 @@ class WorkspaceTool:
             return [cleaned]
         return [f"{prefix}{choice}{suffix}" for choice in choices]
 
-    def _normalize_draft_edits(self, *, root_path: Path, draft: dict[str, Any]) -> list[dict[str, str]]:
-        edits: list[dict[str, str]] = []
-        raw_edits = draft.get("edits", [])
-        if not isinstance(raw_edits, list):
-            return edits
-        for item in raw_edits[: self.max_files_per_change]:
-            if not isinstance(item, dict):
-                continue
-            raw_path = str(item.get("path", "")).strip()
-            if not raw_path:
-                continue
-            resolved = self._resolve_target_path(root_path / raw_path if not Path(raw_path).is_absolute() else raw_path)
-            if not self._path_within(resolved, root_path):
-                continue
-            before = self._read_text(resolved) if resolved.exists() else ""
-            after = str(item.get("new_content", ""))
-            if before == after:
-                continue
-            edits.append(
-                {
-                    "path": str(resolved),
-                    "relative_path": str(resolved.relative_to(root_path)),
-                    "before": before,
-                    "after": after,
-                    "reason": str(item.get("reason", "")).strip(),
-                }
-            )
-        return edits
-
     def _build_diff_preview(self, edits: list[dict[str, str]]) -> str:
         chunks: list[str] = []
         for edit in edits:
@@ -1308,6 +1372,114 @@ class WorkspaceTool:
             )
             chunks.append("\n".join(diff))
         return "\n\n".join(chunks)[: self.max_prepared_diff_bytes]
+
+    def _prepare_file_edit_request(
+        self,
+        *,
+        root_path: Path,
+        target_path: Path,
+        before: str,
+        after: str,
+        ctx: ToolContext,
+        objective: str,
+    ) -> ToolResult:
+        relative_path = str(target_path.relative_to(root_path))
+        edit = {
+            "path": str(target_path),
+            "relative_path": relative_path,
+            "before": before,
+            "after": after,
+            "reason": objective,
+        }
+        payload = {
+            "summary": f"Prepared overwrite for {relative_path}.",
+            "edits": [edit],
+        }
+        request = self.db.create_approval_request(
+            kind="file_mutation",
+            chat_id=ctx.chat_id,
+            root_path=str(root_path),
+            capabilities=("read", "write"),
+            objective=objective,
+            payload=payload,
+        )
+        return ToolResult(
+            ok=True,
+            summary=f"Prepared an overwrite preview for {target_path}. Approval required: {request.request_id}",
+            data={
+                "request_id": request.request_id,
+                "request_kind": request.kind,
+                "root_path": str(root_path),
+                "target_path": str(target_path),
+                "touched_files": [relative_path],
+                "diff_preview": self._build_diff_preview([edit]),
+            },
+            needs_confirmation=True,
+        )
+
+    def _direct_file_edit_result(
+        self,
+        *,
+        root_path: Path,
+        target_path: Path,
+        before: str,
+        after: str,
+        summary: str,
+        operation: str,
+    ) -> ToolResult:
+        relative_path = str(target_path.relative_to(root_path))
+        diff_preview = self._build_diff_preview(
+            [
+                {
+                    "path": str(target_path),
+                    "relative_path": relative_path,
+                    "before": before,
+                    "after": after,
+                    "reason": operation,
+                }
+            ]
+        )
+        after_bytes = after.encode("utf-8")
+        content = after_bytes[: self.max_internal_read_bytes].decode("utf-8", errors="ignore")
+        truncated = len(after_bytes) > self.max_internal_read_bytes
+        patch_artifact = {
+            "root_path": str(root_path),
+            "target_path": str(target_path),
+            "operation": operation,
+            "touched_files": [relative_path],
+            "diff": diff_preview,
+        }
+        file_artifact = {
+            "root_path": str(root_path),
+            "target_path": str(target_path),
+            "kind": "file",
+            "start_line": 1,
+            "end_line": len(after.splitlines()),
+            "line_count": len(after.splitlines()),
+            "content": content,
+            "truncated": truncated,
+            "git_root": None if self._detect_git_root(target_path) is None else str(self._detect_git_root(target_path)),
+        }
+        return ToolResult(
+            ok=True,
+            summary=summary,
+            data={
+                "root_path": str(root_path),
+                "target_path": str(target_path),
+                "touched_files": [relative_path],
+                "diff_preview": diff_preview,
+                "content": content,
+                "line_count": len(after.splitlines()),
+                "char_count": len(content),
+                "bytes_read": min(len(after_bytes), self.max_internal_read_bytes),
+                "truncated": truncated,
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "workspace_patch:latest": patch_artifact,
+                    "workspace_file:latest": file_artifact,
+                },
+            },
+        )
 
     def _select_candidate_files(self, *, root_path: Path, target_path: Path, objective: str) -> list[Path]:
         if target_path.exists() and target_path.is_file():
@@ -1659,21 +1831,63 @@ class WorkspaceTool:
                 reads=True,
                 produces_artifacts=("workspace_file",),
             ),
-            "prepare_change": ActionSpec(
+            "write_file": ActionSpec(
                 tool=self.name,
-                action="prepare_change",
-                description="Prepare a preview for local file or code changes.",
+                action="write_file",
+                description="Replace the full contents of a local text file. Use this for full-file rewrites, not narrow edits.",
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "objective": {"type": "string"},
-                        "instruction": {"type": "string"},
                         "path": {"type": "string"},
-                        "root_path": {"type": "string"},
+                        "content": {"type": "string"},
+                        "objective": {"type": "string"},
                     },
+                    "required": ["path", "content"],
                 },
                 writes=True,
-                requires_confirmation=True,
+                produces_artifacts=("workspace_patch", "workspace_file"),
+            ),
+            "apply_patch": ActionSpec(
+                tool=self.name,
+                action="apply_patch",
+                description="Apply one or more narrow exact-match text replacements to an existing local text file. Prefer this over write_file for small edits.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "hunks": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old_text": {"type": "string"},
+                                    "new_text": {"type": "string"},
+                                },
+                                "required": ["old_text", "new_text"],
+                            },
+                        },
+                        "objective": {"type": "string"},
+                    },
+                    "required": ["path", "hunks"],
+                },
+                writes=True,
+                produces_artifacts=("workspace_patch", "workspace_file"),
+            ),
+            "create_file": ActionSpec(
+                tool=self.name,
+                action="create_file",
+                description="Create a new local text file with the provided contents.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                        "objective": {"type": "string"},
+                    },
+                    "required": ["path", "content"],
+                },
+                writes=True,
+                produces_artifacts=("workspace_patch", "workspace_file"),
             ),
             "git_status": ActionSpec(
                 tool=self.name,

@@ -37,43 +37,6 @@ def test_analyze_paths_requires_grant_then_extracts_text_file(tmp_path) -> None:
     db.close()
 
 
-def test_answer_from_paths_returns_grounded_answer_with_citations(tmp_path) -> None:
-    root = tmp_path / "repo"
-    root.mkdir()
-    target = root / "notes.txt"
-    target.write_text("Project owner is guan.\nDeadline is Friday.\n", encoding="utf-8")
-    db = Database(tmp_path / "jclaw.db")
-    _grant_read(db, root)
-
-    def answer_question(payload):  # noqa: ANN001
-        return {
-            "answer": "The project owner is guan.",
-            "cited_chunk_ids": [payload["chunks"][0]["chunk_id"]],
-            "grounded": True,
-            "partial": False,
-        }
-
-    tool = KnowledgeTool(
-        db,
-        tmp_path / "state",
-        root,
-        answer_question=answer_question,
-    )
-    result = tool.invoke(
-        "answer_from_paths",
-        {"paths": [str(target)], "question": "Who is the project owner?"},
-        ToolContext(chat_id="chat-1"),
-    )
-    assert result.ok is True
-    assert result.data["answer"] == "The project owner is guan."
-    assert result.data["grounded"] is True
-    assert result.data["partial"] is False
-    assert result.data["citations"][0]["path"] == str(target.resolve())
-    assert result.data["allow_tool_followup"] is True
-    assert result.data["artifacts"]["knowledge_answer:latest"]["answer"] == "The project owner is guan."
-    db.close()
-
-
 def test_pdf_reader_extracts_text(monkeypatch, tmp_path) -> None:
     target = tmp_path / "scan.pdf"
     target.write_bytes(b"%PDF-1.4")
@@ -121,68 +84,22 @@ def test_analyze_paths_supports_pdf_files(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.parametrize("suffix", [".png", ".webp", ".gif", ".tiff", ".tif", ".icns"])
-def test_analyze_paths_supports_images_with_callback(tmp_path, suffix: str) -> None:
+def test_analyze_paths_marks_images_unsupported_without_llm_callback(tmp_path, suffix: str) -> None:
     root = tmp_path / "repo"
     root.mkdir()
     target = root / f"scan{suffix}"
     target.write_bytes(b"not-a-real-image-but-good-enough-for-the-stub")
     db = Database(tmp_path / "jclaw.db")
     _grant_read(db, root)
-
-    def analyze_image(path):  # noqa: ANN001
-        return {
-            "text": "Screenshot of a dashboard showing total revenue 42.",
-            "warnings": [],
-        }
-
-    tool = KnowledgeTool(
-        db,
-        tmp_path / "state",
-        root,
-        analyze_image=analyze_image,
-    )
+    tool = KnowledgeTool(db, tmp_path / "state", root)
 
     result = tool.invoke("analyze_paths", {"paths": [str(target)]}, ToolContext(chat_id="chat-1"))
     assert result.ok is True
-    assert result.data["supported_files"][0]["path"] == str(target.resolve())
-    assert result.data["supported_files"][0]["file_type"] == "image"
-    assert result.data["grounded"] is True
-    assert "total revenue 42" in result.data["chunks"][0]["text"]
-    db.close()
-
-
-def test_answer_from_folder_preserves_deterministic_file_order(tmp_path) -> None:
-    root = tmp_path / "repo"
-    root.mkdir()
-    (root / "b-notes.txt").write_text("Second file.\n", encoding="utf-8")
-    (root / "a-contract.txt").write_text("First file.\n", encoding="utf-8")
-    db = Database(tmp_path / "jclaw.db")
-    _grant_read(db, root)
-
-    def answer_question(payload):  # noqa: ANN001
-        supported = payload["supported_files"]
-        assert supported[0]["path"].endswith("a-contract.txt")
-        assert supported[0]["order"] == 1
-        return {
-            "answer": "The first file is a-contract.txt.",
-            "cited_chunk_ids": [payload["chunks"][0]["chunk_id"]],
-            "grounded": True,
-            "partial": False,
-        }
-
-    tool = KnowledgeTool(
-        db,
-        tmp_path / "state",
-        root,
-        answer_question=answer_question,
-    )
-    result = tool.invoke(
-        "answer_from_paths",
-        {"paths": [str(root)], "question": "Summarize the first file you found."},
-        ToolContext(chat_id="chat-1"),
-    )
-    assert result.ok is True
-    assert result.data["answer"] == "The first file is a-contract.txt."
+    assert result.data["supported_files"] == []
+    assert result.data["grounded"] is False
+    assert result.data["partial"] is True
+    assert result.data["unsupported_files"][0]["path"] == str(target.resolve())
+    assert result.data["unsupported_files"][0]["reason"] == "Unsupported file type."
     db.close()
 
 
@@ -193,6 +110,5 @@ def test_knowledge_tool_describe_exposes_structured_action_specs(tmp_path) -> No
     description = tool.describe()
 
     assert description["actions"]["analyze_paths"]["produces_artifacts"] == ["knowledge_context"]
-    assert description["actions"]["answer_from_paths"]["produces_artifacts"] == ["knowledge_context", "knowledge_answer"]
-    assert description["actions"]["answer_from_paths"]["input_schema"]["required"] == ["question"]
+    assert sorted(description["actions"].keys()) == ["analyze_paths"]
     db.close()
