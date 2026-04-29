@@ -111,4 +111,6 @@ def test_knowledge_tool_describe_exposes_structured_action_specs(tmp_path) -> No
 
     assert description["actions"]["analyze_paths"]["produces_artifacts"] == ["knowledge_context"]
     assert sorted(description["actions"].keys()) == ["analyze_paths"]
+    assert sorted(description["controller_contract"]["list_fields"].keys()) == ["citations", "supported_files", "unsupported_files"]
+    assert "grounded" in description["controller_contract"]["result_fields"]
     db.close()

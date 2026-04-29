@@ -629,6 +629,11 @@ def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> No
     assert description["actions"]["apply_patch"]["produces_artifacts"] == ["workspace_patch", "workspace_file"]
     assert description["actions"]["create_file"]["produces_artifacts"] == ["workspace_patch", "workspace_file"]
     assert description["actions"]["run_command"]["produces_artifacts"] == ["workspace_command_result"]
+    assert description["controller_contract"]["artifact_previews"]["workspace_file"]["content"] == 4000
+    assert description["controller_contract"]["artifact_previews"]["workspace_diff"]["diff"] == 4000
+    assert description["controller_contract"]["artifact_previews"]["workspace_patch"]["diff"] == 4000
+    assert description["controller_contract"]["artifact_previews"]["workspace_command_result"]["stdout"] == 4000
+    assert "content" in description["controller_contract"]["result_fields"]
     assert "prepare_change" not in description["actions"]
     db.close()
 

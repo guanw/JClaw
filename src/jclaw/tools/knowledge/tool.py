@@ -84,6 +84,20 @@ class KnowledgeTool:
                 ".pdf",
             ],
             "supports_followup": True,
+            "controller_contract": {
+                "result_fields": [
+                    "grounded",
+                    "partial",
+                    "summary_text",
+                    "scanned_files",
+                    "scan_truncated",
+                ],
+                "list_fields": {
+                    "supported_files": 10,
+                    "unsupported_files": 10,
+                    "citations": 4,
+                },
+            },
         }
 
     def format_result(self, action: str, result: ToolResult) -> str:

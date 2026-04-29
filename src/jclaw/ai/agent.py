@@ -555,13 +555,14 @@ class AssistantAgent:
         runtime: RuntimeState,
     ) -> dict[str, Any]:
         now = self._controller_now()
+        artifact_preview_contracts = self._artifact_preview_contracts()
         observations: list[dict[str, Any]] = []
         start_index = max(0, len(steps) - MAX_CONTROLLER_OBSERVATIONS)
         for index, step in enumerate(steps[start_index:], start=start_index + 1):
             observation = (
                 runtime.observations[index - 1].to_dict()
                 if index - 1 < len(runtime.observations)
-                else self._tool_result_for_controller(step["result"])
+                else self._tool_result_for_controller(step["tool"], step["result"])
             )
             observations.append(
                 {
@@ -580,7 +581,11 @@ class AssistantAgent:
             "current_local_timezone": str(now.tzinfo or ""),
             "artifact_types": sorted(runtime.artifacts_by_type.keys()),
             "artifacts_by_type": {
-                str(key): self._preview_runtime_value(value)
+                str(key): self._preview_runtime_value(
+                    value,
+                    artifact_type=str(key),
+                    artifact_preview_contracts=artifact_preview_contracts,
+                )
                 for key, value in runtime.artifacts_by_type.items()
             },
             "latest_observation": runtime.last_observation.to_dict() if runtime.last_observation else {},
@@ -590,7 +595,14 @@ class AssistantAgent:
     def _controller_now(self) -> datetime:
         return datetime.now().astimezone()
 
-    def _preview_runtime_value(self, value: Any, *, depth: int = 0) -> Any:
+    def _preview_runtime_value(
+        self,
+        value: Any,
+        *,
+        depth: int = 0,
+        artifact_type: str = "",
+        artifact_preview_contracts: dict[str, dict[str, int]] | None = None,
+    ) -> Any:
         if value is None or isinstance(value, bool | int | float):
             return value
         if isinstance(value, str):
@@ -599,83 +611,47 @@ class AssistantAgent:
         if depth >= 2:
             return f"<{type(value).__name__}>"
         if isinstance(value, list):
-            return [self._preview_runtime_value(item, depth=depth + 1) for item in value[:3]]
+            return [
+                self._preview_runtime_value(
+                    item,
+                    depth=depth + 1,
+                    artifact_preview_contracts=artifact_preview_contracts,
+                )
+                for item in value[:3]
+            ]
         if isinstance(value, dict):
             preview: dict[str, Any] = {}
-            is_workspace_file = {"target_path", "start_line", "end_line", "line_count", "content"}.issubset(value.keys())
-            is_workspace_diff = {"git_root", "status", "diff", "has_unstaged", "has_staged"}.issubset(value.keys())
-            is_workspace_patch = {"target_path", "operation", "touched_files", "diff"}.issubset(value.keys())
-            is_workspace_command_result = {"command", "cwd", "exit_code", "stdout", "stderr", "ok"}.issubset(value.keys())
+            preview_limits = (artifact_preview_contracts or {}).get(artifact_type, {})
             for index, (key, item) in enumerate(value.items()):
                 if index >= 8:
                     preview["__truncated__"] = True
                     break
-                if isinstance(item, str) and key == "content" and is_workspace_file:
+                limit = preview_limits.get(str(key))
+                if isinstance(item, str) and isinstance(limit, int) and limit > 0:
                     text = item.strip()
-                    preview[str(key)] = f"{text[:4000]}..." if len(text) > 4000 else text
+                    preview[str(key)] = f"{text[:limit]}..." if len(text) > limit else text
                     continue
-                if isinstance(item, str) and key == "diff" and is_workspace_diff:
-                    text = item.strip()
-                    preview[str(key)] = f"{text[:4000]}..." if len(text) > 4000 else text
-                    continue
-                if isinstance(item, str) and key == "diff" and is_workspace_patch:
-                    text = item.strip()
-                    preview[str(key)] = f"{text[:4000]}..." if len(text) > 4000 else text
-                    continue
-                if isinstance(item, str) and key in {"stdout", "stderr"} and is_workspace_command_result:
-                    text = item.strip()
-                    preview[str(key)] = f"{text[:4000]}..." if len(text) > 4000 else text
-                    continue
-                preview[str(key)] = self._preview_runtime_value(item, depth=depth + 1)
+                preview[str(key)] = self._preview_runtime_value(
+                    item,
+                    depth=depth + 1,
+                    artifact_preview_contracts=artifact_preview_contracts,
+                )
             return preview
         return str(value)
 
-    def _tool_result_for_controller(self, result: ToolResult) -> dict[str, Any]:
+    def _tool_result_for_controller(self, tool_name: str, result: ToolResult) -> dict[str, Any]:
         data = result.data
         controller_data: dict[str, Any] = {
             "summary": result.summary,
             "needs_confirmation": result.needs_confirmation,
         }
-        for key in (
-            "root_path",
-            "target_path",
-            "exists",
-            "kind",
-            "entry_count",
-            "entries_truncated",
-            "supported_files",
-            "unsupported_files",
-            "grounded",
-            "partial",
-            "answer",
-            "summary_text",
-            "request_id",
-            "request_kind",
-            "touched_files",
-            "diff_preview",
-            "content",
-            "cwd",
-            "exit_code",
-            "stdout",
-            "stderr",
-            "line_count",
-            "start_line",
-            "end_line",
-            "char_count",
-            "bytes_read",
-            "truncated",
-            "git_root",
-            "status",
-            "diff",
-            "has_unstaged",
-            "has_staged",
-        ):
+        contract = self._tool_controller_contract(tool_name)
+        for key in contract.get("result_fields", []):
             if key in data:
                 controller_data[key] = data[key]
-        if "entries" in data:
-            controller_data["entries"] = data["entries"][:10]
-        if "citations" in data:
-            controller_data["citations"] = data["citations"][:4]
+        for key, limit in contract.get("list_fields", {}).items():
+            if key in data and isinstance(data[key], list):
+                controller_data[str(key)] = data[key][: int(limit)]
         return controller_data
 
     def _tool_catalog_for_prompt(self, available_tools: list[dict[str, Any]]) -> str:
@@ -687,19 +663,36 @@ class AssistantAgent:
             }
             if "actions" in tool:
                 entry["actions"] = tool["actions"]
-            for key in (
-                "dangerous",
-                "preview_required",
-                "read_only",
-                "grounded",
-                "supports_followup",
-                "path_resolution",
-                "supported_suffixes",
-            ):
-                if key in tool:
-                    entry[key] = tool[key]
+            for key, value in tool.items():
+                if key in {"name", "description", "actions", "controller_contract"}:
+                    continue
+                entry[key] = value
             catalog.append(entry)
         return json.dumps(catalog, ensure_ascii=True)
+
+    def _tool_controller_contract(self, tool_name: str) -> dict[str, Any]:
+        description = self.tools.get(tool_name).describe()
+        contract = description.get("controller_contract", {})
+        return dict(contract) if isinstance(contract, dict) else {}
+
+    def _artifact_preview_contracts(self) -> dict[str, dict[str, int]]:
+        contracts: dict[str, dict[str, int]] = {}
+        for tool in self.tools.list_tools():
+            controller_contract = tool.get("controller_contract", {})
+            if not isinstance(controller_contract, dict):
+                continue
+            artifact_previews = controller_contract.get("artifact_previews", {})
+            if not isinstance(artifact_previews, dict):
+                continue
+            for artifact_type, field_limits in artifact_previews.items():
+                if not isinstance(field_limits, dict):
+                    continue
+                contracts[str(artifact_type)] = {
+                    str(field): int(limit)
+                    for field, limit in field_limits.items()
+                    if isinstance(limit, int | float) and int(limit) > 0
+                }
+        return contracts
 
     def _compose_tool_reply(
         self,

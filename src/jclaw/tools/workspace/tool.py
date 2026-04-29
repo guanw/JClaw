@@ -86,6 +86,48 @@ class WorkspaceTool:
                 "common_home_aliases": sorted(self.COMMON_HOME_FOLDERS),
             },
             "supports_followup": True,
+            "controller_contract": {
+                "result_fields": [
+                    "root_path",
+                    "target_path",
+                    "exists",
+                    "kind",
+                    "entry_count",
+                    "entries_truncated",
+                    "request_id",
+                    "request_kind",
+                    "diff_preview",
+                    "content",
+                    "cwd",
+                    "exit_code",
+                    "stdout",
+                    "stderr",
+                    "line_count",
+                    "start_line",
+                    "end_line",
+                    "char_count",
+                    "bytes_read",
+                    "truncated",
+                    "git_root",
+                    "status",
+                    "diff",
+                    "has_unstaged",
+                    "has_staged",
+                ],
+                "list_fields": {
+                    "entries": 10,
+                    "touched_files": 10,
+                },
+                "artifact_previews": {
+                    "workspace_file": {"content": 4000},
+                    "workspace_diff": {"diff": 4000},
+                    "workspace_patch": {"diff": 4000},
+                    "workspace_command_result": {
+                        "stdout": 4000,
+                        "stderr": 4000,
+                    },
+                },
+            },
         }
 
     def format_result(self, action: str, result: ToolResult) -> str:

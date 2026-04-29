@@ -1266,7 +1266,7 @@ def test_tool_result_for_controller_includes_workspace_read_fields(tmp_path) -> 
         },
     )
 
-    controller_view = agent._tool_result_for_controller(result)  # noqa: SLF001
+    controller_view = agent._tool_result_for_controller("workspace", result)  # noqa: SLF001
 
     assert controller_view["content"] == "print('hello')\n"
     assert controller_view["line_count"] == 1
@@ -1317,6 +1317,7 @@ def test_tool_catalog_and_controller_prompt_bias_workspace_line_requests_to_read
     read_file = workspace_tool["actions"]["read_file"]["description"]
     read_snippet = workspace_tool["actions"]["read_snippet"]["description"]
 
+    assert "controller_contract" not in workspace_tool
     assert "Do not use this when the user asks for explicit line numbers" in read_file
     assert "Use this when the user asks for explicit line numbers" in read_snippet
 
