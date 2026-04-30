@@ -393,6 +393,7 @@ class AssistantAgent:
                             metadata={"loop_managed": True},
                         ),
                     )
+                    self._apply_tool_loop_state(execution, decision.tool, result)
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.exception(
                         "tool step failed tool=%s action=%s",
@@ -487,6 +488,21 @@ class AssistantAgent:
                     )
                 except Exception:  # noqa: BLE001
                     LOGGER.exception("failed to run tool loop cleanup for %s", tool_name)
+
+    def _apply_tool_loop_state(self, execution: ToolExecutionState, tool_name: str, result: ToolResult) -> None:
+        loop_state = result.loop_state
+        if loop_state is None:
+            return
+        if loop_state.clear:
+            execution.tool_state.pop(tool_name, None)
+            execution.finalizers.pop(tool_name, None)
+            return
+        if loop_state.state is not None:
+            execution.tool_state[tool_name] = dict(loop_state.state)
+        if loop_state.clear_finalizer:
+            execution.finalizers.pop(tool_name, None)
+        if loop_state.finalizer is not None:
+            execution.finalizers[tool_name] = loop_state.finalizer
 
     def _decide_next_tool_step(
         self,

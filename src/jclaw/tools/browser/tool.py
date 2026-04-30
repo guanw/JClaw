@@ -15,7 +15,7 @@ from jclaw.core.defaults import (
     BROWSER_VIEWPORT_HEIGHT,
     BROWSER_VIEWPORT_WIDTH,
 )
-from jclaw.tools.base import ActionSpec, ToolContext, ToolLoopFinalizer, ToolResult
+from jclaw.tools.base import ActionSpec, ToolContext, ToolLoopFinalizer, ToolLoopState, ToolResult
 from jclaw.tools.browser.artifacts import BrowserArtifactStore
 from jclaw.tools.browser.desktop_driver import DesktopBrowserDriver
 from jclaw.tools.browser.models import BrowserReasoner, Target
@@ -158,6 +158,30 @@ class BrowserTool:
             params=params,
             result={"ok": result.ok, "summary": result.summary, "data": result.data},
         )
+        return self._with_loop_state(result, action=action, params=params, ctx=ctx)
+
+    def _with_loop_state(self, result: ToolResult, *, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        if ctx.execution is None or result.loop_state is not None:
+            return result
+        session_id = str(result.data.get("session_id", "")).strip()
+        if not session_id:
+            return result
+        if action == "close_session":
+            result.loop_state = ToolLoopState(clear=True)
+            return result
+        auto_close = self._should_auto_close_session(params)
+        result.loop_state = ToolLoopState(
+            state={"session_id": session_id},
+            finalizer=(
+                ToolLoopFinalizer(
+                    action="close_session",
+                    params={"session_id": session_id},
+                )
+                if auto_close
+                else None
+            ),
+            clear_finalizer=not auto_close,
+        )
         return result
 
     def _driver(self, params: dict[str, Any]):
@@ -180,8 +204,7 @@ class BrowserTool:
                     self._chat_sessions[ctx.chat_id] = session.session_id
                     return session
                 except KeyError:
-                    ctx.execution.tool_state.pop(self.name, None)
-                    ctx.execution.finalizers.pop(self.name, None)
+                    pass
         mapped_session_id = self._chat_sessions.get(ctx.chat_id)
         if mapped_session_id:
             try:
@@ -193,8 +216,6 @@ class BrowserTool:
             persistent=bool(params.get("persistent", True)),
         )
         self._chat_sessions[ctx.chat_id] = session.session_id
-        if ctx.execution is not None:
-            ctx.execution.tool_state[self.name] = {"session_id": session.session_id}
         return session
 
     def _should_auto_close_session(self, params: dict[str, Any]) -> bool:
@@ -208,11 +229,6 @@ class BrowserTool:
         if not self._should_auto_close_session(params):
             return
         if ctx.execution is not None:
-            ctx.execution.tool_state[self.name] = {"session_id": session_id}
-            ctx.execution.finalizers[self.name] = ToolLoopFinalizer(
-                action="close_session",
-                params={"session_id": session_id},
-            )
             return
         try:
             self._close_session({"session_id": session_id}, ctx)
@@ -685,15 +701,15 @@ class BrowserTool:
         if callable(close_session):
             close_session(session_id)
         self.sessions.close_session(session_id)
-        if ctx.execution is not None:
-            loop_state = ctx.execution.tool_state.get(self.name, {})
-            if str(loop_state.get("session_id", "")) == session_id:
-                ctx.execution.tool_state.pop(self.name, None)
-                ctx.execution.finalizers.pop(self.name, None)
         for chat_id, mapped_session_id in list(self._chat_sessions.items()):
             if mapped_session_id == session_id:
                 self._chat_sessions.pop(chat_id, None)
-        return ToolResult(ok=True, summary=f"Closed session {session_id}.", data={"session_id": session_id})
+        return ToolResult(
+            ok=True,
+            summary=f"Closed session {session_id}.",
+            data={"session_id": session_id},
+            loop_state=ToolLoopState(clear=True),
+        )
 
     def _list_sessions(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         sessions = self.sessions.list_sessions()

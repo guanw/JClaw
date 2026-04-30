@@ -1,4 +1,4 @@
-from jclaw.tools.base import ToolContext
+from jclaw.tools.base import ToolContext, ToolExecutionState, ToolLoopFinalizer
 from jclaw.tools.browser.models import BrowserReasoner
 from jclaw.tools.browser.tool import BrowserTool
 
@@ -161,6 +161,25 @@ def test_run_objective_keeps_session_when_requested(tmp_path) -> None:
         ToolContext(chat_id="chat-keep"),
     )
     assert len(tool.sessions.list_sessions()) == 1
+
+
+def test_keep_session_clears_stale_loop_finalizer(tmp_path) -> None:
+    tool = _stub_browser(BrowserTool(tmp_path))
+    execution = ToolExecutionState(
+        tool_state={"browser": {"session_id": "sess_stale"}},
+        finalizers={"browser": ToolLoopFinalizer(action="close_session", params={"session_id": "sess_stale"})},
+    )
+
+    result = tool.invoke(
+        "open_url",
+        {"url": "https://example.com", "keep_session": True},
+        ToolContext(chat_id="chat-keep", execution=execution),
+    )
+
+    assert result.loop_state is not None
+    assert result.loop_state.state == {"session_id": result.data["session_id"]}
+    assert result.loop_state.finalizer is None
+    assert result.loop_state.clear_finalizer is True
 
 
 def test_extract_auto_closes_ephemeral_session(tmp_path) -> None:

@@ -25,7 +25,7 @@ from jclaw.core.defaults import (
     WORKSPACE_SHELL_TIMEOUT_SECONDS,
 )
 from jclaw.core.db import Database
-from jclaw.tools.base import Observation, RuntimeState, ToolContext, ToolLoopFinalizer, ToolResult
+from jclaw.tools.base import Observation, RuntimeState, ToolContext, ToolExecutionState, ToolLoopFinalizer, ToolLoopState, ToolResult
 from jclaw.tools.email.tool import EmailTool
 
 
@@ -50,6 +50,24 @@ class RecordingSequenceLLM:
     def chat(self, messages):  # noqa: ANN001
         self.calls.append(messages)
         return next(self._responses)
+
+
+def _build_agent_for_test(tmp_path, llm) -> tuple[AssistantAgent, Database]:  # noqa: ANN001
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    return AssistantAgent(config, db, llm), db
 
 
 class FakeTool:
@@ -196,15 +214,17 @@ class FakeBrowserTool:
         self.invocations.append((action, dict(params)))
         if action == "search_web":
             assert ctx.execution is not None
-            ctx.execution.tool_state["browser"] = {"session_id": "sess_browser_loop"}
-            ctx.execution.finalizers["browser"] = ToolLoopFinalizer(
-                action="close_session",
-                params={"session_id": "sess_browser_loop"},
-            )
             return ToolResult(
                 ok=True,
                 summary="Searched the web.",
                 data={"session_id": "sess_browser_loop", "url": "https://example.com/result"},
+                loop_state=ToolLoopState(
+                    state={"session_id": "sess_browser_loop"},
+                    finalizer=ToolLoopFinalizer(
+                        action="close_session",
+                        params={"session_id": "sess_browser_loop"},
+                    ),
+                ),
             )
         if action == "read_page":
             assert params == {}
@@ -227,6 +247,62 @@ class FakeBrowserTool:
         if action == "close_session":
             assert params.get("session_id") == "sess_browser_loop"
             return ToolResult(ok=True, summary="Closed session.", data={"session_id": "sess_browser_loop"})
+        raise AssertionError(f"unexpected action: {action}")
+
+    def format_result(self, action: str, result: ToolResult) -> str:
+        return result.summary
+
+
+class FakeScratchpadTool:
+    name = "scratchpad"
+
+    def __init__(self) -> None:
+        self.invocations: list[tuple[str, dict]] = []
+
+    def describe(self) -> dict:
+        return {
+            "name": "scratchpad",
+            "description": "Fake loop-state tool used for generic contract tests.",
+            "actions": {
+                "start": {"description": "Start a scratchpad loop."},
+                "continue_work": {"description": "Continue the scratchpad loop."},
+                "release": {"description": "Release the scratchpad resource."},
+            },
+            "supports_followup": True,
+        }
+
+    def invoke(self, action: str, params: dict, ctx: ToolContext) -> ToolResult:
+        self.invocations.append((action, dict(params)))
+        if action == "start":
+            assert ctx.execution is not None
+            return ToolResult(
+                ok=True,
+                summary="Scratchpad started.",
+                data={"resource_id": "scratch-1"},
+                loop_state=ToolLoopState(
+                    state={"resource_id": "scratch-1"},
+                    finalizer=ToolLoopFinalizer(
+                        action="release",
+                        params={"resource_id": "scratch-1"},
+                    ),
+                ),
+            )
+        if action == "continue_work":
+            assert ctx.execution is not None
+            assert ctx.execution.tool_state["scratchpad"]["resource_id"] == "scratch-1"
+            return ToolResult(
+                ok=True,
+                summary="Scratchpad continued.",
+                data={"resource_id": "scratch-1"},
+            )
+        if action == "release":
+            assert params == {"resource_id": "scratch-1"}
+            return ToolResult(
+                ok=True,
+                summary="Scratchpad released.",
+                data={"resource_id": "scratch-1"},
+                loop_state=ToolLoopState(clear=True),
+            )
         raise AssertionError(f"unexpected action: {action}")
 
     def format_result(self, action: str, result: ToolResult) -> str:
@@ -1417,6 +1493,106 @@ def test_browser_tool_loop_reuses_one_session_across_steps_and_closes_at_end(tmp
         ("extract", {"fields": {"name": "contractor name"}}),
         ("close_session", {"session_id": "sess_browser_loop"}),
     ]
+    db.close()
+
+
+def test_generic_tool_loop_state_contract_supports_non_browser_finalizers(tmp_path) -> None:
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"scratchpad","action":"start","params":{},"reason":"Allocate state."}',
+                '{"type":"tool_call","tool":"scratchpad","action":"continue_work","params":{},"reason":"Use saved loop state."}',
+                '{"type":"complete","tool":"","action":"","params":{},"reason":"Enough work completed."}',
+                "Scratchpad work completed.",
+            ]
+        ),
+    )
+    scratchpad = FakeScratchpadTool()
+    agent.tools._tools["scratchpad"] = scratchpad  # noqa: SLF001
+
+    reply = agent.handle_text("chat-1", "do scratchpad work")
+
+    assert reply == "Scratchpad work completed."
+    assert scratchpad.invocations == [
+        ("start", {}),
+        ("continue_work", {}),
+        ("release", {"resource_id": "scratch-1"}),
+    ]
+    db.close()
+
+
+def test_apply_tool_loop_state_sets_state_and_finalizer(tmp_path) -> None:
+    agent, db = _build_agent_for_test(tmp_path, DummyLLM())
+    execution = ToolExecutionState()
+    result = ToolResult(
+        ok=True,
+        summary="Allocated resource.",
+        loop_state=ToolLoopState(
+            state={"resource_id": "scratch-1"},
+            finalizer=ToolLoopFinalizer(action="release", params={"resource_id": "scratch-1"}),
+        ),
+    )
+
+    agent._apply_tool_loop_state(execution, "scratchpad", result)  # noqa: SLF001
+
+    assert execution.tool_state["scratchpad"] == {"resource_id": "scratch-1"}
+    assert execution.finalizers["scratchpad"].action == "release"
+    assert execution.finalizers["scratchpad"].params == {"resource_id": "scratch-1"}
+    db.close()
+
+
+def test_apply_tool_loop_state_clears_requested_state_and_finalizer(tmp_path) -> None:
+    agent, db = _build_agent_for_test(tmp_path, DummyLLM())
+    execution = ToolExecutionState(
+        tool_state={"scratchpad": {"resource_id": "scratch-1"}},
+        finalizers={"scratchpad": ToolLoopFinalizer(action="release", params={"resource_id": "scratch-1"})},
+    )
+
+    agent._apply_tool_loop_state(  # noqa: SLF001
+        execution,
+        "scratchpad",
+        ToolResult(ok=True, summary="Released resource.", loop_state=ToolLoopState(clear=True)),
+    )
+
+    assert "scratchpad" not in execution.tool_state
+    assert "scratchpad" not in execution.finalizers
+    db.close()
+
+
+def test_apply_tool_loop_state_can_clear_only_finalizer_without_touching_state(tmp_path) -> None:
+    agent, db = _build_agent_for_test(tmp_path, DummyLLM())
+    execution = ToolExecutionState(
+        tool_state={"browser": {"session_id": "sess-1"}},
+        finalizers={"browser": ToolLoopFinalizer(action="close_session", params={"session_id": "sess-1"})},
+    )
+
+    agent._apply_tool_loop_state(  # noqa: SLF001
+        execution,
+        "browser",
+        ToolResult(ok=True, summary="Session should stay open.", loop_state=ToolLoopState(clear_finalizer=True)),
+    )
+
+    assert execution.tool_state["browser"] == {"session_id": "sess-1"}
+    assert "browser" not in execution.finalizers
+    db.close()
+
+
+def test_apply_tool_loop_state_ignores_missing_loop_state(tmp_path) -> None:
+    agent, db = _build_agent_for_test(tmp_path, DummyLLM())
+    execution = ToolExecutionState(
+        tool_state={"browser": {"session_id": "sess-1"}},
+        finalizers={"browser": ToolLoopFinalizer(action="close_session", params={"session_id": "sess-1"})},
+    )
+
+    agent._apply_tool_loop_state(  # noqa: SLF001
+        execution,
+        "browser",
+        ToolResult(ok=True, summary="No loop-state change."),
+    )
+
+    assert execution.tool_state["browser"] == {"session_id": "sess-1"}
+    assert execution.finalizers["browser"].action == "close_session"
     db.close()
 
 

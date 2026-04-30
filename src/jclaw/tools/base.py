@@ -12,6 +12,14 @@ class ToolLoopFinalizer:
 
 
 @dataclass(slots=True)
+class ToolLoopState:
+    state: dict[str, Any] | None = None
+    finalizer: ToolLoopFinalizer | None = None
+    clear: bool = False
+    clear_finalizer: bool = False
+
+
+@dataclass(slots=True)
 class ToolExecutionState:
     tool_state: dict[str, dict[str, Any]] = field(default_factory=dict)
     finalizers: dict[str, ToolLoopFinalizer] = field(default_factory=dict)
@@ -34,6 +42,7 @@ class ToolResult:
     summary: str
     data: dict[str, Any] = field(default_factory=dict)
     needs_confirmation: bool = False
+    loop_state: ToolLoopState | None = None
 
 
 @dataclass(slots=True)
