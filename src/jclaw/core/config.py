@@ -36,6 +36,7 @@ from jclaw.core.defaults import (
     TELEGRAM_BASE_URL,
     TELEGRAM_POLL_TIMEOUT_SECONDS,
     WORKSPACE_ENABLED,
+    WORKSPACE_AGENT_MAX_TOOL_STEPS,
     WORKSPACE_MAX_FILES_PER_CHANGE,
     WORKSPACE_MAX_INTERNAL_READ_BYTES,
     WORKSPACE_MAX_PATH_ENTRIES,
@@ -149,6 +150,7 @@ class BrowserConfig:
 class WorkspaceConfig:
     enabled: bool = WORKSPACE_ENABLED
     max_steps: int = WORKSPACE_MAX_STEPS
+    agent_max_tool_steps: int = WORKSPACE_AGENT_MAX_TOOL_STEPS
     shell_timeout_seconds: int = WORKSPACE_SHELL_TIMEOUT_SECONDS
     shell_output_chars: int = WORKSPACE_SHELL_OUTPUT_CHARS
     max_prepared_diff_bytes: int = WORKSPACE_MAX_PREPARED_DIFF_BYTES
@@ -244,6 +246,7 @@ max_research_sources = {BROWSER_MAX_RESEARCH_SOURCES}
 [workspace]
 enabled = {str(WORKSPACE_ENABLED).lower()}
 max_steps = {WORKSPACE_MAX_STEPS}
+agent_max_tool_steps = {WORKSPACE_AGENT_MAX_TOOL_STEPS}
 shell_timeout_seconds = {WORKSPACE_SHELL_TIMEOUT_SECONDS}
 shell_output_chars = {WORKSPACE_SHELL_OUTPUT_CHARS}
 max_prepared_diff_bytes = {WORKSPACE_MAX_PREPARED_DIFF_BYTES}
@@ -337,6 +340,7 @@ def load_config(path: str | Path | None = None) -> Config:
     workspace = WorkspaceConfig(
         enabled=bool(workspace_data.get("enabled", WORKSPACE_ENABLED)),
         max_steps=int(workspace_data.get("max_steps", WORKSPACE_MAX_STEPS)),
+        agent_max_tool_steps=int(workspace_data.get("agent_max_tool_steps", WORKSPACE_AGENT_MAX_TOOL_STEPS)),
         shell_timeout_seconds=int(workspace_data.get("shell_timeout_seconds", WORKSPACE_SHELL_TIMEOUT_SECONDS)),
         shell_output_chars=int(workspace_data.get("shell_output_chars", WORKSPACE_SHELL_OUTPUT_CHARS)),
         max_prepared_diff_bytes=int(

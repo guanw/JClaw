@@ -77,6 +77,13 @@ class WorkspaceTool:
         return {
             "name": self.name,
             "description": "Inspect approved local paths and prepare or apply bounded local mutations such as file edits, local git actions, and local shell commands.",
+            "controller_guidance": (
+                "For coding tasks, inspect first but switch to mutation as soon as the edit site is known. "
+                "Once you know the target file and the function, class, or exact section to change, prefer apply_patch over more reads. "
+                "Do not keep repeating overlapping reads, repeated symbol lookups, or repeated searches once you have enough context to edit. "
+                "If you have already identified the concrete code changes, make the edit instead of exploring further. "
+                "After a code mutation, prefer a verification step such as run_command before answer or complete when a relevant check exists."
+            ),
             "actions": {name: spec.to_dict() for name, spec in specs.items()},
             "dangerous": True,
             "preview_required": True,

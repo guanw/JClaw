@@ -5,6 +5,8 @@ from pathlib import Path
 from jclaw.ai.agent import AssistantAgent
 from jclaw.core.config import Config, DaemonConfig, MemoryConfig, ProviderConfig, TelegramConfig
 from jclaw.core.defaults import (
+    AGENT_CONTINUE_TOOL_STEPS,
+    AGENT_MAX_TOOL_STEPS,
     AUTOMATION_ENABLED,
     BROWSER_MAX_OBJECTIVE_STEPS,
     BROWSER_MAX_RESEARCH_SOURCES,
@@ -17,6 +19,8 @@ from jclaw.core.defaults import (
     KNOWLEDGE_MAX_TOTAL_CHUNKS,
     KNOWLEDGE_TEXT_PREVIEW_CHARS,
     WORKSPACE_MAX_FILES_PER_CHANGE,
+    WORKSPACE_AGENT_MAX_TOOL_STEPS,
+    WORKSPACE_CONTINUE_TOOL_STEPS,
     WORKSPACE_MAX_INTERNAL_READ_BYTES,
     WORKSPACE_MAX_PATH_ENTRIES,
     WORKSPACE_MAX_PREPARED_DIFF_BYTES,
@@ -186,6 +190,62 @@ class ExplodingTool:
 
     def invoke(self, action: str, params: dict, ctx: ToolContext) -> ToolResult:
         raise ValueError("boom")
+
+    def format_result(self, action: str, result: ToolResult) -> str:
+        return result.summary
+
+
+class FakeLongWorkspaceTool:
+    name = "workspace"
+
+    def __init__(self) -> None:
+        self.invocations: list[tuple[str, dict]] = []
+
+    def describe(self) -> dict:
+        return {
+            "name": "workspace",
+            "description": "Fake workspace tool used for step-budget tests.",
+            "actions": {
+                "step_one": {"description": "Workspace step one."},
+                "step_two": {"description": "Workspace step two."},
+                "step_three": {"description": "Workspace step three."},
+                "step_four": {"description": "Workspace step four."},
+                "step_five": {"description": "Workspace step five."},
+            },
+            "supports_followup": True,
+        }
+
+    def invoke(self, action: str, params: dict, ctx: ToolContext) -> ToolResult:
+        self.invocations.append((action, dict(params)))
+        return ToolResult(ok=True, summary=f"Completed {action}.", data={"phase": action})
+
+    def format_result(self, action: str, result: ToolResult) -> str:
+        return result.summary
+
+
+class FakeLongTool:
+    name = "longtool"
+
+    def __init__(self) -> None:
+        self.invocations: list[tuple[str, dict]] = []
+
+    def describe(self) -> dict:
+        return {
+            "name": "longtool",
+            "description": "Fake general tool used for continuation tests.",
+            "actions": {
+                "step_one": {"description": "General step one."},
+                "step_two": {"description": "General step two."},
+                "step_three": {"description": "General step three."},
+                "step_four": {"description": "General step four."},
+                "step_five": {"description": "General step five."},
+            },
+            "supports_followup": True,
+        }
+
+    def invoke(self, action: str, params: dict, ctx: ToolContext) -> ToolResult:
+        self.invocations.append((action, dict(params)))
+        return ToolResult(ok=True, summary=f"Completed {action}.", data={"phase": action})
 
     def format_result(self, action: str, result: ToolResult) -> str:
         return result.summary
@@ -1400,10 +1460,14 @@ def test_tool_catalog_and_controller_prompt_bias_workspace_line_requests_to_read
     workspace_tool = next(item for item in catalog if item["name"] == "workspace")
     read_file = workspace_tool["actions"]["read_file"]["description"]
     read_snippet = workspace_tool["actions"]["read_snippet"]["description"]
+    controller_guidance = workspace_tool["controller_guidance"]
 
     assert "controller_contract" not in workspace_tool
     assert "Do not use this when the user asks for explicit line numbers" in read_file
     assert "Use this when the user asks for explicit line numbers" in read_snippet
+    assert "switch to mutation as soon as the edit site is known" in controller_guidance
+    assert "prefer apply_patch over more reads" in controller_guidance
+    assert "After a code mutation, prefer a verification step such as run_command" in controller_guidance
 
     decision = agent._decide_next_tool_step(  # noqa: SLF001
         "chat-1",
@@ -1522,6 +1586,108 @@ def test_generic_tool_loop_state_contract_supports_non_browser_finalizers(tmp_pa
     db.close()
 
 
+def test_workspace_tool_loop_uses_higher_step_budget_than_general_tasks(tmp_path) -> None:
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"workspace","action":"step_one","params":{},"reason":"Read first."}',
+                '{"type":"tool_call","tool":"workspace","action":"step_two","params":{},"reason":"Read second."}',
+                '{"type":"tool_call","tool":"workspace","action":"step_three","params":{},"reason":"Read third."}',
+                '{"type":"tool_call","tool":"workspace","action":"step_four","params":{},"reason":"Read fourth."}',
+                '{"type":"tool_call","tool":"workspace","action":"step_five","params":{},"reason":"Read fifth."}',
+                '{"type":"answer","tool":"","action":"","params":{},"answer":"Done after five workspace steps.","reason":"Enough inspection completed."}',
+            ]
+        ),
+    )
+    workspace = FakeLongWorkspaceTool()
+    agent.tools._tools["workspace"] = workspace  # noqa: SLF001
+
+    reply = agent.handle_text("chat-1", "inspect and then answer")
+
+    assert reply == "Done after five workspace steps."
+    assert [action for action, _ in workspace.invocations] == [
+        "step_one",
+        "step_two",
+        "step_three",
+        "step_four",
+        "step_five",
+    ]
+    db.close()
+
+
+def test_general_tool_loop_exhaustion_requires_explicit_continue(tmp_path) -> None:
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"longtool","action":"step_one","params":{},"reason":"General step one."}',
+                '{"type":"tool_call","tool":"longtool","action":"step_two","params":{},"reason":"General step two."}',
+                '{"type":"tool_call","tool":"longtool","action":"step_three","params":{},"reason":"General step three."}',
+                '{"type":"tool_call","tool":"longtool","action":"step_four","params":{},"reason":"General step four."}',
+                '{"type":"tool_call","tool":"longtool","action":"step_five","params":{},"reason":"General step five."}',
+            ]
+        ),
+    )
+    tool = FakeLongTool()
+    agent.tools._tools["longtool"] = tool  # noqa: SLF001
+
+    reply = agent.handle_text("chat-1", "do a long general task")
+
+    assert f"({AGENT_MAX_TOOL_STEPS} tool steps)" in reply
+    assert f"{AGENT_CONTINUE_TOOL_STEPS} more tool steps" in reply
+    assert [action for action, _ in tool.invocations] == [
+        "step_one",
+        "step_two",
+        "step_three",
+        "step_four",
+    ]
+    db.close()
+
+
+def test_continue_without_pending_tool_loop_returns_clear_message(tmp_path) -> None:
+    agent, db = _build_agent_for_test(tmp_path, DummyLLM())
+
+    reply = agent.handle_text("chat-1", "continue")
+
+    assert reply == "There is no paused tool run waiting for continuation."
+    db.close()
+
+
+def test_workspace_tool_loop_continue_adds_more_budget_after_exhaustion(tmp_path) -> None:
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"workspace","action":"step_one","params":{},"reason":"Read first."}',
+                '{"type":"tool_call","tool":"workspace","action":"step_two","params":{},"reason":"Read second."}',
+                '{"type":"tool_call","tool":"workspace","action":"step_three","params":{},"reason":"Read third."}',
+                '{"type":"tool_call","tool":"workspace","action":"step_four","params":{},"reason":"Read fourth."}',
+                '{"type":"tool_call","tool":"workspace","action":"step_five","params":{},"reason":"Read fifth."}',
+                '{"type":"answer","tool":"","action":"","params":{},"answer":"Done after explicit continuation.","reason":"Enough inspection completed."}',
+            ]
+        ),
+    )
+    workspace = FakeLongWorkspaceTool()
+    agent.tools._tools["workspace"] = workspace  # noqa: SLF001
+    agent.config.workspace.agent_max_tool_steps = 4
+
+    first_reply = agent.handle_text("chat-1", "inspect and then answer")
+    second_reply = agent.handle_text("chat-1", "continue")
+
+    assert "(4 tool steps)" in first_reply
+    assert f"{WORKSPACE_CONTINUE_TOOL_STEPS} more tool steps" in first_reply
+    assert second_reply == "Done after explicit continuation."
+    assert [action for action, _ in workspace.invocations] == [
+        "step_one",
+        "step_two",
+        "step_three",
+        "step_four",
+        "step_five",
+    ]
+    db.close()
+
+
 def test_apply_tool_loop_state_sets_state_and_finalizer(tmp_path) -> None:
     agent, db = _build_agent_for_test(tmp_path, DummyLLM())
     execution = ToolExecutionState()
@@ -1631,6 +1797,7 @@ def test_workspace_and_knowledge_defaults_are_centralized(tmp_path) -> None:
         repo_root=Path("/Users/guanw/Documents/JClaw"),
     )
     assert config.workspace.max_steps == WORKSPACE_MAX_STEPS
+    assert config.workspace.agent_max_tool_steps == WORKSPACE_AGENT_MAX_TOOL_STEPS
     assert config.workspace.shell_timeout_seconds == WORKSPACE_SHELL_TIMEOUT_SECONDS
     assert config.workspace.shell_output_chars == WORKSPACE_SHELL_OUTPUT_CHARS
     assert config.workspace.max_prepared_diff_bytes == WORKSPACE_MAX_PREPARED_DIFF_BYTES

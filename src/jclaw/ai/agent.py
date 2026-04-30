@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import logging
 from datetime import datetime
@@ -11,7 +12,7 @@ from jclaw.ai.client import OpenAICompatibleClient
 from jclaw.ai.prompts import load_system_prompt
 from jclaw.core.config import Config
 from jclaw.core.db import Database, MemoryRecord
-from jclaw.core.defaults import AGENT_MAX_TOOL_STEPS
+from jclaw.core.defaults import AGENT_CONTINUE_TOOL_STEPS, AGENT_MAX_TOOL_STEPS, WORKSPACE_CONTINUE_TOOL_STEPS
 from jclaw.tools.automation.tool import AutomationTool
 from jclaw.tools.base import Decision, DecisionType, Observation, RuntimeState, ToolContext, ToolExecutionState, ToolResult
 from jclaw.tools.browser.tool import BrowserTool
@@ -27,12 +28,27 @@ LOGGER = logging.getLogger(__name__)
 MAX_CONTROLLER_OBSERVATIONS = 5
 
 
+@dataclass(slots=True)
+class PendingToolLoopContinuation:
+    request: str
+    user_name: str
+    decision: Decision
+    steps: list[dict[str, Any]]
+    runtime: RuntimeState
+    execution: ToolExecutionState
+    seen_signatures: set[str]
+    tool_name: str
+    extra_steps: int
+    total_steps: int
+
+
 class AssistantAgent:
     def __init__(self, config: Config, db: Database, llm: OpenAICompatibleClient) -> None:
         self.config = config
         self.db = db
         self.llm = llm
         self.system_prompt = load_system_prompt(config.provider.system_prompt_files)
+        self._pending_tool_loop_continuations: dict[str, PendingToolLoopContinuation] = {}
         self.tools = ToolRegistry()
         self.tools.register(MemoryTool(db, search_limit=config.memory.max_memory_items))
         self.tools.register(PermissionsTool(db))
@@ -103,6 +119,12 @@ class AssistantAgent:
             self.db.store_message(chat_id, "user", text)
             self.db.store_message(chat_id, "assistant", command_reply)
             return command_reply
+
+        continuation_reply = self._handle_tool_loop_continuation(chat_id, text, user_name=user_name)
+        if continuation_reply is not None:
+            self.db.store_message(chat_id, "user", text)
+            self.db.store_message(chat_id, "assistant", continuation_reply)
+            return continuation_reply
 
         self.db.store_message(chat_id, "user", text)
 
@@ -336,7 +358,26 @@ class AssistantAgent:
         return self.tools.get(tool).format_result(action, result)
 
     def _handle_tool_request(self, chat_id: str, text: str, *, user_name: str) -> str | None:
+        self._pending_tool_loop_continuations.pop(chat_id, None)
         return self._run_tool_loop(chat_id, text, user_name=user_name)
+
+    def _handle_tool_loop_continuation(self, chat_id: str, text: str, *, user_name: str) -> str | None:
+        if text.strip().lower() != "continue":
+            return None
+        pending = self._pending_tool_loop_continuations.pop(chat_id, None)
+        if pending is None:
+            return "There is no paused tool run waiting for continuation."
+        return self._execute_tool_loop(
+            chat_id,
+            pending.request,
+            user_name=user_name or pending.user_name,
+            decision=pending.decision,
+            runtime=pending.runtime,
+            steps=pending.steps,
+            execution=pending.execution,
+            seen_signatures=pending.seen_signatures,
+            step_budget=pending.total_steps + pending.extra_steps,
+        )
 
     def _run_tool_loop(
         self,
@@ -356,11 +397,35 @@ class AssistantAgent:
         if decision.type is DecisionType.COMPLETE:
             LOGGER.info("initial controller completed without tool use: %s", decision.reason)
             return None
-        steps: list[dict[str, Any]] = []
-        seen_signatures: set[str] = set()
-        execution = ToolExecutionState()
+        return self._execute_tool_loop(
+            chat_id,
+            text,
+            user_name=user_name,
+            decision=decision,
+            runtime=runtime,
+            steps=[],
+            execution=ToolExecutionState(),
+            seen_signatures=set(),
+            step_budget=self._tool_loop_step_budget(decision.tool),
+        )
+
+    def _execute_tool_loop(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        user_name: str,
+        decision: Decision,
+        runtime: RuntimeState,
+        steps: list[dict[str, Any]],
+        execution: ToolExecutionState,
+        seen_signatures: set[str],
+        step_budget: int,
+    ) -> str | None:
+        paused = False
         try:
-            for _ in range(AGENT_MAX_TOOL_STEPS):
+            while len(steps) < step_budget:
+                step_budget = max(step_budget, self._tool_loop_step_budget(decision.tool))
                 signature = json.dumps(
                     {
                         "tool": decision.tool,
@@ -451,8 +516,10 @@ class AssistantAgent:
                         result=result,
                     )
                 if next_decision.type is DecisionType.ANSWER:
+                    self._pending_tool_loop_continuations.pop(chat_id, None)
                     return next_decision.answer
                 if next_decision.type is DecisionType.BLOCKED:
+                    self._pending_tool_loop_continuations.pop(chat_id, None)
                     return next_decision.reason or self._compose_tool_reply(
                         chat_id,
                         text,
@@ -461,6 +528,7 @@ class AssistantAgent:
                         result=result,
                     )
                 if next_decision.type is DecisionType.COMPLETE:
+                    self._pending_tool_loop_continuations.pop(chat_id, None)
                     return self._compose_tool_reply(
                         chat_id,
                         text,
@@ -469,25 +537,32 @@ class AssistantAgent:
                         result=result,
                     )
                 decision = next_decision
-            last = steps[-1]
-            return self._compose_tool_reply(
-                chat_id,
-                text,
+            paused = True
+            self._pending_tool_loop_continuations[chat_id] = PendingToolLoopContinuation(
+                request=text,
                 user_name=user_name,
-                decision={"tool": last["tool"], "action": last["action"], "reason": last["reason"], "params": last["params"]},
-                result=last["result"],
+                decision=decision,
+                steps=steps,
+                runtime=runtime,
+                execution=execution,
+                seen_signatures=seen_signatures,
+                tool_name=decision.tool,
+                extra_steps=self._tool_loop_continue_step_increment(decision.tool),
+                total_steps=step_budget,
             )
+            return self._tool_loop_exhausted_reply(decision.tool, step_budget)
         finally:
-            for tool_name, finalizer in execution.finalizers.items():
-                try:
-                    self.tools.invoke(
-                        tool_name,
-                        finalizer.action,
-                        dict(finalizer.params),
-                        ToolContext(chat_id=chat_id, user_id=user_name),
-                    )
-                except Exception:  # noqa: BLE001
-                    LOGGER.exception("failed to run tool loop cleanup for %s", tool_name)
+            if not paused:
+                for tool_name, finalizer in execution.finalizers.items():
+                    try:
+                        self.tools.invoke(
+                            tool_name,
+                            finalizer.action,
+                            dict(finalizer.params),
+                            ToolContext(chat_id=chat_id, user_id=user_name),
+                        )
+                    except Exception:  # noqa: BLE001
+                        LOGGER.exception("failed to run tool loop cleanup for %s", tool_name)
 
     def _apply_tool_loop_state(self, execution: ToolExecutionState, tool_name: str, result: ToolResult) -> None:
         loop_state = result.loop_state
@@ -503,6 +578,24 @@ class AssistantAgent:
             execution.finalizers.pop(tool_name, None)
         if loop_state.finalizer is not None:
             execution.finalizers[tool_name] = loop_state.finalizer
+
+    def _tool_loop_step_budget(self, tool_name: str) -> int:
+        if tool_name == "workspace":
+            return max(AGENT_MAX_TOOL_STEPS, int(self.config.workspace.agent_max_tool_steps))
+        return AGENT_MAX_TOOL_STEPS
+
+    def _tool_loop_continue_step_increment(self, tool_name: str) -> int:
+        if tool_name == "workspace":
+            return WORKSPACE_CONTINUE_TOOL_STEPS
+        return AGENT_CONTINUE_TOOL_STEPS
+
+    def _tool_loop_exhausted_reply(self, tool_name: str, step_budget: int) -> str:
+        extra_steps = self._tool_loop_continue_step_increment(tool_name)
+        task_kind = "workspace/coding" if tool_name == "workspace" else "tool"
+        return (
+            f"Stopped after exhausting the current {task_kind} step budget ({step_budget} tool steps). "
+            f"Reply `continue` if you want me to continue with {extra_steps} more tool steps."
+        )
 
     def _decide_next_tool_step(
         self,
