@@ -4,6 +4,7 @@ import ast
 from datetime import datetime, timezone
 import difflib
 import fnmatch
+import html
 import json
 import os
 import re
@@ -208,7 +209,7 @@ class WorkspaceTool:
         if "truncated" in data:
             lines.append(f"Truncated: {data['truncated']}")
         if data.get("content"):
-            lines.append(f"Content:\n{str(data['content'])[:4000]}")
+            lines.append(f"Content:\n{self._code_block(str(data['content'])[:3200])}")
         if data.get("symbols"):
             lines.append("Symbols:")
             for item in data["symbols"][:10]:
@@ -231,25 +232,28 @@ class WorkspaceTool:
             if data.get("match_count", 0) > len(data["matches"]):
                 lines.append(f"Shown {len(data['matches'])} of {data['match_count']} matches.")
         if data.get("diff_preview"):
-            lines.append(f"Diff preview:\n{str(data['diff_preview'])[:1500]}")
+            lines.append(f"Diff preview:\n{self._code_block(str(data['diff_preview'])[:1500])}")
         if "diff" in data:
             diff_text = str(data["diff"])
-            lines.append(f"Diff:\n{diff_text[:4000]}")
+            lines.append(f"Diff:\n{self._code_block(diff_text[:3200])}")
         if data.get("command"):
             lines.append(f"Command: {data['command']}")
         if data.get("preview"):
             lines.append(f"Preview: {data['preview']}")
         if data.get("status"):
-            lines.append(f"Git status:\n{str(data['status'])[:1200]}")
+            lines.append(f"Git status:\n{self._code_block(str(data['status'])[:1200])}")
         if data.get("diff_stat"):
-            lines.append(f"Git diff:\n{str(data['diff_stat'])[:1200]}")
+            lines.append(f"Git diff:\n{self._code_block(str(data['diff_stat'])[:1200])}")
         if data.get("stdout"):
-            lines.append(f"Stdout:\n{str(data['stdout'])[:1200]}")
+            lines.append(f"Stdout:\n{self._code_block(str(data['stdout'])[:1200])}")
         if data.get("stderr"):
-            lines.append(f"Stderr:\n{str(data['stderr'])[:1200]}")
+            lines.append(f"Stderr:\n{self._code_block(str(data['stderr'])[:1200])}")
         if data.get("output"):
-            lines.append(f"Output:\n{str(data['output'])[:1200]}")
+            lines.append(f"Output:\n{self._code_block(str(data['output'])[:1200])}")
         return "\n".join(lines)
+
+    def _code_block(self, text: str) -> str:
+        return f"<pre>{html.escape(text)}</pre>"
 
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handlers = {

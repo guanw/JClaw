@@ -435,7 +435,7 @@ def test_format_result_includes_snippet_content_and_diff_text(tmp_path) -> None:
     )
     snippet_text = tool.format_result("read_snippet", snippet)
     assert "Content:" in snippet_text
-    assert "b\nc\n" in snippet_text
+    assert "<pre>b\nc\n</pre>" in snippet_text
 
     subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.name", "JClaw Test"], cwd=root, check=True, capture_output=True, text=True)
@@ -448,6 +448,7 @@ def test_format_result_includes_snippet_content_and_diff_text(tmp_path) -> None:
     diff_text = tool.format_result("git_diff", diff)
     assert "Diff:" in diff_text
     assert "changed" in diff_text
+    assert "<pre>" in diff_text
     db.close()
 
 
