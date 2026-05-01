@@ -56,6 +56,20 @@ class RecordingSequenceLLM:
         return next(self._responses)
 
 
+class FreshToolReplyLLM:
+    def __init__(self) -> None:
+        self.calls: list[list[dict[str, str]]] = []
+
+    def chat(self, messages):  # noqa: ANN001
+        self.calls.append(messages)
+        flattened = "\n".join(message["content"] for message in messages)
+        if "already delegates to _read_text_file_state" in flattened:
+            return "stale-history-used"
+        if "Tool result:\nFresh file state says caching is not enabled." in flattened:
+            return "fresh-tool-result-used"
+        return "unexpected"
+
+
 def _build_agent_for_test(tmp_path, llm) -> tuple[AssistantAgent, Database]:  # noqa: ANN001
     config = Config(
         provider=ProviderConfig(),
@@ -1685,6 +1699,27 @@ def test_workspace_tool_loop_continue_adds_more_budget_after_exhaustion(tmp_path
         "step_four",
         "step_five",
     ]
+    db.close()
+
+
+def test_compose_tool_reply_uses_latest_tool_result_not_stale_history(tmp_path) -> None:
+    agent, db = _build_agent_for_test(tmp_path, FreshToolReplyLLM())
+    agent.tools._tools["fake"] = FakeTool()  # noqa: SLF001
+    db.store_message("chat-1", "assistant", "_read_file already delegates to _read_text_file_state with caching enabled.")
+
+    reply = agent._compose_tool_reply(  # noqa: SLF001
+        "chat-1",
+        "let's enable caching or memoization for _read_file in src/jclaw/tools/workspace/tool.py",
+        user_name="tester",
+        decision={"tool": "fake", "action": "step_one", "reason": "Inspect file", "params": {}},
+        result=ToolResult(
+            ok=True,
+            summary="Fresh file state says caching is not enabled.",
+            data={"phase": "intermediate"},
+        ),
+    )
+
+    assert reply == "fresh-tool-result-used"
     db.close()
 
 

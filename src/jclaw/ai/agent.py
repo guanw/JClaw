@@ -847,13 +847,14 @@ class AssistantAgent:
         if result.needs_confirmation:
             LOGGER.info("tool result requires confirmation; returning raw tool result")
             return tool_result_text
-        messages = self._build_messages(chat_id, user_text=text, user_name=user_name)
+        messages = self._build_tool_reply_messages(chat_id, text, user_name=user_name)
         messages.append(
             {
                 "role": "system",
                 "content": (
                     "A tool has already been executed. Use the tool result to answer the user naturally.\n"
                     "Do not invent tool results. Be concise. Mention limits if the tool result is only partial.\n"
+                    "Treat the latest tool result as authoritative even if earlier conversation turns describe a different file state.\n"
                     "Never claim that you searched a site, verified facts, clicked anything, or completed browsing steps unless the tool result explicitly shows it."
                 ),
             }
@@ -873,6 +874,15 @@ class AssistantAgent:
             return self.llm.chat(messages)
         except Exception:  # noqa: BLE001
             return tool_result_text
+
+    def _build_tool_reply_messages(self, chat_id: str, text: str, *, user_name: str) -> list[dict[str, str]]:
+        memories = self.db.search_memories(chat_id, text, self.config.memory.max_memory_items)
+        system = self._render_system_prompt(memories)
+        prefix = f"From {user_name}: " if user_name else ""
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"{prefix}{text}"},
+        ]
 
     def _should_return_direct_tool_result(self, tool_description: dict[str, Any], result: ToolResult) -> bool:
         if not tool_description.get("prefer_direct_result"):
