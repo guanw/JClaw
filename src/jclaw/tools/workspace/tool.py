@@ -35,6 +35,8 @@ def _utc_now() -> str:
 
 class WorkspaceTool:
     name = "workspace"
+    MAX_CHANGE_HISTORY = 10
+    CHANGE_HISTORY_TTL_SECONDS = 3600
     COMMON_HOME_FOLDERS = {
         "Desktop",
         "Documents",
@@ -82,7 +84,9 @@ class WorkspaceTool:
                 "Once you know the target file and the function, class, or exact section to change, prefer apply_patch over more reads. "
                 "Do not keep repeating overlapping reads, repeated symbol lookups, or repeated searches once you have enough context to edit. "
                 "If you have already identified the concrete code changes, make the edit instead of exploring further. "
-                "After a code mutation, prefer a verification step such as run_command before answer or complete when a relevant check exists."
+                "After a code mutation, prefer a verification step such as run_command before answer or complete when a relevant check exists. "
+                "If the user asks to revert, undo, or put back the most recent JClaw file edit in this chat, prefer revert_last_change instead of inferring the target from git diff. "
+                "If the user asks to reapply a reverted JClaw file edit in this chat, prefer redo_last_change."
             ),
             "actions": {name: spec.to_dict() for name, spec in specs.items()},
             "dangerous": True,
@@ -261,6 +265,8 @@ class WorkspaceTool:
             "write_file": self._write_file,
             "apply_patch": self._apply_patch,
             "create_file": self._create_file,
+            "revert_last_change": self._revert_last_change,
+            "redo_last_change": self._redo_last_change,
             "run_command": self._run_command_action,
             "rename_path": self._rename_path,
             "move_path": self._move_path,
@@ -858,6 +864,7 @@ class WorkspaceTool:
         if "content" not in params:
             return ToolResult(ok=False, summary="Writing a file requires content.", data={})
         target_path = self._resolve_target_path(params.get("path"))
+        target_existed = target_path.exists()
         root_path = self._default_root_for_path(target_path)
         permission = self._ensure_grant(
             root_path,
@@ -907,10 +914,12 @@ class WorkspaceTool:
         return self._direct_file_edit_result(
             root_path=root_path,
             target_path=target_path,
+            before_exists=target_existed,
             before="",
             after=new_content,
             summary=f"Wrote {target_path}.",
             operation="write_file",
+            ctx=ctx,
         )
 
     def _create_file(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -944,10 +953,12 @@ class WorkspaceTool:
         return self._direct_file_edit_result(
             root_path=root_path,
             target_path=target_path,
+            before_exists=False,
             before="",
             after=content,
             summary=f"Created {target_path}.",
             operation="create_file",
+            ctx=ctx,
         )
 
     def _apply_patch(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -1017,10 +1028,12 @@ class WorkspaceTool:
         return self._direct_file_edit_result(
             root_path=root_path,
             target_path=target_path,
+            before_exists=True,
             before=before,
             after=after,
             summary=f"Applied patch to {target_path}.",
             operation="apply_patch",
+            ctx=ctx,
         )
 
     def _apply_change_request(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -1043,7 +1056,7 @@ class WorkspaceTool:
             self.db.update_approval_request_status(request.request_id, "failed")
             raise
         self.db.update_approval_request_status(request.request_id, "applied")
-        return ToolResult(
+        result = ToolResult(
             ok=True,
             summary=f"Applied approved file change request {request.request_id}.",
             data={
@@ -1052,6 +1065,87 @@ class WorkspaceTool:
                 "touched_files": touched_files,
                 "allow_tool_followup": True,
             },
+        )
+        self._record_workspace_change(
+            chat_id=ctx.chat_id,
+            root_path=Path(request.root_path),
+            operation="apply_change_request",
+            edits=[
+                {
+                    "path": str(edit["path"]),
+                    "relative_path": str(edit["relative_path"]),
+                    "before_exists": True,
+                    "before": str(edit.get("before", "")),
+                    "after_exists": True,
+                    "after": str(edit.get("after", "")),
+                }
+                for edit in request.payload.get("edits", [])
+            ],
+        )
+        return result
+
+    def _revert_last_change(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        record = self.db.get_latest_workspace_change(
+            ctx.chat_id,
+            state="applied",
+            max_age_seconds=self.CHANGE_HISTORY_TTL_SECONDS,
+        )
+        if record is None:
+            return ToolResult(ok=False, summary="No recent workspace change is available to revert.", data={})
+        root_path = Path(record.root_path)
+        permission = self._ensure_grant(
+            root_path,
+            capabilities=("write",),
+            ctx=ctx,
+            objective=str(params.get("objective", "Revert last workspace change")).strip() or "Revert last workspace change",
+            kind="grant",
+            continuation_action="revert_last_change",
+            continuation_params=params,
+        )
+        if permission is not None:
+            return permission
+        try:
+            applied_edits = self._apply_workspace_change_record(record, direction="undo")
+        except RuntimeError as exc:
+            return ToolResult(ok=False, summary=str(exc), data={"root_path": str(root_path)})
+        self.db.update_workspace_change_state(record.id, state="undone")
+        return self._workspace_change_result(
+            root_path=root_path,
+            operation="revert_last_change",
+            summary=f"Reverted workspace change {record.id}.",
+            edits=applied_edits,
+        )
+
+    def _redo_last_change(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        record = self.db.get_latest_workspace_change(
+            ctx.chat_id,
+            state="undone",
+            max_age_seconds=self.CHANGE_HISTORY_TTL_SECONDS,
+        )
+        if record is None:
+            return ToolResult(ok=False, summary="No recent workspace change is available to redo.", data={})
+        root_path = Path(record.root_path)
+        permission = self._ensure_grant(
+            root_path,
+            capabilities=("write",),
+            ctx=ctx,
+            objective=str(params.get("objective", "Redo last workspace change")).strip() or "Redo last workspace change",
+            kind="grant",
+            continuation_action="redo_last_change",
+            continuation_params=params,
+        )
+        if permission is not None:
+            return permission
+        try:
+            applied_edits = self._apply_workspace_change_record(record, direction="redo")
+        except RuntimeError as exc:
+            return ToolResult(ok=False, summary=str(exc), data={"root_path": str(root_path)})
+        self.db.update_workspace_change_state(record.id, state="applied")
+        return self._workspace_change_result(
+            root_path=root_path,
+            operation="redo_last_change",
+            summary=f"Reapplied workspace change {record.id}.",
+            edits=applied_edits,
         )
 
     def _rename_path(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -1793,23 +1887,28 @@ class WorkspaceTool:
         *,
         root_path: Path,
         target_path: Path,
+        before_exists: bool,
         before: str,
         after: str,
         summary: str,
         operation: str,
+        ctx: ToolContext,
     ) -> ToolResult:
         relative_path = str(target_path.relative_to(root_path))
-        diff_preview = self._build_diff_preview(
-            [
-                {
-                    "path": str(target_path),
-                    "relative_path": relative_path,
-                    "before": before,
-                    "after": after,
-                    "reason": operation,
-                }
-            ]
+        edit = {
+            "path": str(target_path),
+            "relative_path": relative_path,
+            "before": before,
+            "after": after,
+            "reason": operation,
+        }
+        self._record_workspace_change(
+            chat_id=ctx.chat_id,
+            root_path=root_path,
+            operation=operation,
+            edits=[{**edit, "before_exists": before_exists, "after_exists": True}],
         )
+        diff_preview = self._build_diff_preview([edit])
         after_bytes = after.encode("utf-8")
         content = after_bytes[: self.max_internal_read_bytes].decode("utf-8", errors="ignore")
         truncated = len(after_bytes) > self.max_internal_read_bytes
@@ -1848,6 +1947,102 @@ class WorkspaceTool:
                 "artifacts": {
                     "workspace_patch:latest": patch_artifact,
                     "workspace_file:latest": file_artifact,
+                },
+            },
+        )
+
+    def _record_workspace_change(
+        self,
+        *,
+        chat_id: str,
+        root_path: Path,
+        operation: str,
+        edits: list[dict[str, str]],
+    ) -> None:
+        file_states = [
+            {
+                "path": str(item["path"]),
+                "relative_path": str(item["relative_path"]),
+                "before_exists": bool(item.get("before_exists", True)),
+                "before": str(item["before"]),
+                "after_exists": bool(item.get("after_exists", True)),
+                "after": str(item["after"]),
+            }
+            for item in edits
+        ]
+        self.db.record_workspace_change(
+            chat_id=chat_id,
+            root_path=str(root_path),
+            operation=operation,
+            touched_files=[str(item["relative_path"]) for item in edits],
+            file_states=file_states,
+        )
+        self.db.prune_workspace_changes(
+            chat_id,
+            keep_latest=self.MAX_CHANGE_HISTORY,
+            max_age_seconds=self.CHANGE_HISTORY_TTL_SECONDS,
+        )
+
+    def _apply_workspace_change_record(self, record: Any, *, direction: str) -> list[dict[str, str]]:
+        applied_edits: list[dict[str, str]] = []
+        for item in record.file_states:
+            path = Path(str(item["path"]))
+            before_exists = bool(item.get("before_exists"))
+            before = str(item.get("before", ""))
+            after_exists = bool(item.get("after_exists", True))
+            after = str(item.get("after", ""))
+            expected_exists = after_exists if direction == "undo" else before_exists
+            expected_text = after if direction == "undo" else before
+            target_exists = before_exists if direction == "undo" else after_exists
+            target_text = before if direction == "undo" else after
+            current_exists = path.exists()
+            current_text = path.read_text(encoding="utf-8") if current_exists else ""
+            if current_exists != expected_exists or current_text != expected_text:
+                raise RuntimeError(f"Cannot safely {direction} change for {path}; file contents have diverged.")
+            if target_exists:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(target_text, encoding="utf-8")
+            elif path.exists():
+                path.unlink()
+            applied_edits.append(
+                {
+                    "path": str(path),
+                    "relative_path": str(item["relative_path"]),
+                    "before": current_text,
+                    "after": target_text if target_exists else "",
+                    "reason": direction,
+                }
+            )
+        return applied_edits
+
+    def _workspace_change_result(
+        self,
+        *,
+        root_path: Path,
+        operation: str,
+        summary: str,
+        edits: list[dict[str, str]],
+    ) -> ToolResult:
+        diff_preview = self._build_diff_preview(edits)
+        touched_files = [str(item["relative_path"]) for item in edits]
+        patch_artifact = {
+            "root_path": str(root_path),
+            "target_path": str(root_path),
+            "operation": operation,
+            "touched_files": touched_files,
+            "diff": diff_preview,
+        }
+        return ToolResult(
+            ok=True,
+            summary=summary,
+            data={
+                "root_path": str(root_path),
+                "target_path": str(root_path),
+                "touched_files": touched_files,
+                "diff_preview": diff_preview,
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "workspace_patch:latest": patch_artifact,
                 },
             },
         )
@@ -2325,6 +2520,32 @@ class WorkspaceTool:
                 },
                 writes=True,
                 produces_artifacts=("workspace_patch", "workspace_file"),
+            ),
+            "revert_last_change": ActionSpec(
+                tool=self.name,
+                action="revert_last_change",
+                description="Revert the most recent file mutation that JClaw applied in this chat, if the affected files have not diverged.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "objective": {"type": "string"},
+                    },
+                },
+                writes=True,
+                produces_artifacts=("workspace_patch",),
+            ),
+            "redo_last_change": ActionSpec(
+                tool=self.name,
+                action="redo_last_change",
+                description="Reapply the most recently reverted file mutation that JClaw applied in this chat, if the affected files still match the reverted state.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "objective": {"type": "string"},
+                    },
+                },
+                writes=True,
+                produces_artifacts=("workspace_patch",),
             ),
             "run_command": ActionSpec(
                 tool=self.name,

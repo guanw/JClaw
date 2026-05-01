@@ -1482,6 +1482,8 @@ def test_tool_catalog_and_controller_prompt_bias_workspace_line_requests_to_read
     assert "switch to mutation as soon as the edit site is known" in controller_guidance
     assert "prefer apply_patch over more reads" in controller_guidance
     assert "After a code mutation, prefer a verification step such as run_command" in controller_guidance
+    assert "prefer revert_last_change instead of inferring the target from git diff" in controller_guidance
+    assert "prefer redo_last_change" in controller_guidance
 
     decision = agent._decide_next_tool_step(  # noqa: SLF001
         "chat-1",

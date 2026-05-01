@@ -570,6 +570,73 @@ def test_apply_patch_writes_immediately_for_narrow_exact_match_edit(tmp_path) ->
     db.close()
 
 
+def test_workspace_can_revert_and_redo_last_file_change(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "app.py"
+    target.write_text("print('hello')\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    patched = tool.invoke(
+        "apply_patch",
+        {"path": str(target), "hunks": [{"old_text": "hello", "new_text": "goodbye"}]},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert patched.ok is True
+    assert target.read_text(encoding="utf-8") == "print('goodbye')\n"
+
+    reverted = tool.invoke("revert_last_change", {}, ToolContext(chat_id="chat-1"))
+    assert reverted.ok is True
+    assert target.read_text(encoding="utf-8") == "print('hello')\n"
+    assert reverted.data["artifacts"]["workspace_patch:latest"]["operation"] == "revert_last_change"
+
+    redone = tool.invoke("redo_last_change", {}, ToolContext(chat_id="chat-1"))
+    assert redone.ok is True
+    assert target.read_text(encoding="utf-8") == "print('goodbye')\n"
+    assert redone.data["artifacts"]["workspace_patch:latest"]["operation"] == "redo_last_change"
+    db.close()
+
+
+def test_workspace_revert_last_change_fails_when_file_has_diverged(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "app.py"
+    target.write_text("print('hello')\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    patched = tool.invoke(
+        "apply_patch",
+        {"path": str(target), "hunks": [{"old_text": "hello", "new_text": "goodbye"}]},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert patched.ok is True
+    target.write_text("print('changed elsewhere')\n", encoding="utf-8")
+
+    reverted = tool.invoke("revert_last_change", {}, ToolContext(chat_id="chat-1"))
+
+    assert reverted.ok is False
+    assert "diverged" in reverted.summary.lower()
+    db.close()
+
+
+def test_workspace_revert_last_change_reports_when_no_history_exists(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    reverted = tool.invoke("revert_last_change", {}, ToolContext(chat_id="chat-1"))
+
+    assert reverted.ok is False
+    assert "no recent workspace change" in reverted.summary.lower()
+    db.close()
+
+
 def test_apply_patch_rejects_ambiguous_or_missing_matches(tmp_path) -> None:
     root = tmp_path / "repo"
     root.mkdir()
@@ -704,6 +771,8 @@ def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> No
     assert description["actions"]["write_file"]["produces_artifacts"] == ["workspace_patch", "workspace_file"]
     assert description["actions"]["apply_patch"]["produces_artifacts"] == ["workspace_patch", "workspace_file"]
     assert description["actions"]["create_file"]["produces_artifacts"] == ["workspace_patch", "workspace_file"]
+    assert description["actions"]["revert_last_change"]["produces_artifacts"] == ["workspace_patch"]
+    assert description["actions"]["redo_last_change"]["produces_artifacts"] == ["workspace_patch"]
     assert description["actions"]["run_command"]["produces_artifacts"] == ["workspace_command_result"]
     assert description["controller_contract"]["artifact_previews"]["workspace_symbol_search"]["query"] == 220
     assert description["controller_contract"]["artifact_previews"]["workspace_file"]["content"] == 4000
