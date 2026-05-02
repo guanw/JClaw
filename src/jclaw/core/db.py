@@ -1,112 +1,27 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
 import sqlite3
-import uuid
 
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-@dataclass(slots=True)
-class MessageRecord:
-    role: str
-    content: str
-    created_at: str
-
-
-@dataclass(slots=True)
-class MemoryRecord:
-    key: str
-    value: str
-    updated_at: str
-
-
-@dataclass(slots=True)
-class CronJobRecord:
-    id: int
-    chat_id: str
-    schedule: str
-    prompt: str
-    next_run_at: str
-    enabled: bool
-
-
-@dataclass(slots=True)
-class GrantRecord:
-    id: int
-    root_path: str
-    capabilities: tuple[str, ...]
-    granted_by_chat_id: str
-    created_at: str
-    revoked_at: str | None
-
-
-@dataclass(slots=True)
-class ApprovalRequestRecord:
-    request_id: str
-    kind: str
-    chat_id: str
-    root_path: str
-    capabilities: tuple[str, ...]
-    objective: str
-    payload: dict[str, object]
-    status: str
-    created_at: str
-    resolved_at: str | None
-
-
-@dataclass(slots=True)
-class EmailAccountRecord:
-    alias: str
-    provider: str
-    email_address: str
-    scopes: tuple[str, ...]
-    status: str
-    created_at: str
-    updated_at: str
-    metadata: dict[str, object]
-
-
-@dataclass(slots=True)
-class WorkspaceChangeRecord:
-    id: int
-    chat_id: str
-    root_path: str
-    operation: str
-    touched_files: tuple[str, ...]
-    file_states: list[dict[str, object]]
-    state: str
-    created_at: str
-    updated_at: str
-
-
-@dataclass(slots=True)
-class ExecutionTraceSessionRecord:
-    trace_id: str
-    chat_id: str
-    user_text: str
-    status: str
-    created_at: str
-    updated_at: str
-    final_reply: str
-
-
-@dataclass(slots=True)
-class ExecutionTraceEventRecord:
-    id: int
-    trace_id: str
-    event_index: int
-    event_type: str
-    summary: str
-    payload: dict[str, object]
-    created_at: str
+from jclaw.core.records import (
+    ApprovalRequestRecord,
+    CronJobRecord,
+    EmailAccountRecord,
+    ExecutionTraceEventRecord,
+    ExecutionTraceSessionRecord,
+    GrantRecord,
+    MemoryRecord,
+    MessageRecord,
+    WorkspaceChangeRecord,
+)
+from jclaw.core.stores.permissions import PermissionStore
+from jclaw.core.stores.traces import TraceStore
+from jclaw.core.stores.workspace_changes import WorkspaceChangeStore
+from jclaw.core.time import utc_now
 
 
 class Database:
@@ -117,6 +32,9 @@ class Database:
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA foreign_keys=ON")
+        self.traces = TraceStore(self._connection)
+        self.workspace_changes = WorkspaceChangeStore(self._connection)
+        self.permissions = PermissionStore(self._connection)
         self.initialize()
 
     def initialize(self) -> None:
@@ -161,32 +79,6 @@ class Database:
                 created_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS grants (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                root_path TEXT NOT NULL,
-                capabilities_json TEXT NOT NULL,
-                granted_by_chat_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                revoked_at TEXT
-            );
-
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_grants_active_root
-                ON grants(root_path)
-                WHERE revoked_at IS NULL;
-
-            CREATE TABLE IF NOT EXISTS approval_requests (
-                request_id TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,
-                chat_id TEXT NOT NULL,
-                root_path TEXT NOT NULL,
-                capabilities_json TEXT NOT NULL,
-                objective TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                resolved_at TEXT
-            );
-
             CREATE TABLE IF NOT EXISTS email_accounts (
                 alias TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,
@@ -198,46 +90,11 @@ class Database:
                 updated_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS workspace_changes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id TEXT NOT NULL,
-                root_path TEXT NOT NULL,
-                operation TEXT NOT NULL,
-                touched_files_json TEXT NOT NULL,
-                file_states_json TEXT NOT NULL,
-                state TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS execution_trace_sessions (
-                trace_id TEXT PRIMARY KEY,
-                chat_id TEXT NOT NULL,
-                user_text TEXT NOT NULL,
-                status TEXT NOT NULL,
-                final_reply TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_execution_trace_sessions_chat
-                ON execution_trace_sessions(chat_id, created_at DESC);
-
-            CREATE TABLE IF NOT EXISTS execution_trace_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                trace_id TEXT NOT NULL,
-                event_index INTEGER NOT NULL,
-                event_type TEXT NOT NULL,
-                summary TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(trace_id) REFERENCES execution_trace_sessions(trace_id) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_execution_trace_events_trace
-                ON execution_trace_events(trace_id, event_index ASC);
             """
         )
+        self.traces.initialize()
+        self.workspace_changes.initialize()
+        self.permissions.initialize()
         self._connection.commit()
 
     def close(self) -> None:
@@ -308,25 +165,7 @@ class Database:
         return items
 
     def create_execution_trace_session(self, chat_id: str, user_text: str) -> ExecutionTraceSessionRecord:
-        now = utc_now()
-        trace_id = f"trace_{uuid.uuid4().hex[:12]}"
-        self._connection.execute(
-            """
-            INSERT INTO execution_trace_sessions(trace_id, chat_id, user_text, status, final_reply, created_at, updated_at)
-            VALUES (?, ?, ?, 'running', '', ?, ?)
-            """,
-            (trace_id, chat_id, user_text, now, now),
-        )
-        self._connection.commit()
-        return ExecutionTraceSessionRecord(
-            trace_id=trace_id,
-            chat_id=chat_id,
-            user_text=user_text,
-            status="running",
-            created_at=now,
-            updated_at=now,
-            final_reply="",
-        )
+        return self.traces.create_session(chat_id, user_text)
 
     def append_execution_trace_event(
         self,
@@ -336,66 +175,18 @@ class Database:
         summary: str,
         payload: dict[str, object] | None = None,
     ) -> ExecutionTraceEventRecord:
-        payload_data = payload or {}
-        row = self._connection.execute(
-            "SELECT COALESCE(MAX(event_index), 0) + 1 FROM execution_trace_events WHERE trace_id = ?",
-            (trace_id,),
-        ).fetchone()
-        event_index = int(row[0]) if row is not None else 1
-        now = utc_now()
-        cursor = self._connection.execute(
-            """
-            INSERT INTO execution_trace_events(trace_id, event_index, event_type, summary, payload_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (trace_id, event_index, event_type, summary, json.dumps(payload_data, ensure_ascii=True), now),
-        )
-        self._connection.execute(
-            "UPDATE execution_trace_sessions SET updated_at = ? WHERE trace_id = ?",
-            (now, trace_id),
-        )
-        self._connection.commit()
-        return ExecutionTraceEventRecord(
-            id=int(cursor.lastrowid),
-            trace_id=trace_id,
-            event_index=event_index,
+        return self.traces.append_event(
+            trace_id,
             event_type=event_type,
             summary=summary,
-            payload=payload_data,
-            created_at=now,
+            payload=payload,
         )
 
     def finish_execution_trace_session(self, trace_id: str, *, status: str, final_reply: str = "") -> None:
-        self._connection.execute(
-            """
-            UPDATE execution_trace_sessions
-            SET status = ?, final_reply = ?, updated_at = ?
-            WHERE trace_id = ?
-            """,
-            (status, final_reply, utc_now(), trace_id),
-        )
-        self._connection.commit()
+        self.traces.finish_session(trace_id, status=status, final_reply=final_reply)
 
     def get_execution_trace_session(self, trace_id: str) -> ExecutionTraceSessionRecord | None:
-        row = self._connection.execute(
-            """
-            SELECT trace_id, chat_id, user_text, status, created_at, updated_at, final_reply
-            FROM execution_trace_sessions
-            WHERE trace_id = ?
-            """,
-            (trace_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        return ExecutionTraceSessionRecord(
-            trace_id=str(row["trace_id"]),
-            chat_id=str(row["chat_id"]),
-            user_text=str(row["user_text"]),
-            status=str(row["status"]),
-            created_at=str(row["created_at"]),
-            updated_at=str(row["updated_at"]),
-            final_reply=str(row["final_reply"]),
-        )
+        return self.traces.get_session(trace_id)
 
     def get_latest_execution_trace_session(
         self,
@@ -403,55 +194,10 @@ class Database:
         *,
         status: str | None = None,
     ) -> ExecutionTraceSessionRecord | None:
-        query = """
-            SELECT trace_id, chat_id, user_text, status, created_at, updated_at, final_reply
-            FROM execution_trace_sessions
-            WHERE chat_id = ?
-        """
-        params: list[object] = [chat_id]
-        if status is not None:
-            query += " AND status = ?"
-            params.append(status)
-        query += " ORDER BY created_at DESC LIMIT 1"
-        row = self._connection.execute(query, tuple(params)).fetchone()
-        if row is None:
-            return None
-        return ExecutionTraceSessionRecord(
-            trace_id=str(row["trace_id"]),
-            chat_id=str(row["chat_id"]),
-            user_text=str(row["user_text"]),
-            status=str(row["status"]),
-            created_at=str(row["created_at"]),
-            updated_at=str(row["updated_at"]),
-            final_reply=str(row["final_reply"]),
-        )
+        return self.traces.get_latest_session(chat_id, status=status)
 
     def list_execution_trace_events(self, trace_id: str, *, limit: int | None = None) -> list[ExecutionTraceEventRecord]:
-        query = """
-            SELECT id, trace_id, event_index, event_type, summary, payload_json, created_at
-            FROM execution_trace_events
-            WHERE trace_id = ?
-            ORDER BY event_index ASC
-        """
-        params: tuple[object, ...]
-        if limit is not None:
-            query += " LIMIT ?"
-            params = (trace_id, limit)
-        else:
-            params = (trace_id,)
-        rows = self._connection.execute(query, params).fetchall()
-        return [
-            ExecutionTraceEventRecord(
-                id=int(row["id"]),
-                trace_id=str(row["trace_id"]),
-                event_index=int(row["event_index"]),
-                event_type=str(row["event_type"]),
-                summary=str(row["summary"]),
-                payload=json.loads(str(row["payload_json"])),
-                created_at=str(row["created_at"]),
-            )
-            for row in rows
-        ]
+        return self.traces.list_events(trace_id, limit=limit)
 
     def remember(self, scope: str, key: str, value: str) -> None:
         now = utc_now()
@@ -517,40 +263,12 @@ class Database:
         touched_files: Iterable[str],
         file_states: list[dict[str, object]],
     ) -> WorkspaceChangeRecord:
-        now = utc_now()
-        touched_files_tuple = tuple(str(item) for item in touched_files)
-        self._connection.execute(
-            "DELETE FROM workspace_changes WHERE chat_id = ? AND state = 'undone'",
-            (chat_id,),
-        )
-        cursor = self._connection.execute(
-            """
-            INSERT INTO workspace_changes(
-                chat_id, root_path, operation, touched_files_json, file_states_json, state, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, 'applied', ?, ?)
-            """,
-            (
-                chat_id,
-                root_path,
-                operation,
-                json.dumps(touched_files_tuple, ensure_ascii=True),
-                json.dumps(file_states, ensure_ascii=True),
-                now,
-                now,
-            ),
-        )
-        self._connection.commit()
-        return WorkspaceChangeRecord(
-            id=int(cursor.lastrowid),
+        return self.workspace_changes.record_change(
             chat_id=chat_id,
             root_path=root_path,
             operation=operation,
-            touched_files=touched_files_tuple,
+            touched_files=touched_files,
             file_states=file_states,
-            state="applied",
-            created_at=now,
-            updated_at=now,
         )
 
     def get_latest_workspace_change(
@@ -560,70 +278,13 @@ class Database:
         state: str,
         max_age_seconds: int | None = None,
     ) -> WorkspaceChangeRecord | None:
-        row = self._connection.execute(
-            """
-            SELECT id, chat_id, root_path, operation, touched_files_json, file_states_json, state, created_at, updated_at
-            FROM workspace_changes
-            WHERE chat_id = ? AND state = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (chat_id, state),
-        ).fetchone()
-        if row is None:
-            return None
-        record = WorkspaceChangeRecord(
-            id=int(row["id"]),
-            chat_id=str(row["chat_id"]),
-            root_path=str(row["root_path"]),
-            operation=str(row["operation"]),
-            touched_files=tuple(json.loads(str(row["touched_files_json"]))),
-            file_states=list(json.loads(str(row["file_states_json"]))),
-            state=str(row["state"]),
-            created_at=str(row["created_at"]),
-            updated_at=str(row["updated_at"]),
-        )
-        if max_age_seconds is not None:
-            created = datetime.fromisoformat(record.created_at)
-            age_seconds = (datetime.now(timezone.utc) - created).total_seconds()
-            if age_seconds > max_age_seconds:
-                return None
-        return record
+        return self.workspace_changes.get_latest_change(chat_id, state=state, max_age_seconds=max_age_seconds)
 
     def update_workspace_change_state(self, change_id: int, *, state: str) -> None:
-        self._connection.execute(
-            "UPDATE workspace_changes SET state = ?, updated_at = ? WHERE id = ?",
-            (state, utc_now(), change_id),
-        )
-        self._connection.commit()
+        self.workspace_changes.update_change_state(change_id, state=state)
 
     def prune_workspace_changes(self, chat_id: str, *, keep_latest: int, max_age_seconds: int) -> None:
-        cutoff = (datetime.now(timezone.utc).timestamp() - max_age_seconds)
-        rows = self._connection.execute(
-            """
-            SELECT id, created_at
-            FROM workspace_changes
-            WHERE chat_id = ?
-            ORDER BY id DESC
-            """,
-            (chat_id,),
-        ).fetchall()
-        keep_ids: set[int] = set()
-        for index, row in enumerate(rows):
-            record_id = int(row["id"])
-            created_at = datetime.fromisoformat(str(row["created_at"])).timestamp()
-            if index < keep_latest and created_at >= cutoff:
-                keep_ids.add(record_id)
-        if keep_ids:
-            placeholders = ", ".join("?" for _ in keep_ids)
-            params: tuple[object, ...] = (chat_id, *keep_ids)
-            self._connection.execute(
-                f"DELETE FROM workspace_changes WHERE chat_id = ? AND id NOT IN ({placeholders})",  # noqa: S608
-                params,
-            )
-        else:
-            self._connection.execute("DELETE FROM workspace_changes WHERE chat_id = ?", (chat_id,))
-        self._connection.commit()
+        self.workspace_changes.prune_changes(chat_id, keep_latest=keep_latest, max_age_seconds=max_age_seconds)
 
     def add_cron_job(self, chat_id: str, schedule: str, prompt: str, next_run_at: str) -> int:
         cursor = self._connection.execute(
@@ -750,82 +411,13 @@ class Database:
         self._connection.commit()
 
     def upsert_grant(self, root_path: str, capabilities: Iterable[str], granted_by_chat_id: str) -> GrantRecord:
-        normalized_caps = tuple(sorted({cap.strip() for cap in capabilities if cap.strip()}))
-        now = utc_now()
-        row = self._connection.execute(
-            """
-            SELECT id, root_path, capabilities_json, granted_by_chat_id, created_at, revoked_at
-            FROM grants
-            WHERE root_path = ? AND revoked_at IS NULL
-            """,
-            (root_path,),
-        ).fetchone()
-        if row is None:
-            cursor = self._connection.execute(
-                """
-                INSERT INTO grants(root_path, capabilities_json, granted_by_chat_id, created_at, revoked_at)
-                VALUES (?, ?, ?, ?, NULL)
-                """,
-                (root_path, json.dumps(normalized_caps), granted_by_chat_id, now),
-            )
-            self._connection.commit()
-            return GrantRecord(
-                id=int(cursor.lastrowid),
-                root_path=root_path,
-                capabilities=normalized_caps,
-                granted_by_chat_id=granted_by_chat_id,
-                created_at=now,
-                revoked_at=None,
-            )
-
-        merged_caps = tuple(sorted(set(json.loads(str(row["capabilities_json"]))) | set(normalized_caps)))
-        self._connection.execute(
-            """
-            UPDATE grants
-            SET capabilities_json = ?, granted_by_chat_id = ?
-            WHERE id = ?
-            """,
-            (json.dumps(merged_caps), granted_by_chat_id, int(row["id"])),
-        )
-        self._connection.commit()
-        return GrantRecord(
-            id=int(row["id"]),
-            root_path=str(row["root_path"]),
-            capabilities=merged_caps,
-            granted_by_chat_id=granted_by_chat_id,
-            created_at=str(row["created_at"]),
-            revoked_at=None if row["revoked_at"] is None else str(row["revoked_at"]),
-        )
+        return self.permissions.upsert_grant(root_path, capabilities, granted_by_chat_id)
 
     def list_grants(self, *, active_only: bool = True) -> list[GrantRecord]:
-        query = """
-            SELECT id, root_path, capabilities_json, granted_by_chat_id, created_at, revoked_at
-            FROM grants
-        """
-        params: tuple[object, ...] = ()
-        if active_only:
-            query += " WHERE revoked_at IS NULL"
-        query += " ORDER BY id ASC"
-        rows = self._connection.execute(query, params).fetchall()
-        return [
-            GrantRecord(
-                id=int(row["id"]),
-                root_path=str(row["root_path"]),
-                capabilities=tuple(json.loads(str(row["capabilities_json"]))),
-                granted_by_chat_id=str(row["granted_by_chat_id"]),
-                created_at=str(row["created_at"]),
-                revoked_at=None if row["revoked_at"] is None else str(row["revoked_at"]),
-            )
-            for row in rows
-        ]
+        return self.permissions.list_grants(active_only=active_only)
 
     def revoke_grant(self, grant_id: int) -> int:
-        cursor = self._connection.execute(
-            "UPDATE grants SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
-            (utc_now(), grant_id),
-        )
-        self._connection.commit()
-        return cursor.rowcount
+        return self.permissions.revoke_grant(grant_id)
 
     def create_approval_request(
         self,
@@ -837,110 +429,26 @@ class Database:
         objective: str,
         payload: dict[str, object],
     ) -> ApprovalRequestRecord:
-        request_id = f"req_{uuid.uuid4().hex[:10]}"
-        capabilities_tuple = tuple(sorted({cap.strip() for cap in capabilities if cap.strip()}))
-        payload_json = json.dumps(payload, ensure_ascii=True)
-        now = utc_now()
-        self._connection.execute(
-            """
-            INSERT INTO approval_requests(
-                request_id, kind, chat_id, root_path, capabilities_json, objective, payload_json, status, created_at, resolved_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL)
-            """,
-            (request_id, kind, chat_id, root_path, json.dumps(capabilities_tuple), objective, payload_json, now),
-        )
-        self._connection.commit()
-        return ApprovalRequestRecord(
-            request_id=request_id,
+        return self.permissions.create_approval_request(
             kind=kind,
             chat_id=chat_id,
             root_path=root_path,
-            capabilities=capabilities_tuple,
+            capabilities=capabilities,
             objective=objective,
             payload=payload,
-            status="pending",
-            created_at=now,
-            resolved_at=None,
         )
 
     def get_approval_request(self, request_id: str) -> ApprovalRequestRecord | None:
-        row = self._connection.execute(
-            """
-            SELECT request_id, kind, chat_id, root_path, capabilities_json, objective, payload_json, status, created_at, resolved_at
-            FROM approval_requests
-            WHERE request_id = ?
-            """,
-            (request_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        return ApprovalRequestRecord(
-            request_id=str(row["request_id"]),
-            kind=str(row["kind"]),
-            chat_id=str(row["chat_id"]),
-            root_path=str(row["root_path"]),
-            capabilities=tuple(json.loads(str(row["capabilities_json"]))),
-            objective=str(row["objective"]),
-            payload=json.loads(str(row["payload_json"])),
-            status=str(row["status"]),
-            created_at=str(row["created_at"]),
-            resolved_at=None if row["resolved_at"] is None else str(row["resolved_at"]),
-        )
+        return self.permissions.get_approval_request(request_id)
 
     def list_approval_requests(self, *, status: str | None = None) -> list[ApprovalRequestRecord]:
-        query = """
-            SELECT request_id, kind, chat_id, root_path, capabilities_json, objective, payload_json, status, created_at, resolved_at
-            FROM approval_requests
-        """
-        params: tuple[object, ...] = ()
-        if status is not None:
-            query += " WHERE status = ?"
-            params = (status,)
-        query += " ORDER BY created_at ASC"
-        rows = self._connection.execute(query, params).fetchall()
-        return [
-            ApprovalRequestRecord(
-                request_id=str(row["request_id"]),
-                kind=str(row["kind"]),
-                chat_id=str(row["chat_id"]),
-                root_path=str(row["root_path"]),
-                capabilities=tuple(json.loads(str(row["capabilities_json"]))),
-                objective=str(row["objective"]),
-                payload=json.loads(str(row["payload_json"])),
-                status=str(row["status"]),
-                created_at=str(row["created_at"]),
-                resolved_at=None if row["resolved_at"] is None else str(row["resolved_at"]),
-            )
-            for row in rows
-        ]
+        return self.permissions.list_approval_requests(status=status)
 
     def resolve_approval_request(self, request_id: str, status: str) -> int:
-        cursor = self._connection.execute(
-            """
-            UPDATE approval_requests
-            SET status = ?, resolved_at = ?
-            WHERE request_id = ? AND status = 'pending'
-            """,
-            (status, utc_now(), request_id),
-        )
-        self._connection.commit()
-        return cursor.rowcount
+        return self.permissions.resolve_approval_request(request_id, status)
 
     def update_approval_request_status(self, request_id: str, status: str) -> int:
-        cursor = self._connection.execute(
-            """
-            UPDATE approval_requests
-            SET status = ?, resolved_at = CASE
-                WHEN ? IN ('denied', 'aborted', 'applied', 'failed') THEN ?
-                ELSE resolved_at
-            END
-            WHERE request_id = ?
-            """,
-            (status, status, utc_now(), request_id),
-        )
-        self._connection.commit()
-        return cursor.rowcount
+        return self.permissions.update_approval_request_status(request_id, status)
 
     def upsert_email_account(
         self,
