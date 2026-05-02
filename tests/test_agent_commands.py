@@ -508,6 +508,29 @@ def test_command_flow(tmp_path) -> None:
     db.close()
 
 
+def test_debug_trace_commands_toggle_mode_and_render_latest_trace(tmp_path) -> None:
+    agent, db = _build_agent_for_test(tmp_path, DummyLLM())
+
+    assert agent.handle_text("chat-1", "/debug on") == "Execution trace is now on for this chat."
+    assert db.get_trace_mode("chat-1") == "summary"
+
+    session = db.create_execution_trace_session("chat-1", "inspect")
+    db.append_execution_trace_event(
+        session.trace_id,
+        event_type="turn_started",
+        summary="Received a new user turn.",
+        payload={},
+    )
+    db.finish_execution_trace_session(session.trace_id, status="completed", final_reply="done")
+
+    trace_reply = agent.handle_text("chat-1", "/trace")
+    assert "Trace [completed]" in trace_reply
+    assert "Received a new user turn." in trace_reply
+    assert agent.handle_text("chat-1", "/debug off") == "Execution trace is now off for this chat."
+    assert db.get_trace_mode("chat-1") == "off"
+    db.close()
+
+
 def test_llm_selected_tool_routes_to_memory_remember(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),
@@ -1701,6 +1724,45 @@ def test_workspace_tool_loop_continue_adds_more_budget_after_exhaustion(tmp_path
         "step_four",
         "step_five",
     ]
+    db.close()
+
+
+def test_execution_trace_records_controller_tool_and_completion_events(tmp_path) -> None:
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"fake","action":"step_one","params":{},"reason":"Inspect the file."}',
+                '{"type":"complete","tool":"","action":"","params":{},"answer":"","reason":"The latest tool result is enough to return."}',
+                "Final tool-based reply.",
+            ]
+        ),
+    )
+    agent.tools._tools["fake"] = FakeTool()  # noqa: SLF001
+    db.set_trace_mode("chat-1", "summary")
+
+    reply = agent.handle_text("chat-1", "inspect the file and report back")
+
+    latest = db.get_latest_execution_trace_session("chat-1")
+    assert latest is not None
+    assert latest.status == "completed"
+    assert latest.final_reply == "Final tool-based reply."
+    events = db.list_execution_trace_events(latest.trace_id)
+    assert [item.event_type for item in events] == [
+        "turn_started",
+        "controller_decision",
+        "tool_started",
+        "tool_finished",
+        "observation_recorded",
+        "controller_decision",
+        "turn_completed",
+        "answer_composed",
+    ]
+    rendered = agent.render_latest_trace("chat-1")
+    assert "Trace [completed]" in rendered
+    assert "Decided to call fake.step_one" in rendered
+    assert "fake.step_one: Completed fake step one." in rendered
+    assert reply == "Final tool-based reply."
     db.close()
 
 

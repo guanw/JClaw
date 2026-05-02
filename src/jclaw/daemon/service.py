@@ -79,12 +79,20 @@ class JClawDaemon:
             initial_status,
             reply_to_message_id=message_id,
         )
+        trace_placeholder_id: str | None = None
+        trace_mode = self.db.get_trace_mode(chat_id) if hasattr(self, "db") else "off"
+        if trace_mode != "off" and not text.strip().startswith("/"):
+            trace_placeholder_id = self.channel.send_message(
+                chat_id,
+                "```text\nTrace\n(waiting for first event)\n```",
+                reply_to_message_id=message_id,
+            )
         stop_indicator = threading.Event()
         indicator_thread: threading.Thread | None = None
         if placeholder_id:
             indicator_thread = threading.Thread(
                 target=self._run_thinking_indicator,
-                args=(stop_indicator, chat_id, placeholder_id, message_id, text),
+                args=(stop_indicator, chat_id, placeholder_id, trace_placeholder_id, message_id, text),
                 daemon=True,
             )
             indicator_thread.start()
@@ -98,6 +106,10 @@ class JClawDaemon:
             self.channel.edit_message(chat_id, placeholder_id, reply)
         else:
             self.channel.send_message(chat_id, reply, reply_to_message_id=message_id)
+        if trace_placeholder_id:
+            trace_text = self._render_trace_text(chat_id, latest=True)
+            if trace_text:
+                self.channel.edit_message(chat_id, trace_placeholder_id, trace_text)
 
     def _thinking_status(self, message_id: str, text: str, *, step: int) -> str:
         seed = f"{message_id}:{text}"
@@ -109,17 +121,32 @@ class JClawDaemon:
         stop_indicator: threading.Event,
         chat_id: str,
         placeholder_id: str,
+        trace_placeholder_id: str | None,
         message_id: str,
         text: str,
     ) -> None:
         step = 1
+        last_trace_text = ""
         while not stop_indicator.wait(self.THINKING_STATUS_INTERVAL_SECONDS):
             try:
                 self.channel.edit_message(chat_id, placeholder_id, self._thinking_status(message_id, text, step=step))
+                if trace_placeholder_id:
+                    trace_text = self._render_trace_text(chat_id, latest=False)
+                    if trace_text and trace_text != last_trace_text:
+                        self.channel.edit_message(chat_id, trace_placeholder_id, trace_text)
+                        last_trace_text = trace_text
             except Exception:  # noqa: BLE001
                 LOGGER.exception("failed to update thinking indicator for chat %s", chat_id)
                 return
             step += 1
+
+    def _render_trace_text(self, chat_id: str, *, latest: bool) -> str:
+        renderer_name = "render_latest_trace" if latest else "render_running_trace"
+        renderer = getattr(self.agent, renderer_name, None)
+        if callable(renderer):
+            rendered = renderer(chat_id)
+            return str(rendered) if rendered else ""
+        return ""
 
     def _run_due_cron_jobs(self) -> None:
         now = datetime.now(timezone.utc).isoformat()

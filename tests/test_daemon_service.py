@@ -11,12 +11,17 @@ from jclaw.daemon.service import JClawDaemon
 class FakeDB:
     def __init__(self) -> None:
         self.offset = 0
+        self.trace_mode = "off"
 
     def get_telegram_offset(self) -> int:
         return self.offset
 
     def set_telegram_offset(self, offset: int) -> None:
         self.offset = offset
+
+    def get_trace_mode(self, chat_id: str) -> str:
+        _ = chat_id
+        return self.trace_mode
 
     def due_cron_jobs(self, now: str) -> list[object]:
         return []
@@ -38,7 +43,7 @@ class FakeChannel:
 
     def send_message(self, chat_id: str, text: str, reply_to_message_id: str | None = None) -> str:
         self.sent_messages.append((chat_id, text, reply_to_message_id))
-        return "placeholder-1"
+        return f"placeholder-{len(self.sent_messages)}"
 
     def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
         self.edited_messages.append((chat_id, message_id, text))
@@ -169,3 +174,27 @@ def test_handle_message_updates_placeholder_while_waiting() -> None:
     interim_updates = [entry[2] for entry in daemon.channel.edited_messages[:-1]]
     assert interim_updates
     assert all(text in JClawDaemon.THINKING_STATUSES for text in interim_updates)
+
+
+def test_handle_message_sends_and_updates_trace_message_when_enabled() -> None:
+    daemon = object.__new__(JClawDaemon)
+    daemon.config = SimpleNamespace(telegram=SimpleNamespace(allowed_chat_ids=()))
+    daemon.channel = FakeChannel([])
+    daemon.db = FakeDB()
+    daemon.db.trace_mode = "summary"
+    daemon.THINKING_STATUS_INTERVAL_SECONDS = 10.0
+    daemon.agent = SimpleNamespace(
+        handle_text=lambda chat_id, text, user_name=None: "Final answer",
+        render_running_trace=lambda chat_id: "",
+        render_latest_trace=lambda chat_id: "```text\nTrace [completed]\n1. Received a new user turn.\n```",
+    )
+
+    daemon._handle_message("chat-1", "42", "Jude", "hello")
+
+    assert len(daemon.channel.sent_messages) == 2
+    assert daemon.channel.sent_messages[1] == ("chat-1", "```text\nTrace\n(waiting for first event)\n```", "42")
+    assert daemon.channel.edited_messages[-1] == (
+        "chat-1",
+        "placeholder-2",
+        "```text\nTrace [completed]\n1. Received a new user turn.\n```",
+    )

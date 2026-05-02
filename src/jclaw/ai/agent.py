@@ -26,6 +26,7 @@ from jclaw.tools.workspace.tool import WorkspaceTool
 
 LOGGER = logging.getLogger(__name__)
 MAX_CONTROLLER_OBSERVATIONS = 5
+MAX_RENDERED_TRACE_EVENTS = 18
 
 
 @dataclass(slots=True)
@@ -49,6 +50,8 @@ class AssistantAgent:
         self.llm = llm
         self.system_prompt = load_system_prompt(config.provider.system_prompt_files)
         self._pending_tool_loop_continuations: dict[str, PendingToolLoopContinuation] = {}
+        self._active_trace_ids: dict[str, str] = {}
+        self._active_trace_statuses: dict[str, str] = {}
         self.tools = ToolRegistry()
         self.tools.register(MemoryTool(db, search_limit=config.memory.max_memory_items))
         self.tools.register(PermissionsTool(db))
@@ -120,23 +123,47 @@ class AssistantAgent:
             self.db.store_message(chat_id, "assistant", command_reply)
             return command_reply
 
-        continuation_reply = self._handle_tool_loop_continuation(chat_id, text, user_name=user_name)
-        if continuation_reply is not None:
+        trace_id = self._start_execution_trace(chat_id, text)
+        reply = ""
+        try:
+            continuation_reply = self._handle_tool_loop_continuation(chat_id, text, user_name=user_name)
+            if continuation_reply is not None:
+                self.db.store_message(chat_id, "user", text)
+                self.db.store_message(chat_id, "assistant", continuation_reply)
+                reply = continuation_reply
+                return continuation_reply
+
             self.db.store_message(chat_id, "user", text)
-            self.db.store_message(chat_id, "assistant", continuation_reply)
-            return continuation_reply
 
-        self.db.store_message(chat_id, "user", text)
+            tool_reply = self._handle_tool_request(chat_id, text, user_name=user_name)
+            if tool_reply is not None:
+                self.db.store_message(chat_id, "assistant", tool_reply)
+                reply = tool_reply
+                return tool_reply
 
-        tool_reply = self._handle_tool_request(chat_id, text, user_name=user_name)
-        if tool_reply is not None:
-            self.db.store_message(chat_id, "assistant", tool_reply)
-            return tool_reply
-
-        messages = self._build_messages(chat_id, user_text=text, user_name=user_name)
-        reply = self.llm.chat(messages)
-        self.db.store_message(chat_id, "assistant", reply)
-        return reply
+            messages = self._build_messages(chat_id, user_text=text, user_name=user_name)
+            reply = self.llm.chat(messages)
+            self._append_execution_trace_event(
+                chat_id,
+                "answer_composed",
+                "Composed a direct reply without tool use.",
+                {"mode": "direct_llm"},
+            )
+            self._set_execution_trace_status(chat_id, "answered")
+            self.db.store_message(chat_id, "assistant", reply)
+            return reply
+        except Exception as exc:  # noqa: BLE001
+            self._append_execution_trace_event(
+                chat_id,
+                "turn_failed",
+                f"Turn failed: {exc}",
+                {"error": str(exc)},
+            )
+            self._set_execution_trace_status(chat_id, "failed")
+            raise
+        finally:
+            if trace_id:
+                self._finish_execution_trace(chat_id, final_reply=reply)
 
     def handle_cron(self, chat_id: str, prompt: str) -> str:
         messages = self._build_messages(
@@ -174,6 +201,102 @@ class AssistantAgent:
         memory_lines = "\n".join(f"- {item.key}: {item.value}" for item in memories)
         return f"{self.system_prompt}\n\nRelevant memory:\n{memory_lines}"
 
+    def _start_execution_trace(self, chat_id: str, text: str) -> str:
+        if self.db.get_trace_mode(chat_id) == "off":
+            return ""
+        session = self.db.create_execution_trace_session(chat_id, text)
+        self._active_trace_ids[chat_id] = session.trace_id
+        self._active_trace_statuses[chat_id] = "running"
+        self.db.append_execution_trace_event(
+            session.trace_id,
+            event_type="turn_started",
+            summary="Received a new user turn.",
+            payload={"request": text},
+        )
+        return session.trace_id
+
+    def _append_execution_trace_event(
+        self,
+        chat_id: str,
+        event_type: str,
+        summary: str,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        trace_id = self._active_trace_ids.get(chat_id, "")
+        if not trace_id:
+            return
+        self.db.append_execution_trace_event(
+            trace_id,
+            event_type=event_type,
+            summary=summary,
+            payload=payload,
+        )
+
+    def _set_execution_trace_status(self, chat_id: str, status: str) -> None:
+        trace_id = self._active_trace_ids.get(chat_id, "")
+        if not trace_id:
+            return
+        self._active_trace_statuses[chat_id] = status
+
+    def _finish_execution_trace(self, chat_id: str, *, final_reply: str) -> None:
+        trace_id = self._active_trace_ids.pop(chat_id, "")
+        status = self._active_trace_statuses.pop(chat_id, "running")
+        if not trace_id:
+            return
+        self.db.finish_execution_trace_session(trace_id, status=status, final_reply=final_reply)
+
+    def render_running_trace(self, chat_id: str) -> str:
+        session = self.db.get_latest_execution_trace_session(chat_id, status="running")
+        if session is None:
+            return ""
+        return self._render_trace_session(session.trace_id)
+
+    def render_latest_trace(self, chat_id: str) -> str:
+        session = self.db.get_latest_execution_trace_session(chat_id)
+        if session is None:
+            return ""
+        return self._render_trace_session(session.trace_id)
+
+    def _render_trace_session(self, trace_id: str) -> str:
+        session = self.db.get_execution_trace_session(trace_id)
+        if session is None:
+            return ""
+        events = self.db.list_execution_trace_events(trace_id)
+        if not events:
+            return "```text\nTrace\n(no events yet)\n```"
+        lines = [f"Trace [{session.status}]"]
+        request = session.user_text.strip().replace("\n", " ")
+        if request:
+            lines.append(f"Request: {request[:120]}{'...' if len(request) > 120 else ''}")
+        if len(events) > MAX_RENDERED_TRACE_EVENTS:
+            skipped = len(events) - MAX_RENDERED_TRACE_EVENTS
+            lines.append(f"... {skipped} earlier event(s) omitted ...")
+            render_events = events[-MAX_RENDERED_TRACE_EVENTS:]
+        else:
+            render_events = events
+        for event in render_events:
+            lines.append(f"{event.event_index}. {event.summary}")
+        return "```text\n" + "\n".join(lines) + "\n```"
+
+    def _trace_decision_summary(self, decision: Decision) -> str:
+        if decision.type is DecisionType.TOOL_CALL:
+            suffix = f" - {decision.reason}" if decision.reason else ""
+            return f"Decided to call {decision.tool}.{decision.action}{suffix}"
+        if decision.type is DecisionType.ANSWER:
+            return "Decided to answer directly."
+        if decision.type is DecisionType.BLOCKED:
+            return f"Decided the turn is blocked.{f' {decision.reason}' if decision.reason else ''}"
+        return f"Decided the turn is complete.{f' {decision.reason}' if decision.reason else ''}"
+
+    def _trace_decision_payload(self, decision: Decision) -> dict[str, object]:
+        return {
+            "type": decision.type.value,
+            "tool": decision.tool,
+            "action": decision.action,
+            "params": dict(decision.params),
+            "reason": decision.reason,
+        }
+
     def _handle_command(self, chat_id: str, text: str) -> str | None:
         stripped = text.strip()
         if not stripped:
@@ -191,6 +314,10 @@ class AssistantAgent:
             return self._forget(chat_id, remainder)
         if command == "/memory":
             return self._memory(chat_id)
+        if command == "/debug":
+            return self._debug_trace(chat_id, remainder)
+        if command == "/trace":
+            return self._trace_last(chat_id, remainder)
         if command == "/approve":
             return self._approve(chat_id, remainder)
         if command == "/deny":
@@ -230,12 +357,32 @@ class AssistantAgent:
         lines = [f"{item.key} = {item.value}" for item in items]
         return "Stored memories:\n" + "\n".join(lines)
 
+    def _debug_trace(self, chat_id: str, remainder: str) -> str:
+        mode = remainder.strip().lower()
+        if mode in {"on", "summary"}:
+            self.db.set_trace_mode(chat_id, "summary")
+            return "Execution trace is now on for this chat."
+        if mode == "off":
+            self.db.set_trace_mode(chat_id, "off")
+            return "Execution trace is now off for this chat."
+        current = self.db.get_trace_mode(chat_id)
+        return f"Trace mode is {current}. Usage: /debug on|off"
+
+    def _trace_last(self, chat_id: str, remainder: str) -> str:
+        _ = remainder
+        rendered = self.render_latest_trace(chat_id)
+        if rendered:
+            return rendered
+        return "No execution trace is available yet."
+
     def _help_text(self) -> str:
         return (
             "Commands:\n"
             "/remember key = value\n"
             "/memory\n"
             "/forget key\n"
+            "/debug on|off\n"
+            "/trace [last]\n"
             "/approve req_123\n"
             "/deny req_123\n"
             "/grants\n"
@@ -366,7 +513,25 @@ class AssistantAgent:
             return None
         pending = self._pending_tool_loop_continuations.pop(chat_id, None)
         if pending is None:
+            self._append_execution_trace_event(
+                chat_id,
+                "turn_blocked",
+                "No paused tool run was available to continue.",
+                {"reason": "no_pending_continuation"},
+            )
+            self._set_execution_trace_status(chat_id, "blocked")
             return "There is no paused tool run waiting for continuation."
+        self._append_execution_trace_event(
+            chat_id,
+            "continuation_resumed",
+            f"Resumed the paused {pending.tool_name} tool loop.",
+            {
+                "tool": pending.tool_name,
+                "step_count": len(pending.steps),
+                "previous_budget": pending.total_steps,
+                "extra_steps": pending.extra_steps,
+            },
+        )
         return self._execute_tool_loop(
             chat_id,
             pending.request,
@@ -391,11 +556,50 @@ class AssistantAgent:
         if decision is None:
             return None
         if decision.type is DecisionType.ANSWER:
+            self._append_execution_trace_event(
+                chat_id,
+                "controller_decision",
+                self._trace_decision_summary(decision),
+                self._trace_decision_payload(decision),
+            )
+            self._append_execution_trace_event(
+                chat_id,
+                "answer_composed",
+                "Answered directly without tool use.",
+                {"mode": "controller_answer"},
+            )
+            self._set_execution_trace_status(chat_id, "answered")
             return decision.answer
         if decision.type is DecisionType.BLOCKED:
+            self._append_execution_trace_event(
+                chat_id,
+                "controller_decision",
+                self._trace_decision_summary(decision),
+                self._trace_decision_payload(decision),
+            )
+            self._append_execution_trace_event(
+                chat_id,
+                "turn_blocked",
+                decision.reason or "Stopped because progress is blocked.",
+                {"mode": "controller_blocked"},
+            )
+            self._set_execution_trace_status(chat_id, "blocked")
             return decision.reason or "Stopped because progress is blocked."
         if decision.type is DecisionType.COMPLETE:
             LOGGER.info("initial controller completed without tool use: %s", decision.reason)
+            self._append_execution_trace_event(
+                chat_id,
+                "controller_decision",
+                self._trace_decision_summary(decision),
+                self._trace_decision_payload(decision),
+            )
+            self._append_execution_trace_event(
+                chat_id,
+                "turn_completed",
+                decision.reason or "Completed without tool use.",
+                {"mode": "controller_complete"},
+            )
+            self._set_execution_trace_status(chat_id, "completed")
             return None
         return self._execute_tool_loop(
             chat_id,
@@ -426,6 +630,12 @@ class AssistantAgent:
         try:
             while len(steps) < step_budget:
                 step_budget = max(step_budget, self._tool_loop_step_budget(decision.tool))
+                self._append_execution_trace_event(
+                    chat_id,
+                    "controller_decision",
+                    self._trace_decision_summary(decision),
+                    self._trace_decision_payload(decision),
+                )
                 signature = json.dumps(
                     {
                         "tool": decision.tool,
@@ -437,6 +647,13 @@ class AssistantAgent:
                 )
                 if signature in seen_signatures:
                     LOGGER.info("tool loop detected repeated step; stopping")
+                    self._append_execution_trace_event(
+                        chat_id,
+                        "turn_blocked",
+                        "Stopped because the tool loop repeated without making progress.",
+                        {"reason": "repeated_step"},
+                    )
+                    self._set_execution_trace_status(chat_id, "blocked")
                     return "Stopped because the tool loop repeated without making progress."
                 seen_signatures.add(signature)
 
@@ -446,6 +663,16 @@ class AssistantAgent:
                         decision.action,
                         dict(decision.params),
                         runtime,
+                    )
+                    self._append_execution_trace_event(
+                        chat_id,
+                        "tool_started",
+                        f"Starting {decision.tool}.{decision.action}.",
+                        {
+                            "tool": decision.tool,
+                            "action": decision.action,
+                            "params": materialized_params,
+                        },
                     )
                     result = self.tools.invoke(
                         decision.tool,
@@ -465,6 +692,17 @@ class AssistantAgent:
                         decision.tool,
                         decision.action,
                     )
+                    self._append_execution_trace_event(
+                        chat_id,
+                        "turn_failed",
+                        f"Tool {decision.tool}.{decision.action} failed: {exc}",
+                        {
+                            "tool": decision.tool,
+                            "action": decision.action,
+                            "error": str(exc),
+                        },
+                    )
+                    self._set_execution_trace_status(chat_id, "failed")
                     return f"Tool {decision.tool}.{decision.action} failed: {exc}"
                 steps.append(
                     {
@@ -476,13 +714,34 @@ class AssistantAgent:
                     }
                 )
                 runtime.last_decision = decision
-                runtime.append(
-                    Observation.from_tool_result(
-                        result,
-                        controller_contract=self._tool_controller_contract(decision.tool),
-                    )
+                observation = Observation.from_tool_result(
+                    result,
+                    controller_contract=self._tool_controller_contract(decision.tool),
+                )
+                runtime.append(observation)
+                self._append_execution_trace_event(
+                    chat_id,
+                    "tool_finished",
+                    f"{decision.tool}.{decision.action}: {result.summary}",
+                    {
+                        "tool": decision.tool,
+                        "action": decision.action,
+                        "ok": result.ok,
+                        "needs_confirmation": result.needs_confirmation,
+                    },
+                )
+                self._append_execution_trace_event(
+                    chat_id,
+                    "observation_recorded",
+                    f"Observed: {observation.summary}",
+                    {
+                        "artifact_types": observation.artifact_types,
+                        "data_preview": observation.data_preview,
+                        "needs_confirmation": observation.needs_confirmation,
+                    },
                 )
                 if result.needs_confirmation:
+                    self._set_execution_trace_status(chat_id, "completed")
                     return self._compose_tool_reply(
                         chat_id,
                         text,
@@ -491,6 +750,7 @@ class AssistantAgent:
                         result=result,
                     )
                 if result.data.get("allow_tool_followup") is False:
+                    self._set_execution_trace_status(chat_id, "completed")
                     return self._compose_tool_reply(
                         chat_id,
                         text,
@@ -508,6 +768,13 @@ class AssistantAgent:
                 )
                 if next_decision is None:
                     LOGGER.info("tool continuation returned no usable decision; stopping with latest result")
+                    self._append_execution_trace_event(
+                        chat_id,
+                        "turn_completed",
+                        "Controller produced no further usable decision; returning the latest tool result.",
+                        {"mode": "latest_tool_result"},
+                    )
+                    self._set_execution_trace_status(chat_id, "completed")
                     return self._compose_tool_reply(
                         chat_id,
                         text,
@@ -517,9 +784,35 @@ class AssistantAgent:
                     )
                 if next_decision.type is DecisionType.ANSWER:
                     self._pending_tool_loop_continuations.pop(chat_id, None)
+                    self._append_execution_trace_event(
+                        chat_id,
+                        "controller_decision",
+                        self._trace_decision_summary(next_decision),
+                        self._trace_decision_payload(next_decision),
+                    )
+                    self._append_execution_trace_event(
+                        chat_id,
+                        "answer_composed",
+                        "Controller answered directly from the accumulated observations.",
+                        {"mode": "controller_answer"},
+                    )
+                    self._set_execution_trace_status(chat_id, "answered")
                     return next_decision.answer
                 if next_decision.type is DecisionType.BLOCKED:
                     self._pending_tool_loop_continuations.pop(chat_id, None)
+                    self._append_execution_trace_event(
+                        chat_id,
+                        "controller_decision",
+                        self._trace_decision_summary(next_decision),
+                        self._trace_decision_payload(next_decision),
+                    )
+                    self._append_execution_trace_event(
+                        chat_id,
+                        "turn_blocked",
+                        next_decision.reason or "Stopped because progress is blocked.",
+                        {"mode": "controller_blocked"},
+                    )
+                    self._set_execution_trace_status(chat_id, "blocked")
                     return next_decision.reason or self._compose_tool_reply(
                         chat_id,
                         text,
@@ -529,6 +822,19 @@ class AssistantAgent:
                     )
                 if next_decision.type is DecisionType.COMPLETE:
                     self._pending_tool_loop_continuations.pop(chat_id, None)
+                    self._append_execution_trace_event(
+                        chat_id,
+                        "controller_decision",
+                        self._trace_decision_summary(next_decision),
+                        self._trace_decision_payload(next_decision),
+                    )
+                    self._append_execution_trace_event(
+                        chat_id,
+                        "turn_completed",
+                        next_decision.reason or "Controller marked the tool run as complete.",
+                        {"mode": "controller_complete"},
+                    )
+                    self._set_execution_trace_status(chat_id, "completed")
                     return self._compose_tool_reply(
                         chat_id,
                         text,
@@ -550,6 +856,17 @@ class AssistantAgent:
                 extra_steps=self._tool_loop_continue_step_increment(decision.tool),
                 total_steps=step_budget,
             )
+            self._append_execution_trace_event(
+                chat_id,
+                "continuation_offered",
+                self._tool_loop_exhausted_reply(decision.tool, step_budget),
+                {
+                    "tool": decision.tool,
+                    "step_budget": step_budget,
+                    "extra_steps": self._tool_loop_continue_step_increment(decision.tool),
+                },
+            )
+            self._set_execution_trace_status(chat_id, "paused")
             return self._tool_loop_exhausted_reply(decision.tool, step_budget)
         finally:
             if not paused:
@@ -843,9 +1160,21 @@ class AssistantAgent:
         tool_result_text = tool.format_result(str(decision["action"]), result)
         if self._should_return_direct_tool_result(tool.describe(), result):
             LOGGER.info("%s tool result returned directly based on tool metadata", decision["tool"])
+            self._append_execution_trace_event(
+                chat_id,
+                "answer_composed",
+                f"Returned the direct result from {decision['tool']}.{decision['action']}.",
+                {"mode": "direct_tool_result"},
+            )
             return tool_result_text
         if result.needs_confirmation:
             LOGGER.info("tool result requires confirmation; returning raw tool result")
+            self._append_execution_trace_event(
+                chat_id,
+                "answer_composed",
+                f"Returned the raw confirmation result from {decision['tool']}.{decision['action']}.",
+                {"mode": "confirmation_result"},
+            )
             return tool_result_text
         messages = self._build_tool_reply_messages(chat_id, text, user_name=user_name)
         messages.append(
@@ -871,8 +1200,21 @@ class AssistantAgent:
             }
         )
         try:
-            return self.llm.chat(messages)
+            reply = self.llm.chat(messages)
+            self._append_execution_trace_event(
+                chat_id,
+                "answer_composed",
+                f"Composed a natural-language reply from {decision['tool']}.{decision['action']}.",
+                {"mode": "tool_reply_synthesis"},
+            )
+            return reply
         except Exception:  # noqa: BLE001
+            self._append_execution_trace_event(
+                chat_id,
+                "answer_composed",
+                f"Fell back to the raw tool result from {decision['tool']}.{decision['action']}.",
+                {"mode": "tool_reply_fallback"},
+            )
             return tool_result_text
 
     def _build_tool_reply_messages(self, chat_id: str, text: str, *, user_name: str) -> list[dict[str, str]]:
