@@ -14,7 +14,16 @@ from jclaw.core.defaults import (
     BROWSER_VIEWPORT_HEIGHT,
     BROWSER_VIEWPORT_WIDTH,
 )
-from jclaw.tools.base import ActionSpec, ToolContext, ToolLoopFinalizer, ToolLoopState, ToolResult
+from jclaw.tools.base import (
+    ActionSpec,
+    ToolContext,
+    ToolLoopFinalizer,
+    ToolLoopState,
+    ToolResult,
+    append_field,
+    append_list_section,
+    build_tool_description,
+)
 from jclaw.tools.browser.artifacts import BrowserArtifactStore
 from jclaw.tools.browser.desktop_driver import DesktopBrowserDriver
 from jclaw.tools.browser.models import BrowserReasoner, Target
@@ -74,43 +83,48 @@ class BrowserTool(
 
     def describe(self) -> dict[str, Any]:
         specs = self._action_specs()
-        return {
-            "name": self.name,
-            "description": "Browse the web, inspect current pages, interact with websites, and run bounded multi-step browser objectives.",
-            "actions": {name: spec.to_dict() for name, spec in specs.items()},
-            "read_only_by_default": False,
-            "supports_followup": True,
-        }
+        return build_tool_description(
+            name=self.name,
+            description="Browse the web, inspect current pages, interact with websites, and run bounded multi-step browser objectives.",
+            actions=specs,
+        )
 
     def format_result(self, action: str, result: ToolResult) -> str:
         lines = [result.summary]
         data = result.data
-        if data.get("url"):
-            lines.append(f"URL: {data['url']}")
-        if data.get("title"):
-            lines.append(f"Title: {data['title']}")
-        if data.get("text"):
-            lines.append(f"Text: {str(data['text'])[:800]}")
-        if data.get("sources"):
-            lines.append("Sources:")
-            for source in data["sources"][:4]:
-                title = str(source.get("title", "")).strip() or "Untitled"
-                url = str(source.get("url", "")).strip()
-                lines.append(f"- {title}: {url}")
-        if data.get("termination_reason"):
-            lines.append(f"Termination: {data['termination_reason']}")
-        if data.get("missing_information"):
-            lines.append(f"Missing information: {data['missing_information']}")
-        if data.get("evidence_refs"):
-            lines.append(f"Evidence refs: {', '.join(data['evidence_refs'][:8])}")
-        if data.get("observation_count") is not None:
-            lines.append(f"Observations: {data['observation_count']}")
-        if data.get("steps"):
-            lines.append("Executed steps:")
-            for step in data["steps"][:5]:
-                lines.append(f"- {step['action']}: {step.get('reason', '')}".strip())
-        if "sessions" in data:
-            lines.append(f"Sessions: {len(data['sessions'])}")
+        append_field(lines, "URL", data.get("url"))
+        append_field(lines, "Title", data.get("title"))
+        append_field(lines, "Text", data.get("text"), formatter=lambda value: str(value)[:800])
+        append_list_section(
+            lines,
+            "Sources:",
+            data.get("sources"),
+            lambda source: f"- {(str(source.get('title', '')).strip() or 'Untitled')}: {str(source.get('url', '')).strip()}",
+            limit=4,
+        )
+        append_field(lines, "Termination", data.get("termination_reason"))
+        append_field(lines, "Missing information", data.get("missing_information"))
+        append_field(
+            lines,
+            "Evidence refs",
+            data.get("evidence_refs"),
+            formatter=lambda refs: ", ".join(str(item) for item in refs[:8]),
+        )
+        append_field(lines, "Observations", data.get("observation_count"), include_when=lambda value: value is not None)
+        append_list_section(
+            lines,
+            "Executed steps:",
+            data.get("steps"),
+            lambda step: f"- {step['action']}: {step.get('reason', '')}".strip(),
+            limit=5,
+        )
+        append_field(
+            lines,
+            "Sessions",
+            data.get("sessions"),
+            include_when=lambda value: isinstance(value, list),
+            formatter=lambda sessions: str(len(sessions)),
+        )
         return "\n".join(lines)
 
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:

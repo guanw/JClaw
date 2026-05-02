@@ -8,7 +8,7 @@ import re
 from typing import Any, Callable
 
 from jclaw.core.db import Database, EmailAccountRecord
-from jclaw.tools.base import ActionSpec, RuntimeState, ToolContext, ToolResult
+from jclaw.tools.base import ActionSpec, RuntimeState, ToolContext, ToolResult, build_tool_description
 from jclaw.tools.email.auth import ConnectedEmailAccount, GmailOAuthManager
 from jclaw.tools.email.gmail_client import GmailClient
 
@@ -39,13 +39,11 @@ class EmailTool:
 
     def describe(self) -> dict[str, Any]:
         specs = self._action_specs()
-        return {
-            "name": self.name,
-            "description": "Connect a Gmail account, search messages, read threads, and create draft replies.",
-            "prefer_direct_result": True,
-            "actions": {name: spec.to_dict() for name, spec in specs.items()},
-            "supports_followup": True,
-        }
+        return build_tool_description(
+            name=self.name,
+            description="Connect a Gmail account, search messages, read threads, and create draft replies.",
+            actions=specs,
+        )
 
     def format_result(self, action: str, result: ToolResult) -> str:
         data = result.data

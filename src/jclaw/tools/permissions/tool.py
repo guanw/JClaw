@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from jclaw.core.db import Database
-from jclaw.tools.base import ToolContext, ToolResult
+from jclaw.tools.base import ToolContext, ToolResult, build_tool_description
 
 
 class PermissionsTool:
@@ -13,11 +13,10 @@ class PermissionsTool:
         self.db = db
 
     def describe(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "description": "Inspect and manage local access grants and pending approval requests.",
-            "prefer_direct_result": True,
-            "actions": {
+        return build_tool_description(
+            name=self.name,
+            description="Inspect and manage local access grants and pending approval requests.",
+            actions={
                 "list_grants": {
                     "description": "List active local access grants.",
                     "use_when": ["the user asks what access is currently granted"],
@@ -35,8 +34,7 @@ class PermissionsTool:
                     "use_when": ["the user asks what approvals are waiting"],
                 },
             },
-            "supports_followup": True,
-        }
+        )
 
     def format_result(self, action: str, result: ToolResult) -> str:
         data = result.data

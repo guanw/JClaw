@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 
 @dataclass(slots=True)
@@ -76,6 +76,58 @@ class ActionSpec:
         if self.requires_confirmation:
             payload["requires_confirmation"] = True
         return payload
+
+
+def build_tool_description(
+    *,
+    name: str,
+    description: str,
+    actions: dict[str, ActionSpec | dict[str, Any]],
+    **extra: Any,
+) -> dict[str, Any]:
+    serialized_actions: dict[str, Any] = {}
+    for action_name, action_value in actions.items():
+        if isinstance(action_value, ActionSpec):
+            serialized_actions[action_name] = action_value.to_dict()
+        else:
+            serialized_actions[action_name] = dict(action_value)
+    return {
+        "name": name,
+        "description": description,
+        "actions": serialized_actions,
+        **extra,
+    }
+
+
+def append_field(
+    lines: list[str],
+    label: str,
+    value: Any,
+    *,
+    include_when: Callable[[Any], bool] | None = None,
+    formatter: Callable[[Any], str] | None = None,
+) -> None:
+    predicate = include_when or (lambda item: bool(item))
+    if not predicate(value):
+        return
+    render = formatter or (lambda item: str(item))
+    lines.append(f"{label}: {render(value)}")
+
+
+def append_list_section(
+    lines: list[str],
+    header: str,
+    items: Any,
+    render_item: Callable[[Any], str],
+    *,
+    limit: int | None = None,
+) -> None:
+    if not isinstance(items, list) or not items:
+        return
+    lines.append(header)
+    selected = items if limit is None else items[:limit]
+    for item in selected:
+        lines.append(render_item(item))
 
 
 class DecisionType(StrEnum):

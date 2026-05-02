@@ -15,7 +15,7 @@ from jclaw.core.defaults import (
     KNOWLEDGE_MAX_TOTAL_CHUNKS,
     KNOWLEDGE_TEXT_PREVIEW_CHARS,
 )
-from jclaw.tools.base import ActionSpec, ToolContext, ToolResult
+from jclaw.tools.base import ActionSpec, ToolContext, ToolResult, append_field, append_list_section, build_tool_description
 from jclaw.tools.knowledge.models import DocumentChunk, ExtractedDocument
 from jclaw.tools.knowledge.registry import KnowledgeReaderRegistry
 
@@ -63,14 +63,12 @@ class KnowledgeTool:
 
     def describe(self) -> dict[str, Any]:
         specs = self._action_specs()
-        return {
-            "name": self.name,
-            "description": "Read approved local files and answer questions from grounded extracted content with citations.",
-            "actions": {name: spec.to_dict() for name, spec in specs.items()},
-            "implemented": True,
-            "grounded": True,
-            "read_only": True,
-            "supported_suffixes": [
+        return build_tool_description(
+            name=self.name,
+            description="Read approved local files and answer questions from grounded extracted content with citations.",
+            actions=specs,
+            grounded=True,
+            supported_suffixes=[
                 ".txt",
                 ".md",
                 ".py",
@@ -83,8 +81,7 @@ class KnowledgeTool:
                 ".csv",
                 ".pdf",
             ],
-            "supports_followup": True,
-            "controller_contract": {
+            controller_contract={
                 "result_fields": [
                     "grounded",
                     "partial",
@@ -101,32 +98,39 @@ class KnowledgeTool:
                     "summary_text": self.text_preview_chars,
                 },
             },
-        }
+        )
 
     def format_result(self, action: str, result: ToolResult) -> str:
         lines = [result.summary]
         data = result.data
-        if "grounded" in data:
-            lines.append(f"Grounded: {data['grounded']}")
-        if "partial" in data:
-            lines.append(f"Partial: {data['partial']}")
-        if data.get("unsupported_files") and data.get("partial"):
-            lines.append("Unsupported files:")
-            for item in data["unsupported_files"][:10]:
-                lines.append(f"- {item['path']}: {item['reason']}")
-        if action == "analyze_paths" and data.get("supported_files"):
-            lines.append("Supported files:")
-            for item in data["supported_files"][:10]:
-                lines.append(f"- {item['path']}")
-        if (action == "analyze_paths" or data.get("partial") or data.get("scan_truncated")) and data.get("scanned_files"):
-            lines.append(f"Scanned files: {data['scanned_files']}")
-        if action == "analyze_paths" or data.get("scan_truncated") or data.get("partial"):
-            if "scan_truncated" in data:
-                lines.append(f"Scan truncated: {data['scan_truncated']}")
-        if data.get("citations"):
-            lines.append("Citations:")
-            for item in data["citations"][:6]:
-                lines.append(f"- {item['path']} [{item['chunk_id']}]")
+        append_field(lines, "Grounded", data.get("grounded"), include_when=lambda value: value is not None)
+        append_field(lines, "Partial", data.get("partial"), include_when=lambda value: value is not None)
+        if data.get("partial"):
+            append_list_section(
+                lines,
+                "Unsupported files:",
+                data.get("unsupported_files"),
+                lambda item: f"- {item['path']}: {item['reason']}",
+                limit=10,
+            )
+        if action == "analyze_paths":
+            append_list_section(
+                lines,
+                "Supported files:",
+                data.get("supported_files"),
+                lambda item: f"- {item['path']}",
+                limit=10,
+            )
+        if action == "analyze_paths" or data.get("partial") or data.get("scan_truncated"):
+            append_field(lines, "Scanned files", data.get("scanned_files"))
+            append_field(lines, "Scan truncated", data.get("scan_truncated"), include_when=lambda value: value is not None)
+        append_list_section(
+            lines,
+            "Citations:",
+            data.get("citations"),
+            lambda item: f"- {item['path']} [{item['chunk_id']}]",
+            limit=6,
+        )
         return "\n".join(lines)
 
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:

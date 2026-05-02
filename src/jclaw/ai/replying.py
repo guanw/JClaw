@@ -17,7 +17,7 @@ class AgentReplyingMixin:
     ) -> str:
         tool = self.tools.get(str(decision["tool"]))
         tool_result_text = tool.format_result(str(decision["action"]), result)
-        if self._should_return_direct_tool_result(tool.describe(), result):
+        if self._should_return_direct_tool_result(result):
             self._append_execution_trace_event(
                 chat_id,
                 "turn_answered",
@@ -83,11 +83,7 @@ class AgentReplyingMixin:
             {"role": "user", "content": f"{prefix}{text}"},
         ]
 
-    def _should_return_direct_tool_result(self, tool_description: dict[str, Any], result: ToolResult) -> bool:
-        if not tool_description.get("prefer_direct_result"):
-            return False
+    def _should_return_direct_tool_result(self, result: ToolResult) -> bool:
         if result.needs_confirmation:
             return True
-        if tool_description.get("supports_followup") and result.data.get("allow_tool_followup") is not False:
-            return False
-        return True
+        return result.data.get("allow_tool_followup") is False

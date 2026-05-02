@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from jclaw.core.db import Database
-from jclaw.tools.base import ActionSpec, ToolContext, ToolResult
+from jclaw.tools.base import ActionSpec, ToolContext, ToolResult, append_list_section, build_tool_description
 
 
 class MemoryTool:
@@ -15,22 +15,20 @@ class MemoryTool:
 
     def describe(self) -> dict[str, Any]:
         specs = self._action_specs()
-        return {
-            "name": self.name,
-            "description": "Store, search, list, and forget long-lived chat memory facts.",
-            "actions": {name: spec.to_dict() for name, spec in specs.items()},
-            "implemented": True,
-            "read_only": False,
-            "prefer_direct_result": True,
-            "supports_followup": False,
-        }
+        return build_tool_description(
+            name=self.name,
+            description="Store, search, list, and forget long-lived chat memory facts.",
+            actions=specs,
+        )
 
     def format_result(self, action: str, result: ToolResult) -> str:
         lines = [result.summary]
-        if result.data.get("items"):
-            lines.append("Memories:")
-            for item in result.data["items"]:
-                lines.append(f"- {item['key']} = {item['value']}")
+        append_list_section(
+            lines,
+            "Memories:",
+            result.data.get("items"),
+            lambda item: f"- {item['key']} = {item['value']}",
+        )
         return "\n".join(lines)
 
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:

@@ -17,7 +17,7 @@ from jclaw.core.defaults import (
     WORKSPACE_SHELL_OUTPUT_CHARS,
     WORKSPACE_SHELL_TIMEOUT_SECONDS,
 )
-from jclaw.tools.base import ActionSpec, ToolContext, ToolResult
+from jclaw.tools.base import ActionSpec, ToolContext, ToolResult, build_tool_description
 from jclaw.tools.workspace.formatting import WorkspaceFormattingMixin
 from jclaw.tools.workspace.git_ops import WorkspaceGitOpsMixin
 from jclaw.tools.workspace.mutations import WorkspaceMutationsMixin
@@ -82,10 +82,11 @@ class WorkspaceTool(
 
     def describe(self) -> dict[str, Any]:
         specs = self._action_specs()
-        return {
-            "name": self.name,
-            "description": "Inspect approved local paths and prepare or apply bounded local mutations such as file edits, local git actions, and local shell commands.",
-            "controller_guidance": (
+        return build_tool_description(
+            name=self.name,
+            description="Inspect approved local paths and prepare or apply bounded local mutations such as file edits, local git actions, and local shell commands.",
+            actions=specs,
+            controller_guidance=(
                 "For coding tasks, inspect first but switch to mutation as soon as the edit site is known. "
                 "Once you know the target file and the function, class, or exact section to change, prefer apply_patch over more reads. "
                 "Do not keep repeating overlapping reads, repeated symbol lookups, or repeated searches once you have enough context to edit. "
@@ -94,17 +95,14 @@ class WorkspaceTool(
                 "If the user asks to revert, undo, or put back the most recent JClaw file edit in this chat, prefer revert_last_change instead of inferring the target from git diff. "
                 "If the user asks to reapply a reverted JClaw file edit in this chat, prefer redo_last_change."
             ),
-            "actions": {name: spec.to_dict() for name, spec in specs.items()},
-            "dangerous": True,
-            "preview_required": True,
-            "prefer_direct_result": True,
-            "path_resolution": {
+            dangerous=True,
+            preview_required=True,
+            path_resolution={
                 "repo_root": str(self.repo_root),
                 "home_dir": str(self.home_dir),
                 "common_home_aliases": sorted(self.COMMON_HOME_FOLDERS),
             },
-            "supports_followup": True,
-            "controller_contract": {
+            controller_contract={
                 "result_fields": [
                     "root_path",
                     "target_path",
@@ -159,7 +157,7 @@ class WorkspaceTool(
                     },
                 },
             },
-        }
+        )
 
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handlers = {

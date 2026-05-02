@@ -5,7 +5,7 @@ from typing import Any
 
 from jclaw.core.db import CronJobRecord, Database
 from jclaw.core.scheduler import next_run_at, parse_schedule_input, to_utc_iso
-from jclaw.tools.base import ActionSpec, RuntimeState, ToolContext, ToolResult
+from jclaw.tools.base import ActionSpec, RuntimeState, ToolContext, ToolResult, append_list_section, build_tool_description
 
 
 class AutomationTool:
@@ -16,15 +16,11 @@ class AutomationTool:
 
     def describe(self) -> dict[str, Any]:
         specs = self._action_specs()
-        return {
-            "name": self.name,
-            "description": "Create, inspect, update, and remove recurring or one-off schedules for future JClaw tasks.",
-            "actions": {name: spec.to_dict() for name, spec in specs.items()},
-            "implemented": True,
-            "read_only": False,
-            "prefer_direct_result": True,
-            "supports_followup": True,
-        }
+        return build_tool_description(
+            name=self.name,
+            description="Create, inspect, update, and remove recurring or one-off schedules for future JClaw tasks.",
+            actions=specs,
+        )
 
     def format_result(self, action: str, result: ToolResult) -> str:
         lines = [result.summary]
@@ -34,12 +30,12 @@ class AutomationTool:
             lines.append(
                 f"Job {job['id']}: {job['schedule']} -> {job['prompt']} (next {job['next_run_at']}, enabled={job['enabled']})"
             )
-        if data.get("jobs"):
-            lines.append("Schedules:")
-            for job in data["jobs"]:
-                lines.append(
-                    f"- {job['id']}. {job['schedule']} -> {job['prompt']} (next {job['next_run_at']}, enabled={job['enabled']})"
-                )
+        append_list_section(
+            lines,
+            "Schedules:",
+            data.get("jobs"),
+            lambda job: f"- {job['id']}. {job['schedule']} -> {job['prompt']} (next {job['next_run_at']}, enabled={job['enabled']})",
+        )
         return "\n".join(lines)
 
     def materialize_params(

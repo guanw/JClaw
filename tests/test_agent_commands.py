@@ -98,7 +98,6 @@ class FakeTool:
         return {
             "name": "fake",
             "description": "Fake tool used for loop tests.",
-            "implemented": True,
             "actions": {
                 "step_one": {
                     "description": "Produce an intermediate result.",
@@ -192,8 +191,6 @@ class ExplodingTool:
         return {
             "name": "exploding",
             "description": "Tool that raises to verify agent failure handling.",
-            "implemented": True,
-            "prefer_direct_result": True,
             "actions": {
                 "boom": {
                     "description": "Raise an exception.",
@@ -226,7 +223,6 @@ class FakeLongWorkspaceTool:
                 "step_four": {"description": "Workspace step four."},
                 "step_five": {"description": "Workspace step five."},
             },
-            "supports_followup": True,
         }
 
     def invoke(self, action: str, params: dict, ctx: ToolContext) -> ToolResult:
@@ -254,7 +250,6 @@ class FakeLongTool:
                 "step_four": {"description": "General step four."},
                 "step_five": {"description": "General step five."},
             },
-            "supports_followup": True,
         }
 
     def invoke(self, action: str, params: dict, ctx: ToolContext) -> ToolResult:
@@ -281,7 +276,6 @@ class FakeBrowserTool:
                 "extract": {"description": "Extract fields from the current page."},
                 "close_session": {"description": "Close the current page session."},
             },
-            "supports_followup": True,
         }
 
     def invoke(self, action: str, params: dict, ctx: ToolContext) -> ToolResult:
@@ -342,7 +336,6 @@ class FakeScratchpadTool:
                 "continue_work": {"description": "Continue the scratchpad loop."},
                 "release": {"description": "Release the scratchpad resource."},
             },
-            "supports_followup": True,
         }
 
     def invoke(self, action: str, params: dict, ctx: ToolContext) -> ToolResult:
@@ -390,7 +383,6 @@ class FakeBrowserObjectiveTool:
         return {
             "name": "browser",
             "description": "Fake browser tool used for route tests.",
-            "prefer_direct_result": True,
             "actions": {
                 "run_objective": {"description": "Run a browser objective."},
             },
