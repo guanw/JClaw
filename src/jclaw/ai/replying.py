@@ -20,7 +20,7 @@ class AgentReplyingMixin:
         if self._should_return_direct_tool_result(tool.describe(), result):
             self._append_execution_trace_event(
                 chat_id,
-                "answer_composed",
+                "turn_answered",
                 f"Returned the direct result from {decision['tool']}.{decision['action']}.",
                 {"mode": "direct_tool_result"},
             )
@@ -28,7 +28,7 @@ class AgentReplyingMixin:
         if result.needs_confirmation:
             self._append_execution_trace_event(
                 chat_id,
-                "answer_composed",
+                "turn_answered",
                 f"Returned the raw confirmation result from {decision['tool']}.{decision['action']}.",
                 {"mode": "confirmation_result"},
             )
@@ -60,7 +60,7 @@ class AgentReplyingMixin:
             reply = self.llm.chat(messages)
             self._append_execution_trace_event(
                 chat_id,
-                "answer_composed",
+                "turn_answered",
                 f"Composed a natural-language reply from {decision['tool']}.{decision['action']}.",
                 {"mode": "tool_reply_synthesis"},
             )
@@ -68,7 +68,7 @@ class AgentReplyingMixin:
         except Exception:  # noqa: BLE001
             self._append_execution_trace_event(
                 chat_id,
-                "answer_composed",
+                "turn_answered",
                 f"Fell back to the raw tool result from {decision['tool']}.{decision['action']}.",
                 {"mode": "tool_reply_fallback"},
             )

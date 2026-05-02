@@ -134,7 +134,7 @@ class AssistantAgent(
             reply = self.llm.chat(messages)
             self._append_execution_trace_event(
                 chat_id,
-                "answer_composed",
+                "turn_answered",
                 "Composed a direct reply without tool use.",
                 {"mode": "direct_llm"},
             )

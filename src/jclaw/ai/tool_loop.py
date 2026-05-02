@@ -81,30 +81,18 @@ class AgentToolLoopMixin:
         if decision.type is DecisionType.ANSWER:
             self._append_execution_trace_event(
                 chat_id,
-                "controller_decision",
-                self._trace_decision_summary(decision),
-                self._trace_decision_payload(decision),
-            )
-            self._append_execution_trace_event(
-                chat_id,
-                "answer_composed",
+                "turn_answered",
                 "Answered directly without tool use.",
-                {"mode": "controller_answer"},
+                {"mode": "controller_answer", "reason": decision.reason},
             )
             self._set_execution_trace_status(chat_id, "answered")
             return decision.answer
         if decision.type is DecisionType.BLOCKED:
             self._append_execution_trace_event(
                 chat_id,
-                "controller_decision",
-                self._trace_decision_summary(decision),
-                self._trace_decision_payload(decision),
-            )
-            self._append_execution_trace_event(
-                chat_id,
                 "turn_blocked",
                 decision.reason or "Stopped because progress is blocked.",
-                {"mode": "controller_blocked"},
+                {"mode": "controller_blocked", "reason": decision.reason},
             )
             self._set_execution_trace_status(chat_id, "blocked")
             return decision.reason or "Stopped because progress is blocked."
@@ -112,15 +100,9 @@ class AgentToolLoopMixin:
             LOGGER.info("initial controller completed without tool use: %s", decision.reason)
             self._append_execution_trace_event(
                 chat_id,
-                "controller_decision",
-                self._trace_decision_summary(decision),
-                self._trace_decision_payload(decision),
-            )
-            self._append_execution_trace_event(
-                chat_id,
                 "turn_completed",
                 decision.reason or "Completed without tool use.",
-                {"mode": "controller_complete"},
+                {"mode": "controller_complete", "reason": decision.reason},
             )
             self._set_execution_trace_status(chat_id, "completed")
             return None
@@ -153,12 +135,6 @@ class AgentToolLoopMixin:
         try:
             while len(steps) < step_budget:
                 step_budget = max(step_budget, self._tool_loop_step_budget(decision.tool))
-                self._append_execution_trace_event(
-                    chat_id,
-                    "controller_decision",
-                    self._trace_decision_summary(decision),
-                    self._trace_decision_payload(decision),
-                )
                 signature = json.dumps(
                     {
                         "tool": decision.tool,
@@ -195,6 +171,7 @@ class AgentToolLoopMixin:
                             "tool": decision.tool,
                             "action": decision.action,
                             "params": materialized_params,
+                            "reason": decision.reason,
                         },
                     )
                     result = self.tools.invoke(
@@ -244,20 +221,12 @@ class AgentToolLoopMixin:
                 runtime.append(observation)
                 self._append_execution_trace_event(
                     chat_id,
-                    "tool_finished",
-                    f"{decision.tool}.{decision.action}: {result.summary}",
+                    "tool_observed",
+                    f"Observed: {observation.summary}",
                     {
                         "tool": decision.tool,
                         "action": decision.action,
                         "ok": result.ok,
-                        "needs_confirmation": result.needs_confirmation,
-                    },
-                )
-                self._append_execution_trace_event(
-                    chat_id,
-                    "observation_recorded",
-                    f"Observed: {observation.summary}",
-                    {
                         "artifact_types": observation.artifact_types,
                         "data_preview": observation.data_preview,
                         "needs_confirmation": observation.needs_confirmation,
@@ -309,15 +278,9 @@ class AgentToolLoopMixin:
                     self._pending_tool_loop_continuations.pop(chat_id, None)
                     self._append_execution_trace_event(
                         chat_id,
-                        "controller_decision",
-                        self._trace_decision_summary(next_decision),
-                        self._trace_decision_payload(next_decision),
-                    )
-                    self._append_execution_trace_event(
-                        chat_id,
-                        "answer_composed",
+                        "turn_answered",
                         "Controller answered directly from the accumulated observations.",
-                        {"mode": "controller_answer"},
+                        {"mode": "controller_answer", "reason": next_decision.reason},
                     )
                     self._set_execution_trace_status(chat_id, "answered")
                     return next_decision.answer
@@ -325,15 +288,9 @@ class AgentToolLoopMixin:
                     self._pending_tool_loop_continuations.pop(chat_id, None)
                     self._append_execution_trace_event(
                         chat_id,
-                        "controller_decision",
-                        self._trace_decision_summary(next_decision),
-                        self._trace_decision_payload(next_decision),
-                    )
-                    self._append_execution_trace_event(
-                        chat_id,
                         "turn_blocked",
                         next_decision.reason or "Stopped because progress is blocked.",
-                        {"mode": "controller_blocked"},
+                        {"mode": "controller_blocked", "reason": next_decision.reason},
                     )
                     self._set_execution_trace_status(chat_id, "blocked")
                     return next_decision.reason or self._compose_tool_reply(
@@ -347,15 +304,9 @@ class AgentToolLoopMixin:
                     self._pending_tool_loop_continuations.pop(chat_id, None)
                     self._append_execution_trace_event(
                         chat_id,
-                        "controller_decision",
-                        self._trace_decision_summary(next_decision),
-                        self._trace_decision_payload(next_decision),
-                    )
-                    self._append_execution_trace_event(
-                        chat_id,
                         "turn_completed",
                         next_decision.reason or "Controller marked the tool run as complete.",
-                        {"mode": "controller_complete"},
+                        {"mode": "controller_complete", "reason": next_decision.reason},
                     )
                     self._set_execution_trace_status(chat_id, "completed")
                     return self._compose_tool_reply(

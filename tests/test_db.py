@@ -42,14 +42,14 @@ def test_execution_trace_round_trip(tmp_path) -> None:
     session = db.create_execution_trace_session("chat-1", "inspect this file")
     db.append_execution_trace_event(
         session.trace_id,
-        event_type="controller_decision",
-        summary="Decided to call workspace.read_file",
+        event_type="tool_started",
+        summary="Starting workspace.read_file.",
         payload={"tool": "workspace", "action": "read_file"},
     )
     db.append_execution_trace_event(
         session.trace_id,
-        event_type="tool_finished",
-        summary="workspace.read_file: Read file.",
+        event_type="tool_observed",
+        summary="Observed: Read file.",
         payload={"ok": True},
     )
     db.finish_execution_trace_session(session.trace_id, status="completed", final_reply="done")
@@ -61,6 +61,6 @@ def test_execution_trace_round_trip(tmp_path) -> None:
     assert latest.final_reply == "done"
 
     events = db.list_execution_trace_events(session.trace_id)
-    assert [item.event_type for item in events] == ["controller_decision", "tool_finished"]
+    assert [item.event_type for item in events] == ["tool_started", "tool_observed"]
     assert events[0].payload["tool"] == "workspace"
     db.close()

@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
-
-from jclaw.tools.base import Decision, DecisionType
 
 
 MAX_RENDERED_TRACE_EVENTS = 18
@@ -86,25 +83,6 @@ class AgentTracingMixin:
         for event in render_events:
             lines.append(f"{event.event_index}. {event.summary}")
         return "```text\n" + "\n".join(lines) + "\n```"
-
-    def _trace_decision_summary(self, decision: Decision) -> str:
-        if decision.type is DecisionType.TOOL_CALL:
-            suffix = f" - {decision.reason}" if decision.reason else ""
-            return f"Decided to call {decision.tool}.{decision.action}{suffix}"
-        if decision.type is DecisionType.ANSWER:
-            return "Decided to answer directly."
-        if decision.type is DecisionType.BLOCKED:
-            return f"Decided the turn is blocked.{f' {decision.reason}' if decision.reason else ''}"
-        return f"Decided the turn is complete.{f' {decision.reason}' if decision.reason else ''}"
-
-    def _trace_decision_payload(self, decision: Decision) -> dict[str, object]:
-        return {
-            "type": decision.type.value,
-            "tool": decision.tool,
-            "action": decision.action,
-            "params": dict(decision.params),
-            "reason": decision.reason,
-        }
 
     def _controller_now(self) -> datetime:
         return datetime.now().astimezone()

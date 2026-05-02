@@ -1750,18 +1750,15 @@ def test_execution_trace_records_controller_tool_and_completion_events(tmp_path)
     events = db.list_execution_trace_events(latest.trace_id)
     assert [item.event_type for item in events] == [
         "turn_started",
-        "controller_decision",
         "tool_started",
-        "tool_finished",
-        "observation_recorded",
-        "controller_decision",
+        "tool_observed",
         "turn_completed",
-        "answer_composed",
+        "turn_answered",
     ]
     rendered = agent.render_latest_trace("chat-1")
     assert "Trace [completed]" in rendered
-    assert "Decided to call fake.step_one" in rendered
-    assert "fake.step_one: Completed fake step one." in rendered
+    assert "Starting fake.step_one." in rendered
+    assert "Observed: Completed fake step one." in rendered
     assert reply == "Final tool-based reply."
     db.close()
 
