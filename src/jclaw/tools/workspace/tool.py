@@ -336,290 +336,224 @@ class WorkspaceTool(
         with (self.root / "events.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
 
+    def _schema(self, properties: dict[str, Any], *, required: tuple[str, ...] = ()) -> dict[str, Any]:
+        schema: dict[str, Any] = {"type": "object", "properties": properties}
+        if required:
+            schema["required"] = list(required)
+        return schema
+
+    def _path_properties(self) -> dict[str, Any]:
+        return {
+            "path": {"type": "string"},
+            "root_path": {"type": "string"},
+            "objective": {"type": "string"},
+        }
+
+    def _root_search_properties(self) -> dict[str, Any]:
+        return {
+            "path": {"type": "string"},
+            "root_path": {"type": "string"},
+            "root": {"type": "string"},
+            "objective": {"type": "string"},
+        }
+
+    def _read_action(
+        self,
+        *,
+        action: str,
+        description: str,
+        properties: dict[str, Any],
+        required: tuple[str, ...] = (),
+        produces_artifacts: tuple[str, ...],
+    ) -> ActionSpec:
+        return ActionSpec(
+            tool=self.name,
+            action=action,
+            description=description,
+            input_schema=self._schema(properties, required=required),
+            reads=True,
+            produces_artifacts=produces_artifacts,
+        )
+
+    def _write_action(
+        self,
+        *,
+        action: str,
+        description: str,
+        properties: dict[str, Any],
+        required: tuple[str, ...] = (),
+        produces_artifacts: tuple[str, ...],
+    ) -> ActionSpec:
+        return ActionSpec(
+            tool=self.name,
+            action=action,
+            description=description,
+            input_schema=self._schema(properties, required=required),
+            writes=True,
+            produces_artifacts=produces_artifacts,
+        )
+
     def _action_specs(self) -> dict[str, ActionSpec]:
         return {
-            "inspect_root": ActionSpec(
-                tool=self.name,
+            "inspect_root": self._read_action(
                 action="inspect_root",
                 description="Inspect a local path or list a directory.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "root_path": {"type": "string"},
-                        "objective": {"type": "string"},
-                    },
-                },
-                reads=True,
+                properties=self._path_properties(),
                 produces_artifacts=("workspace_path",),
             ),
-            "path_metadata": ActionSpec(
-                tool=self.name,
+            "path_metadata": self._read_action(
                 action="path_metadata",
                 description="Inspect detailed metadata for a local path.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "root_path": {"type": "string"},
-                        "objective": {"type": "string"},
-                    },
-                },
-                reads=True,
+                properties=self._path_properties(),
                 produces_artifacts=("workspace_path",),
             ),
-            "find_files": ActionSpec(
-                tool=self.name,
+            "find_files": self._read_action(
                 action="find_files",
                 description="Find files by name or glob pattern under an approved local path.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "root_path": {"type": "string"},
-                        "root": {"type": "string"},
-                        "pattern": {"type": "string"},
-                        "query": {"type": "string"},
-                        "objective": {"type": "string"},
-                    },
+                properties={
+                    **self._root_search_properties(),
+                    "pattern": {"type": "string"},
+                    "query": {"type": "string"},
                 },
-                reads=True,
                 produces_artifacts=("workspace_search_results",),
             ),
-            "search_contents": ActionSpec(
-                tool=self.name,
+            "search_contents": self._read_action(
                 action="search_contents",
                 description="Search literal text inside readable local files under an approved path.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "root_path": {"type": "string"},
-                        "root": {"type": "string"},
-                        "query": {"type": "string"},
-                        "text": {"type": "string"},
-                        "regex": {"type": "boolean"},
-                        "case_sensitive": {"type": "boolean"},
-                        "file_pattern": {"type": "string"},
-                        "objective": {"type": "string"},
-                    },
+                properties={
+                    **self._root_search_properties(),
+                    "query": {"type": "string"},
+                    "text": {"type": "string"},
+                    "regex": {"type": "boolean"},
+                    "case_sensitive": {"type": "boolean"},
+                    "file_pattern": {"type": "string"},
                 },
-                reads=True,
                 produces_artifacts=("workspace_search_results",),
             ),
-            "read_file": ActionSpec(
-                tool=self.name,
+            "read_file": self._read_action(
                 action="read_file",
                 description="Read a local text file for coding-oriented inspection when no specific line range is requested. Do not use this when the user asks for explicit line numbers or a line range; use read_snippet instead.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "objective": {"type": "string"},
-                    },
-                    "required": ["path"],
-                },
-                reads=True,
+                properties={"path": {"type": "string"}, "objective": {"type": "string"}},
+                required=("path",),
                 produces_artifacts=("workspace_file",),
             ),
-            "read_snippet": ActionSpec(
-                tool=self.name,
+            "read_snippet": self._read_action(
                 action="read_snippet",
                 description="Read a focused inclusive line range from a local text file. Use this when the user asks for explicit line numbers, a line range, or phrases like 'show me lines 10-40'.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "start_line": {"type": "integer"},
-                        "end_line": {"type": "integer"},
-                        "objective": {"type": "string"},
-                    },
-                    "required": ["path", "start_line", "end_line"],
+                properties={
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                    "objective": {"type": "string"},
                 },
-                reads=True,
+                required=("path", "start_line", "end_line"),
                 produces_artifacts=("workspace_file",),
             ),
-            "list_file_symbols": ActionSpec(
-                tool=self.name,
+            "list_file_symbols": self._read_action(
                 action="list_file_symbols",
                 description="List top-level and nested Python class/function definitions from a Python source file.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "objective": {"type": "string"},
-                    },
-                    "required": ["path"],
-                },
-                reads=True,
+                properties={"path": {"type": "string"}, "objective": {"type": "string"}},
+                required=("path",),
                 produces_artifacts=("workspace_symbol_search",),
             ),
-            "find_symbol": ActionSpec(
-                tool=self.name,
+            "find_symbol": self._read_action(
                 action="find_symbol",
                 description="Find Python class or function definitions by exact symbol name within a Python file or directory tree.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "symbol": {"type": "string"},
-                        "path": {"type": "string"},
-                        "root_path": {"type": "string"},
-                        "objective": {"type": "string"},
-                    },
-                    "required": ["name"],
+                properties={
+                    "name": {"type": "string"},
+                    "symbol": {"type": "string"},
+                    **self._path_properties(),
                 },
-                reads=True,
+                required=("name",),
                 produces_artifacts=("workspace_symbol_search",),
             ),
-            "find_references": ActionSpec(
-                tool=self.name,
+            "find_references": self._read_action(
                 action="find_references",
                 description="Find exact Python symbol occurrences across Python source files, including whether an occurrence is a definition or a reference.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "symbol": {"type": "string"},
-                        "path": {"type": "string"},
-                        "root_path": {"type": "string"},
-                        "objective": {"type": "string"},
-                    },
-                    "required": ["name"],
+                properties={
+                    "name": {"type": "string"},
+                    "symbol": {"type": "string"},
+                    **self._path_properties(),
                 },
-                reads=True,
+                required=("name",),
                 produces_artifacts=("workspace_symbol_search",),
             ),
-            "write_file": ActionSpec(
-                tool=self.name,
+            "write_file": self._write_action(
                 action="write_file",
                 description="Replace the full contents of a local text file. Use this for full-file rewrites, not narrow edits.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "content": {"type": "string"},
-                        "objective": {"type": "string"},
-                    },
-                    "required": ["path", "content"],
+                properties={
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "objective": {"type": "string"},
                 },
-                writes=True,
+                required=("path", "content"),
                 produces_artifacts=("workspace_patch", "workspace_file"),
             ),
-            "apply_patch": ActionSpec(
-                tool=self.name,
+            "apply_patch": self._write_action(
                 action="apply_patch",
                 description="Apply one or more narrow exact-match text replacements to an existing local text file. Prefer this over write_file for small edits.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "hunks": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "old_text": {"type": "string"},
-                                    "new_text": {"type": "string"},
-                                },
-                                "required": ["old_text", "new_text"],
+                properties={
+                    "path": {"type": "string"},
+                    "hunks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_text": {"type": "string"},
+                                "new_text": {"type": "string"},
                             },
+                            "required": ["old_text", "new_text"],
                         },
-                        "objective": {"type": "string"},
                     },
-                    "required": ["path", "hunks"],
+                    "objective": {"type": "string"},
                 },
-                writes=True,
+                required=("path", "hunks"),
                 produces_artifacts=("workspace_patch", "workspace_file"),
             ),
-            "create_file": ActionSpec(
-                tool=self.name,
+            "create_file": self._write_action(
                 action="create_file",
                 description="Create a new local text file with the provided contents.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "content": {"type": "string"},
-                        "objective": {"type": "string"},
-                    },
-                    "required": ["path", "content"],
+                properties={
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "objective": {"type": "string"},
                 },
-                writes=True,
+                required=("path", "content"),
                 produces_artifacts=("workspace_patch", "workspace_file"),
             ),
-            "revert_last_change": ActionSpec(
-                tool=self.name,
+            "revert_last_change": self._write_action(
                 action="revert_last_change",
                 description="Revert the most recent file mutation that JClaw applied in this chat, if the affected files have not diverged.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "objective": {"type": "string"},
-                    },
-                },
-                writes=True,
+                properties={"objective": {"type": "string"}},
                 produces_artifacts=("workspace_patch",),
             ),
-            "redo_last_change": ActionSpec(
-                tool=self.name,
+            "redo_last_change": self._write_action(
                 action="redo_last_change",
                 description="Reapply the most recently reverted file mutation that JClaw applied in this chat, if the affected files still match the reverted state.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "objective": {"type": "string"},
-                    },
-                },
-                writes=True,
+                properties={"objective": {"type": "string"}},
                 produces_artifacts=("workspace_patch",),
             ),
-            "run_command": ActionSpec(
-                tool=self.name,
+            "run_command": self._write_action(
                 action="run_command",
                 description="Run a single allowed local shell command inside the approved workspace and return its exit code and output.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "command": {"type": "string"},
-                        "cwd": {"type": "string"},
-                        "path": {"type": "string"},
-                        "root_path": {"type": "string"},
-                        "objective": {"type": "string"},
-                    },
-                    "required": ["command"],
+                properties={
+                    "command": {"type": "string"},
+                    "cwd": {"type": "string"},
+                    **self._path_properties(),
                 },
-                writes=True,
+                required=("command",),
                 produces_artifacts=("workspace_command_result",),
             ),
-            "git_status": ActionSpec(
-                tool=self.name,
+            "git_status": self._read_action(
                 action="git_status",
                 description="Read local git status and diff summary.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "root_path": {"type": "string"},
-                        "objective": {"type": "string"},
-                    },
-                },
-                reads=True,
+                properties=self._path_properties(),
                 produces_artifacts=("workspace_git_status",),
             ),
-            "git_diff": ActionSpec(
-                tool=self.name,
+            "git_diff": self._read_action(
                 action="git_diff",
                 description="Read local git diff details for the current repository or a scoped path.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "root_path": {"type": "string"},
-                        "objective": {"type": "string"},
-                    },
-                },
-                reads=True,
+                properties=self._path_properties(),
                 produces_artifacts=("workspace_diff",),
             ),
         }
