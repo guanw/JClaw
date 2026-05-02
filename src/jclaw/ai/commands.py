@@ -14,30 +14,26 @@ class AgentCommandsMixin:
         command, _, remainder = stripped.partition(" ")
         if command.startswith("/"):
             command = command.split("@", 1)[0]
+        handler = self._command_handlers().get(command)
+        if handler is None:
+            return None
+        return handler(chat_id, remainder)
 
-        if command in {"/help", "help"}:
-            return self._help_text()
-        if command == "/remember":
-            return self._remember(chat_id, remainder)
-        if command == "/forget":
-            return self._forget(chat_id, remainder)
-        if command == "/memory":
-            return self._memory(chat_id)
-        if command == "/debug":
-            return self._debug_trace(chat_id, remainder)
-        if command == "/trace":
-            return self._trace_last(chat_id, remainder)
-        if command == "/approve":
-            return self._approve(chat_id, remainder)
-        if command == "/deny":
-            return self._deny(chat_id, remainder)
-        if command == "/grants":
-            return self._grants()
-        if command == "/revoke":
-            return self._revoke(remainder)
-        if command == "/abort":
-            return self._abort(chat_id, remainder)
-        return None
+    def _command_handlers(self) -> dict[str, Any]:
+        return {
+            "/help": lambda chat_id, remainder: self._help_text(),
+            "help": lambda chat_id, remainder: self._help_text(),
+            "/remember": lambda chat_id, remainder: self._remember(chat_id, remainder),
+            "/forget": lambda chat_id, remainder: self._forget(chat_id, remainder),
+            "/memory": lambda chat_id, remainder: self._memory(chat_id),
+            "/debug": lambda chat_id, remainder: self._debug_trace(chat_id, remainder),
+            "/trace": lambda chat_id, remainder: self._trace_last(chat_id, remainder),
+            "/approve": lambda chat_id, remainder: self._approve(chat_id, remainder),
+            "/deny": lambda chat_id, remainder: self._deny(chat_id, remainder),
+            "/grants": lambda chat_id, remainder: self._grants(),
+            "/revoke": lambda chat_id, remainder: self._revoke(remainder),
+            "/abort": lambda chat_id, remainder: self._abort(chat_id, remainder),
+        }
 
     def _remember(self, chat_id: str, remainder: str) -> str:
         key, sep, value = remainder.partition("=")
