@@ -36,6 +36,8 @@ class AssistantAgent(
     def __init__(self, config: Config, db: Database, llm: OpenAICompatibleClient) -> None:
         self.config = config
         self.db = db
+        self.messages = db.messages
+        self.memories = db.memories
         self.llm = llm
         self.system_prompt = load_system_prompt(config.provider.system_prompt_files)
         self._pending_tool_loop_continuations: dict[str, PendingToolLoopContinuation] = {}
@@ -108,8 +110,8 @@ class AssistantAgent(
     def handle_text(self, chat_id: str, text: str, *, user_name: str = "") -> str:
         command_reply = self._handle_command(chat_id, text)
         if command_reply is not None:
-            self.db.store_message(chat_id, "user", text)
-            self.db.store_message(chat_id, "assistant", command_reply)
+            self.messages.store(chat_id, "user", text)
+            self.messages.store(chat_id, "assistant", command_reply)
             return command_reply
 
         trace_id = self._start_execution_trace(chat_id, text)
@@ -117,16 +119,16 @@ class AssistantAgent(
         try:
             continuation_reply = self._handle_tool_loop_continuation(chat_id, text, user_name=user_name)
             if continuation_reply is not None:
-                self.db.store_message(chat_id, "user", text)
-                self.db.store_message(chat_id, "assistant", continuation_reply)
+                self.messages.store(chat_id, "user", text)
+                self.messages.store(chat_id, "assistant", continuation_reply)
                 reply = continuation_reply
                 return continuation_reply
 
-            self.db.store_message(chat_id, "user", text)
+            self.messages.store(chat_id, "user", text)
 
             tool_reply = self._handle_tool_request(chat_id, text, user_name=user_name)
             if tool_reply is not None:
-                self.db.store_message(chat_id, "assistant", tool_reply)
+                self.messages.store(chat_id, "assistant", tool_reply)
                 reply = tool_reply
                 return tool_reply
 
@@ -139,7 +141,7 @@ class AssistantAgent(
                 {"mode": "direct_llm"},
             )
             self._set_execution_trace_status(chat_id, "answered")
-            self.db.store_message(chat_id, "assistant", reply)
+            self.messages.store(chat_id, "assistant", reply)
             return reply
         except Exception as exc:  # noqa: BLE001
             self._append_execution_trace_event(
@@ -162,7 +164,7 @@ class AssistantAgent(
             persist_user_message=False,
         )
         reply = self.llm.chat(messages)
-        self.db.store_message(chat_id, "assistant", reply)
+        self.messages.store(chat_id, "assistant", reply)
         return reply
 
     def _build_messages(
@@ -173,8 +175,8 @@ class AssistantAgent(
         user_name: str,
         persist_user_message: bool = True,
     ) -> list[dict[str, str]]:
-        memories = self.db.search_memories(chat_id, user_text, self.config.memory.max_memory_items)
-        history = self.db.recent_messages(chat_id, self.config.memory.max_context_messages * 2)
+        memories = self.memories.search(chat_id, user_text, self.config.memory.max_memory_items)
+        history = self.messages.recent(chat_id, self.config.memory.max_context_messages * 2)
         system = self._render_system_prompt(memories)
         messages: list[dict[str, str]] = [{"role": "system", "content": system}]
         for item in history:

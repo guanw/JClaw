@@ -11,6 +11,7 @@ class MemoryTool:
 
     def __init__(self, db: Database, *, search_limit: int = 10) -> None:
         self.db = db
+        self.memories = db.memories
         self.search_limit = search_limit
 
     def describe(self) -> dict[str, Any]:
@@ -49,7 +50,7 @@ class MemoryTool:
         value = str(params.get("value", "")).strip()
         if not key or not value:
             return ToolResult(ok=False, summary="remember_fact requires both key and value.", data={})
-        self.db.remember(ctx.chat_id, key, value)
+        self.memories.remember(ctx.chat_id, key, value)
         return ToolResult(
             ok=True,
             summary=f"Remembered '{key}'.",
@@ -67,7 +68,7 @@ class MemoryTool:
         )
 
     def _list_memories(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        items = self.db.list_memories(ctx.chat_id, limit=self.search_limit)
+        items = self.memories.list(ctx.chat_id, limit=self.search_limit)
         if not items:
             return ToolResult(ok=True, summary="No memories stored yet.", data={"items": [], "allow_tool_followup": False})
         return ToolResult(
@@ -88,7 +89,7 @@ class MemoryTool:
         query = str(params.get("query", "")).strip()
         if not query:
             return ToolResult(ok=False, summary="search_memories requires a query.", data={})
-        items = self.db.search_memories(ctx.chat_id, query, self.search_limit)
+        items = self.memories.search(ctx.chat_id, query, self.search_limit)
         if not items:
             return ToolResult(ok=True, summary=f"No stored memories matched '{query}'.", data={"items": [], "allow_tool_followup": False})
         return ToolResult(
@@ -110,7 +111,7 @@ class MemoryTool:
         key = str(params.get("key", "")).strip()
         if not key:
             return ToolResult(ok=False, summary="forget_memory requires a key.", data={})
-        deleted = self.db.forget(ctx.chat_id, key)
+        deleted = self.memories.forget(ctx.chat_id, key)
         if not deleted:
             return ToolResult(ok=False, summary=f"I didn't have a memory stored for '{key}'.", data={"key": key, "allow_tool_followup": False})
         return ToolResult(ok=True, summary=f"Forgot '{key}'.", data={"key": key, "allow_tool_followup": False})

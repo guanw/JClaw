@@ -32,6 +32,7 @@ class EmailTool:
         get_client: Callable[[str], GmailClient] | None = None,
     ) -> None:
         self.db = db
+        self.email_accounts = db.email_accounts
         self.default_account_alias = default_account_alias
         self.auth = GmailOAuthManager(oauth_client_path=oauth_client_path, token_dir=token_dir)
         self._connect_account = connect_account or self.auth.connect_account
@@ -183,7 +184,7 @@ class EmailTool:
         alias = str(params.get("alias") or self.default_account_alias).strip()
         scopes = self._requested_scopes(params, include_compose=True)
         account = self._connect_account(alias, scopes)
-        record = self.db.upsert_email_account(
+        record = self.email_accounts.upsert_account(
             alias=account.alias,
             provider=account.provider,
             email_address=account.email_address,
@@ -198,7 +199,7 @@ class EmailTool:
         )
 
     def _list_accounts(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        accounts = [self._serialize_account(item) for item in self.db.list_email_accounts()]
+        accounts = [self._serialize_account(item) for item in self.email_accounts.list_accounts()]
         if not accounts:
             return ToolResult(ok=True, summary="No email accounts connected.", data={"accounts": [], "allow_tool_followup": False})
         return ToolResult(
@@ -486,7 +487,7 @@ class EmailTool:
         alias = self._coerce_runtime_alias(str(params.get("alias") or "").strip())
         if not alias:
             alias = self._coerce_runtime_alias(str(self.default_account_alias).strip())
-        record = self.db.get_email_account(alias)
+        record = self.email_accounts.get_account(alias)
         if record is None:
             raise RuntimeError(f"Email account '{alias}' is not connected.")
         return alias
@@ -495,9 +496,9 @@ class EmailTool:
         alias = str(raw_alias).strip()
         if not alias:
             return ""
-        if self.db.get_email_account(alias) is not None:
+        if self.email_accounts.get_account(alias) is not None:
             return alias
-        for account in self.db.list_email_accounts():
+        for account in self.email_accounts.list_accounts():
             if str(account.email_address).strip().lower() == alias.lower():
                 return str(account.alias).strip()
         return alias
@@ -506,15 +507,15 @@ class EmailTool:
         alias = self._normalize_runtime_alias(raw_alias)
         if not alias:
             return ""
-        if self.db.get_email_account(alias) is not None:
+        if self.email_accounts.get_account(alias) is not None:
             return alias
-        accounts = self.db.list_email_accounts()
+        accounts = self.email_accounts.list_accounts()
         if not accounts:
             return alias
         if len(accounts) == 1:
             return str(accounts[0].alias).strip()
         default_alias = self._normalize_runtime_alias(str(self.default_account_alias).strip())
-        if default_alias and self.db.get_email_account(default_alias) is not None:
+        if default_alias and self.email_accounts.get_account(default_alias) is not None:
             return default_alias
         return ""
 
@@ -699,7 +700,7 @@ class EmailTool:
         return ""
 
     def _account_email_address(self, alias: str) -> str:
-        record = self.db.get_email_account(alias)
+        record = self.email_accounts.get_account(alias)
         if record is None:
             return ""
         return str(record.email_address).strip()

@@ -13,6 +13,7 @@ class AutomationTool:
 
     def __init__(self, db: Database) -> None:
         self.db = db
+        self.cron = db.cron
 
     def describe(self) -> dict[str, Any]:
         specs = self._action_specs()
@@ -66,7 +67,7 @@ class AutomationTool:
         return handler(params, ctx)
 
     def _list_schedules(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        jobs = self.db.list_cron_jobs(ctx.chat_id)
+        jobs = self.cron.list_jobs(ctx.chat_id)
         if not jobs:
             return ToolResult(ok=True, summary="No schedules configured.", data={"jobs": [], "allow_tool_followup": False})
         return ToolResult(
@@ -101,8 +102,8 @@ class AutomationTool:
                 data={"when": when, "allow_tool_followup": False},
             )
         next_run = to_utc_iso(next_run_at(spec))
-        job_id = self.db.add_cron_job(ctx.chat_id, spec.raw, prompt, next_run)
-        job = self.db.get_cron_job(ctx.chat_id, job_id)
+        job_id = self.cron.add_job(ctx.chat_id, spec.raw, prompt, next_run)
+        job = self.cron.get_job(ctx.chat_id, job_id)
         assert job is not None
         return ToolResult(
             ok=True,
@@ -121,7 +122,7 @@ class AutomationTool:
             job_id = int(params.get("job_id"))
         except (TypeError, ValueError):
             return ToolResult(ok=False, summary="Updating a schedule requires a numeric job_id.", data={"allow_tool_followup": False})
-        current = self.db.get_cron_job(ctx.chat_id, job_id)
+        current = self.cron.get_job(ctx.chat_id, job_id)
         if current is None:
             return ToolResult(ok=False, summary=f"Schedule {job_id} was not found.", data={"allow_tool_followup": False})
 
@@ -155,7 +156,7 @@ class AutomationTool:
                 base_spec = parse_schedule_input(schedule=schedule or current.schedule)
                 next_run = to_utc_iso(next_run_at(base_spec, from_dt=datetime.now().astimezone()))
 
-        updated = self.db.update_cron_job(
+        updated = self.cron.update_job(
             ctx.chat_id,
             job_id,
             schedule=schedule,
@@ -165,7 +166,7 @@ class AutomationTool:
         )
         if not updated:
             return ToolResult(ok=False, summary=f"No schedule changes were applied to {job_id}.", data={"allow_tool_followup": False})
-        job = self.db.get_cron_job(ctx.chat_id, job_id)
+        job = self.cron.get_job(ctx.chat_id, job_id)
         assert job is not None
         return ToolResult(
             ok=True,
@@ -184,7 +185,7 @@ class AutomationTool:
             job_id = int(params.get("job_id"))
         except (TypeError, ValueError):
             return ToolResult(ok=False, summary="Removing a schedule requires a numeric job_id.", data={"allow_tool_followup": False})
-        deleted = self.db.remove_cron_job(ctx.chat_id, job_id)
+        deleted = self.cron.remove_job(ctx.chat_id, job_id)
         if not deleted:
             return ToolResult(ok=False, summary=f"Schedule {job_id} was not found.", data={"allow_tool_followup": False})
         return ToolResult(ok=True, summary=f"Removed schedule {job_id}.", data={"job_id": job_id, "allow_tool_followup": False})

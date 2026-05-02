@@ -75,7 +75,7 @@ class AgentReplyingMixin:
             return tool_result_text
 
     def _build_tool_reply_messages(self, chat_id: str, text: str, *, user_name: str) -> list[dict[str, str]]:
-        memories = self.db.search_memories(chat_id, text, self.config.memory.max_memory_items)
+        memories = self.memories.search(chat_id, text, self.config.memory.max_memory_items)
         system = self._render_system_prompt(memories)
         prefix = f"From {user_name}: " if user_name else ""
         return [

@@ -29,7 +29,7 @@ class AgentControllerMixin:
         controller_state = self._controller_state_for_prompt(steps, runtime)
         recent_history = [
             {"role": item.role, "content": item.content}
-            for item in self.db.recent_messages(chat_id, 4)
+            for item in self.messages.recent(chat_id, 4)
         ]
         prompt = (
             "You are JClaw's live tool controller.\n"

@@ -29,6 +29,7 @@ class JClawDaemon:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.db = Database(config.daemon.db_path)
+        self.cron = self.db.cron
         self.llm = OpenAICompatibleClient(config.provider)
         self.channel = TelegramBotChannel(config.telegram)
         self.agent = AssistantAgent(config, self.db, self.llm)
@@ -150,12 +151,13 @@ class JClawDaemon:
 
     def _run_due_cron_jobs(self) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        for job in self.db.due_cron_jobs(now):
+        cron = getattr(self, "cron", self.db.cron)
+        for job in cron.due_jobs(now):
             LOGGER.info("running cron job %s for chat %s", job.id, job.chat_id)
             reply = self.agent.handle_cron(job.chat_id, job.prompt)
             self.channel.send_message(job.chat_id, reply)
             spec = parse_schedule(job.schedule)
             if spec.kind == "once" or (spec.kind == "date" and spec.explicit_year):
-                self.db.update_cron_job(job.chat_id, job.id, enabled=False)
+                cron.update_job(job.chat_id, job.id, enabled=False)
             else:
-                self.db.update_cron_next_run(job.id, to_utc_iso(next_run_at(spec)))
+                cron.update_next_run(job.id, to_utc_iso(next_run_at(spec)))

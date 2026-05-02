@@ -43,20 +43,20 @@ class AgentCommandsMixin:
         value = value.strip()
         if not key or not value:
             return "Usage: /remember key = value"
-        self.db.remember(chat_id, key, value)
+        self.memories.remember(chat_id, key, value)
         return f"Remembered '{key}'."
 
     def _forget(self, chat_id: str, remainder: str) -> str:
         key = remainder.strip()
         if not key:
             return "Usage: /forget key"
-        deleted = self.db.forget(chat_id, key)
+        deleted = self.memories.forget(chat_id, key)
         if deleted:
             return f"Forgot '{key}'."
         return f"I didn't have a memory stored for '{key}'."
 
     def _memory(self, chat_id: str) -> str:
-        items = self.db.list_memories(chat_id)
+        items = self.memories.list(chat_id)
         if not items:
             return "No memories stored yet."
         lines = [f"{item.key} = {item.value}" for item in items]
