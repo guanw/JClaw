@@ -92,6 +92,8 @@ class WorkspaceTool(
                 "Do not keep repeating overlapping reads, repeated symbol lookups, or repeated searches once you have enough context to edit. "
                 "If you have already identified the concrete code changes, make the edit instead of exploring further. "
                 "After a code mutation, prefer a verification step such as run_command before answer or complete when a relevant check exists. "
+                "Before complete on a coding task, prefer to inspect the latest diff and state what was verified or not verified. "
+                "If the latest verification step failed and a plausible repair step exists, prefer another tool call instead of stopping. "
                 "If the user asks to revert, undo, or put back the most recent JClaw file edit in this chat, prefer revert_last_change instead of inferring the target from git diff. "
                 "If the user asks to reapply a reverted JClaw file edit in this chat, prefer redo_last_change."
             ),
@@ -437,7 +439,7 @@ class WorkspaceTool(
             ),
             "read_snippet": self._read_action(
                 action="read_snippet",
-                description="Read a focused inclusive line range from a local text file. Use this when the user asks for explicit line numbers, a line range, or phrases like 'show me lines 10-40'.",
+                description="Read a focused inclusive line range from a local text file. Use this when the user asks for explicit line numbers, a line range, a bounded code section, or a specific portion of a function or class.",
                 properties={
                     "path": {"type": "string"},
                     "start_line": {"type": "integer"},
@@ -449,14 +451,14 @@ class WorkspaceTool(
             ),
             "list_file_symbols": self._read_action(
                 action="list_file_symbols",
-                description="List top-level and nested Python class/function definitions from a Python source file.",
+                description="List Python class and function definitions from one Python source file. Use this to understand file structure before choosing a narrower snippet read.",
                 properties={"path": {"type": "string"}, "objective": {"type": "string"}},
                 required=("path",),
                 produces_artifacts=("workspace_symbol_search",),
             ),
             "find_symbol": self._read_action(
                 action="find_symbol",
-                description="Find Python class or function definitions by exact symbol name within a Python file or directory tree.",
+                description="Find exact Python class or function definitions by symbol name within a Python file or directory tree. Prefer this when the request names a function or class to inspect or edit.",
                 properties={
                     "name": {"type": "string"},
                     "symbol": {"type": "string"},
@@ -467,7 +469,7 @@ class WorkspaceTool(
             ),
             "find_references": self._read_action(
                 action="find_references",
-                description="Find exact Python symbol occurrences across Python source files, including whether an occurrence is a definition or a reference.",
+                description="Find exact Python symbol occurrences across Python source files, including whether each occurrence is a definition or a reference. Prefer this before edits that may affect callers or usages.",
                 properties={
                     "name": {"type": "string"},
                     "symbol": {"type": "string"},
@@ -478,7 +480,7 @@ class WorkspaceTool(
             ),
             "write_file": self._write_action(
                 action="write_file",
-                description="Replace the full contents of a local text file. Use this for full-file rewrites, not narrow edits.",
+                description="Replace the full contents of a local text file. Use this for full-file rewrites or generated file contents, not for narrow edits to existing code.",
                 properties={
                     "path": {"type": "string"},
                     "content": {"type": "string"},
@@ -489,7 +491,7 @@ class WorkspaceTool(
             ),
             "apply_patch": self._write_action(
                 action="apply_patch",
-                description="Apply one or more narrow exact-match text replacements to an existing local text file. Prefer this over write_file for small edits.",
+                description="Apply one or more narrow exact-match text replacements to an existing local text file. Prefer this over write_file for small, localized edits once the target code section is known.",
                 properties={
                     "path": {"type": "string"},
                     "hunks": {
@@ -533,7 +535,7 @@ class WorkspaceTool(
             ),
             "run_command": self._write_action(
                 action="run_command",
-                description="Run a single allowed local shell command inside the approved workspace and return its exit code and output.",
+                description="Run a single allowed local shell command inside the approved workspace and return its exit code and output. Prefer this after code edits when a meaningful local verification command is known.",
                 properties={
                     "command": {"type": "string"},
                     "cwd": {"type": "string"},

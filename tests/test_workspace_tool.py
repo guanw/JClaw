@@ -783,6 +783,12 @@ def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> No
     assert "content" in description["controller_contract"]["result_fields"]
     assert "match_count" in description["controller_contract"]["result_fields"]
     assert description["controller_contract"]["result_previews"]["content"] == 4000
+    assert "bounded code section" in description["actions"]["read_snippet"]["description"]
+    assert "Prefer this when the request names a function or class" in description["actions"]["find_symbol"]["description"]
+    assert "affect callers or usages" in description["actions"]["find_references"]["description"]
+    assert "generated file contents" in description["actions"]["write_file"]["description"]
+    assert "small, localized edits" in description["actions"]["apply_patch"]["description"]
+    assert "after code edits" in description["actions"]["run_command"]["description"]
     assert "prepare_change" not in description["actions"]
     db.close()
 

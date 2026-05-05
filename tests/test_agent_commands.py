@@ -1497,6 +1497,8 @@ def test_tool_catalog_and_controller_prompt_bias_workspace_line_requests_to_read
     assert "switch to mutation as soon as the edit site is known" in controller_guidance
     assert "prefer apply_patch over more reads" in controller_guidance
     assert "After a code mutation, prefer a verification step such as run_command" in controller_guidance
+    assert "inspect the latest diff and state what was verified or not verified" in controller_guidance
+    assert "If the latest verification step failed" in controller_guidance
     assert "prefer revert_last_change instead of inferring the target from git diff" in controller_guidance
     assert "prefer redo_last_change" in controller_guidance
 
@@ -1509,6 +1511,9 @@ def test_tool_catalog_and_controller_prompt_bias_workspace_line_requests_to_read
     )
 
     assert "prefer the focused range read" in llm.last_system_prompt
+    assert "For coding tasks, inspect before editing" in llm.last_system_prompt
+    assert "prefer a verification step such as a relevant run_command" in llm.last_system_prompt
+    assert "inspect the latest diff" in llm.last_system_prompt
     assert decision is not None
     assert decision.tool == "workspace"
     assert decision.action == "read_snippet"
