@@ -1525,6 +1525,137 @@ def test_controller_state_uses_browser_controller_output_for_observation_preview
     db.close()
 
 
+def test_controller_state_uses_automation_controller_output_for_observation_preview(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(config, db, DummyLLM())
+    automation = agent.tools.get("automation")
+    runtime = RuntimeState(request="list schedules")
+    result = ToolResult(
+        ok=True,
+        summary="Listed 1 schedules.",
+        data={
+            "jobs": [{"id": 1, "schedule": "interval:1800", "prompt": "stretch", "next_run_at": "x", "enabled": True}],
+            "artifacts": {},
+        },
+    )
+    runtime.append(
+        Observation.from_tool_result(
+            result,
+            controller_output=automation.controller_output("list_schedules", result),
+        )
+    )
+    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+        [{"tool": "automation", "action": "list_schedules", "reason": "List schedules", "result": result}],
+        runtime,
+    )
+
+    latest_preview = controller_state["latest_observation"]["data_preview"]
+    assert latest_preview["jobs"][0]["schedule"] == "interval:1800"
+    db.close()
+
+
+def test_controller_state_uses_memory_controller_output_for_observation_preview(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(config, db, DummyLLM())
+    memory = agent.tools.get("memory")
+    runtime = RuntimeState(request="search memory")
+    result = ToolResult(
+        ok=True,
+        summary="Found 1 memory match.",
+        data={"items": [{"key": "favorite_color", "value": "blue"}], "artifacts": {}},
+    )
+    runtime.append(
+        Observation.from_tool_result(
+            result,
+            controller_output=memory.controller_output("search_memories", result),
+        )
+    )
+    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+        [{"tool": "memory", "action": "search_memories", "reason": "Search memory", "result": result}],
+        runtime,
+    )
+
+    latest_preview = controller_state["latest_observation"]["data_preview"]
+    assert latest_preview["items"] == [{"key": "favorite_color", "value": "blue"}]
+    db.close()
+
+
+def test_controller_state_uses_permissions_controller_output_for_observation_preview(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(config, db, DummyLLM())
+    permissions = agent.tools.get("permissions")
+    runtime = RuntimeState(request="list grants")
+    result = ToolResult(
+        ok=True,
+        summary="Found 1 active grant.",
+        data={
+            "grants": [
+                {
+                    "id": 1,
+                    "root_path": "/Users/Jude",
+                    "capabilities": ["read"],
+                    "granted_by_chat_id": "chat-1",
+                    "created_at": "now",
+                }
+            ],
+            "artifacts": {},
+        },
+    )
+    runtime.append(
+        Observation.from_tool_result(
+            result,
+            controller_output=permissions.controller_output("list_grants", result),
+        )
+    )
+    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+        [{"tool": "permissions", "action": "list_grants", "reason": "List grants", "result": result}],
+        runtime,
+    )
+
+    latest_preview = controller_state["latest_observation"]["data_preview"]
+    assert latest_preview["grants"][0]["root_path"] == "/Users/Jude"
+    db.close()
+
+
 def test_controller_state_preserves_workspace_patch_artifact_preview(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),

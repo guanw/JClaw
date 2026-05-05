@@ -32,6 +32,20 @@ class MemoryTool:
         )
         return "\n".join(lines)
 
+    def controller_output(self, action: str, result: ToolResult) -> dict[str, Any]:
+        data = result.data
+        # Memory actions should expose just the key/value facts relevant to the next turn.
+        # The controller payload stays compact and omits any unrelated storage internals.
+        payload: dict[str, Any] = {}
+        if "key" in data:
+            payload["key"] = data.get("key")
+        if "value" in data:
+            payload["value"] = data.get("value")
+        items = data.get("items")
+        if isinstance(items, list):
+            payload["items"] = items[:10]
+        return payload
+
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handlers = {
             "remember_fact": self._remember_fact,

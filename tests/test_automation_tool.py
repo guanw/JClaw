@@ -195,3 +195,22 @@ def test_automation_tool_describe_exposes_structured_action_specs(tmp_path) -> N
     assert "schedule" not in description["actions"]["create_schedule"]["input_schema"]["properties"]
     assert description["actions"]["update_schedule"]["binding_inputs"] == ["job_id"]
     db.close()
+
+
+def test_automation_tool_controller_output_exposes_job_state(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    tool = AutomationTool(db)
+
+    created = tool.invoke(
+        "create_schedule",
+        {"when": {"kind": "interval", "interval_seconds": 1800}, "prompt": "stretch"},
+        ToolContext(chat_id="chat-1"),
+    )
+    listed = tool.invoke("list_schedules", {}, ToolContext(chat_id="chat-1"))
+
+    created_payload = tool.controller_output("create_schedule", created)
+    listed_payload = tool.controller_output("list_schedules", listed)
+
+    assert created_payload["job"]["prompt"] == "stretch"
+    assert listed_payload["jobs"][0]["schedule"] == "interval:1800"
+    db.close()

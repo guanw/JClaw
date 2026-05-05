@@ -39,6 +39,24 @@ class AutomationTool:
         )
         return "\n".join(lines)
 
+    def controller_output(self, action: str, result: ToolResult) -> dict[str, Any]:
+        data = result.data
+        # Automation actions already return compact schedule state. The controller payload
+        # exposes only the actionable job or job-list summary needed for follow-up decisions,
+        # while full artifacts remain in raw tool result data.
+        payload: dict[str, Any] = {}
+        job = data.get("job")
+        if isinstance(job, dict):
+            payload["job"] = job
+        jobs = data.get("jobs")
+        if isinstance(jobs, list):
+            payload["jobs"] = jobs[:10]
+        if "job_id" in data:
+            payload["job_id"] = data.get("job_id")
+        if "when" in data:
+            payload["when"] = data.get("when")
+        return payload
+
     def materialize_params(
         self,
         action: str,

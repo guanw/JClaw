@@ -64,6 +64,26 @@ class PermissionsTool:
             return f"Grant {data['grant_id']} revoked."
         return result.summary
 
+    def controller_output(self, action: str, result: ToolResult) -> dict[str, Any]:
+        data = result.data
+        # Permissions steps should surface only grant and approval state the controller can
+        # act on next. The payload stays compact and avoids exposing unrelated DB details.
+        payload: dict[str, Any] = {}
+        grants = data.get("grants")
+        if isinstance(grants, list):
+            payload["grants"] = grants[:10]
+        grant = data.get("grant")
+        if isinstance(grant, dict):
+            payload["grant"] = grant
+        requests = data.get("requests")
+        if isinstance(requests, list):
+            payload["requests"] = requests[:10]
+        if "grant_id" in data:
+            payload["grant_id"] = data.get("grant_id")
+        if "revoked" in data:
+            payload["revoked"] = data.get("revoked")
+        return payload
+
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handlers = {
             "list_grants": self._list_grants,

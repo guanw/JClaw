@@ -61,3 +61,30 @@ def test_permissions_tool_lists_grants_grants_access_revokes_and_lists_pending_r
     assert listed_after_revoke.ok is True
     assert listed_after_revoke.data["grants"] == []
     db.close()
+
+
+def test_permissions_tool_controller_output_exposes_grants_and_requests(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    tool = PermissionsTool(db)
+
+    granted = tool.invoke(
+        "grant_access",
+        {"root_path": "/Users/Jude", "capabilities": ["read", "write"]},
+        ToolContext(chat_id="chat-1"),
+    )
+    db.create_approval_request(
+        kind="grant",
+        chat_id="chat-1",
+        root_path="/Users/Jude/Documents",
+        capabilities=("read",),
+        objective="Inspect documents",
+        payload={"continuation": {"tool": "workspace", "action": "inspect_root"}},
+    )
+    pending = tool.invoke("list_pending_requests", {}, ToolContext(chat_id="chat-1"))
+
+    granted_payload = tool.controller_output("grant_access", granted)
+    pending_payload = tool.controller_output("list_pending_requests", pending)
+
+    assert granted_payload["grant"]["root_path"] == "/Users/Jude"
+    assert pending_payload["requests"][0]["root_path"] == "/Users/Jude/Documents"
+    db.close()
