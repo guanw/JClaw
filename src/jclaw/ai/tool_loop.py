@@ -214,9 +214,11 @@ class AgentToolLoopMixin:
                     }
                 )
                 runtime.last_decision = decision
+                controller_output = self._tool_controller_output(decision.tool, decision.action, result)
                 observation = Observation.from_tool_result(
                     result,
                     controller_contract=self._tool_controller_contract(decision.tool),
+                    controller_output=controller_output,
                 )
                 runtime.append(observation)
                 self._append_execution_trace_event(
@@ -369,6 +371,18 @@ class AgentToolLoopMixin:
             execution.finalizers.pop(tool_name, None)
         if loop_state.finalizer is not None:
             execution.finalizers[tool_name] = loop_state.finalizer
+
+    def _tool_controller_output(self, tool_name: str, action: str, result: ToolResult) -> dict[str, Any] | None:
+        tool = self.tools.get(tool_name)
+        controller_output = getattr(tool, "controller_output", None)
+        if not callable(controller_output):
+            return None
+        try:
+            payload = controller_output(action, result)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("tool controller_output failed tool=%s action=%s", tool_name, action)
+            return None
+        return dict(payload) if isinstance(payload, dict) else None
 
     def _tool_loop_step_budget(self, tool_name: str) -> int:
         if tool_name == "workspace":

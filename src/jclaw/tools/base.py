@@ -161,7 +161,13 @@ class Observation:
         }
 
     @classmethod
-    def from_tool_result(cls, result: ToolResult, *, controller_contract: dict[str, Any] | None = None) -> "Observation":
+    def from_tool_result(
+        cls,
+        result: ToolResult,
+        *,
+        controller_contract: dict[str, Any] | None = None,
+        controller_output: dict[str, Any] | None = None,
+    ) -> "Observation":
         data = result.data if isinstance(result.data, dict) else {}
         artifacts = data.get("artifacts", {})
         normalized_artifacts = dict(artifacts) if isinstance(artifacts, dict) else {}
@@ -177,7 +183,11 @@ class Observation:
             summary=result.summary,
             artifacts=normalized_artifacts,
             artifact_types=artifact_types,
-            data_preview=cls._build_data_preview(data, controller_contract=controller_contract),
+            data_preview=cls._build_data_preview(
+                data,
+                controller_contract=controller_contract,
+                controller_output=controller_output,
+            ),
             missing_requirements=cls._normalize_string_list(data.get("missing_requirements", [])),
             suggested_next_actions=cls._normalize_string_list(data.get("suggested_next_actions", [])),
             needs_confirmation=result.needs_confirmation,
@@ -197,7 +207,15 @@ class Observation:
         return [str(item).strip() for item in value if str(item).strip()]
 
     @classmethod
-    def _build_data_preview(cls, data: dict[str, Any], *, controller_contract: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _build_data_preview(
+        cls,
+        data: dict[str, Any],
+        *,
+        controller_contract: dict[str, Any] | None = None,
+        controller_output: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if isinstance(controller_output, dict):
+            return dict(controller_output)
         contract = controller_contract if isinstance(controller_contract, dict) else {}
         result_fields = [str(item) for item in contract.get("result_fields", []) if str(item).strip()]
         list_fields = contract.get("list_fields", {})
@@ -352,6 +370,9 @@ class Tool(Protocol):
         ...
 
     def format_result(self, action: str, result: ToolResult) -> str:
+        ...
+
+    def controller_output(self, action: str, result: ToolResult) -> dict[str, Any]:
         ...
 
     def materialize_params(

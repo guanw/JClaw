@@ -118,6 +118,13 @@ class FakeTool:
             return ToolResult(ok=True, summary="Completed fake step two.", data={"answer": "final fake answer", "grounded": True})
         raise AssertionError(f"unexpected action: {action}")
 
+    def controller_output(self, action: str, result: ToolResult) -> dict:
+        if action == "step_one":
+            return {"phase": result.data.get("phase"), "source": "controller_output"}
+        if action == "step_two":
+            return {"grounded": result.data.get("grounded"), "source": "controller_output"}
+        return {}
+
     def format_result(self, action: str, result: ToolResult) -> str:
         lines = [result.summary]
         if result.data.get("answer"):
@@ -1156,7 +1163,10 @@ def test_controller_prompt_includes_structured_runtime_observations(tmp_path) ->
     assert controller_state["latest_observation"]["summary"] == "Completed fake step one."
     assert controller_state["observations"][0]["tool"] == "fake"
     assert controller_state["observations"][0]["action"] == "step_one"
-    assert controller_state["observations"][0]["observation"]["data_preview"]["phase"] == "intermediate"
+    assert controller_state["observations"][0]["observation"]["data_preview"] == {
+        "phase": "intermediate",
+        "source": "controller_output",
+    }
     assert controller_state["artifact_types"] == []
     db.close()
 

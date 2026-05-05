@@ -112,6 +112,37 @@ def test_observation_from_tool_result_uses_controller_contract_preview_rules() -
     assert len(observation.data_preview["content"]) == 4003
 
 
+def test_observation_from_tool_result_prefers_explicit_controller_output() -> None:
+    result = ToolResult(
+        ok=True,
+        summary="Ran command.",
+        data={
+            "command": "pytest -q",
+            "stdout": "x" * 2000,
+            "artifacts": {},
+        },
+    )
+
+    observation = Observation.from_tool_result(
+        result,
+        controller_contract={
+            "result_fields": ["command", "stdout"],
+            "result_previews": {"stdout": 400},
+        },
+        controller_output={
+            "command": "pytest -q",
+            "exit_code": 0,
+            "stdout": "ok",
+        },
+    )
+
+    assert observation.data_preview == {
+        "command": "pytest -q",
+        "exit_code": 0,
+        "stdout": "ok",
+    }
+
+
 def test_decision_from_dict_validates_tool_call_shape() -> None:
     decision = Decision.from_dict(
         {
