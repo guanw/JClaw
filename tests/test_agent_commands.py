@@ -1308,6 +1308,56 @@ def test_controller_state_preserves_workspace_file_and_diff_artifact_previews(tm
     db.close()
 
 
+def test_controller_state_uses_workspace_controller_output_for_observation_preview(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(config, db, DummyLLM())
+    workspace = agent.tools.get("workspace")
+    runtime = RuntimeState(request="inspect source code")
+    result = ToolResult(
+        ok=True,
+        summary="Read snippet.",
+        data={
+            "root_path": "/repo",
+            "target_path": "/repo/app.py",
+            "start_line": 10,
+            "end_line": 20,
+            "content": "x" * 5000,
+            "truncated": False,
+            "artifacts": {},
+        },
+    )
+    runtime.append(
+        Observation.from_tool_result(
+            result,
+            controller_output=workspace.controller_output("read_snippet", result),
+        )
+    )
+    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+        [{"tool": "workspace", "action": "read_snippet", "reason": "Inspect snippet", "result": result}],
+        runtime,
+    )
+
+    latest_preview = controller_state["latest_observation"]["data_preview"]
+    assert latest_preview["target_path"] == "/repo/app.py"
+    assert latest_preview["start_line"] == 10
+    assert latest_preview["end_line"] == 20
+    assert len(latest_preview["content"]) == 4003
+    db.close()
+
+
 def test_controller_state_preserves_workspace_patch_artifact_preview(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),

@@ -793,6 +793,38 @@ def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> No
     db.close()
 
 
+def test_workspace_controller_output_for_read_snippet_and_run_command(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "app.py"
+    target.write_text("line1\nline2\nline3\n", encoding="utf-8")
+    tool = WorkspaceTool(db, tmp_path / "state", root)
+    db.upsert_grant(str(root.resolve()), ("read", "shell"), "chat-1")
+
+    snippet = tool.invoke(
+        "read_snippet",
+        {"path": str(target), "start_line": 2, "end_line": 3},
+        ToolContext(chat_id="chat-1"),
+    )
+    snippet_output = tool.controller_output("read_snippet", snippet)
+    assert snippet_output["target_path"] == str(target.resolve())
+    assert snippet_output["start_line"] == 2
+    assert snippet_output["end_line"] == 3
+    assert snippet_output["content"] == "line2\nline3"
+
+    command = tool.invoke(
+        "run_command",
+        {"command": "python3 -c \"print('ok')\""},
+        ToolContext(chat_id="chat-1"),
+    )
+    command_output = tool.controller_output("run_command", command)
+    assert command_output["command"] == "python3 -c \"print('ok')\""
+    assert command_output["exit_code"] == 0
+    assert "ok" in command_output["stdout"]
+    db.close()
+
+
 def test_rename_move_copy_and_delete_paths_require_preview_then_apply(tmp_path) -> None:
     root = tmp_path / "repo"
     root.mkdir()

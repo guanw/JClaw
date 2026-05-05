@@ -161,6 +161,143 @@ class WorkspaceTool(
             },
         )
 
+    def controller_output(self, action: str, result: ToolResult) -> dict[str, Any]:
+        data = result.data if isinstance(result.data, dict) else {}
+        if action in {"inspect_root", "path_metadata"}:
+            payload = self._pick_controller_fields(
+                data,
+                "root_path",
+                "target_path",
+                "exists",
+                "kind",
+                "entry_count",
+                "entries_truncated",
+                "git_root",
+                "metadata",
+            )
+            if isinstance(data.get("entries"), list):
+                payload["entries"] = data["entries"][:10]
+            return payload
+        if action in {"find_files", "search_contents"}:
+            payload = self._pick_controller_fields(
+                data,
+                "root_path",
+                "target_path",
+                "query",
+                "match_count",
+            )
+            if isinstance(data.get("matches"), list):
+                payload["matches"] = data["matches"][:10]
+            return payload
+        if action in {"read_file", "read_snippet"}:
+            payload = self._pick_controller_fields(
+                data,
+                "root_path",
+                "target_path",
+                "exists",
+                "kind",
+                "line_count",
+                "start_line",
+                "end_line",
+                "char_count",
+                "bytes_read",
+                "truncated",
+                "git_root",
+            )
+            if "content" in data:
+                payload["content"] = self._controller_text(data.get("content"), limit=4000)
+            return payload
+        if action in {"list_file_symbols", "find_symbol", "find_references"}:
+            payload = self._pick_controller_fields(
+                data,
+                "root_path",
+                "target_path",
+                "query",
+                "match_count",
+            )
+            if isinstance(data.get("symbols"), list):
+                payload["symbols"] = data["symbols"][:10]
+            if isinstance(data.get("matches"), list):
+                payload["matches"] = data["matches"][:10]
+            return payload
+        if action in {
+            "write_file",
+            "create_file",
+            "apply_patch",
+            "apply_change_request",
+            "revert_last_change",
+            "redo_last_change",
+            "rename_path",
+            "move_path",
+            "copy_path",
+            "delete_path",
+            "apply_path_request",
+        }:
+            payload = self._pick_controller_fields(
+                data,
+                "root_path",
+                "target_path",
+                "request_id",
+                "request_kind",
+                "line_count",
+                "char_count",
+                "bytes_read",
+                "truncated",
+            )
+            if isinstance(data.get("touched_files"), list):
+                payload["touched_files"] = data["touched_files"][:10]
+            if "diff_preview" in data:
+                payload["diff_preview"] = self._controller_text(data.get("diff_preview"), limit=4000)
+            if "content" in data:
+                payload["content"] = self._controller_text(data.get("content"), limit=4000)
+            return payload
+        if action in {"run_command", "apply_shell_request"}:
+            payload = self._pick_controller_fields(
+                data,
+                "root_path",
+                "command",
+                "cwd",
+                "exit_code",
+                "request_id",
+            )
+            if "stdout" in data:
+                payload["stdout"] = self._controller_text(data.get("stdout"), limit=4000)
+            if "stderr" in data:
+                payload["stderr"] = self._controller_text(data.get("stderr"), limit=4000)
+            return payload
+        if action in {"git_status"}:
+            payload = self._pick_controller_fields(data, "root_path", "status")
+            if "diff_stat" in data:
+                payload["diff_stat"] = self._controller_text(data.get("diff_stat"), limit=4000)
+            return payload
+        if action in {"git_diff"}:
+            payload = self._pick_controller_fields(
+                data,
+                "root_path",
+                "target_path",
+                "git_root",
+                "status",
+                "has_unstaged",
+                "has_staged",
+            )
+            if "diff" in data:
+                payload["diff"] = self._controller_text(data.get("diff"), limit=4000)
+            return payload
+        if action in {"prepare_git_action", "prepare_shell_action", "abort_request"}:
+            payload = self._pick_controller_fields(
+                data,
+                "root_path",
+                "target_path",
+                "request_id",
+                "request_kind",
+                "command",
+                "preview",
+            )
+            if isinstance(data.get("touched_files"), list):
+                payload["touched_files"] = data["touched_files"][:10]
+            return payload
+        return {}
+
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handlers = {
             "inspect_root": self._inspect_root,
@@ -335,6 +472,17 @@ class WorkspaceTool(
             payload["error"] = error
         with (self.root / "events.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+    def _pick_controller_fields(self, data: dict[str, Any], *keys: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for key in keys:
+            if key in data:
+                payload[key] = data[key]
+        return payload
+
+    def _controller_text(self, value: Any, *, limit: int) -> str:
+        text = str(value).strip()
+        return f"{text[:limit]}..." if len(text) > limit else text
 
     def _schema(self, properties: dict[str, Any], *, required: tuple[str, ...] = ()) -> dict[str, Any]:
         schema: dict[str, Any] = {"type": "object", "properties": properties}
