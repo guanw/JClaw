@@ -81,24 +81,26 @@ class KnowledgeTool:
                 ".csv",
                 ".pdf",
             ],
-            controller_contract={
-                "result_fields": [
-                    "grounded",
-                    "partial",
-                    "summary_text",
-                    "scanned_files",
-                    "scan_truncated",
-                ],
-                "list_fields": {
-                    "supported_files": 10,
-                    "unsupported_files": 10,
-                    "citations": 4,
-                },
-                "result_previews": {
-                    "summary_text": self.text_preview_chars,
-                },
-            },
         )
+
+    def controller_output(self, action: str, result: ToolResult) -> dict[str, Any]:
+        data = result.data if isinstance(result.data, dict) else {}
+        if action != "analyze_paths":
+            return {}
+        # Keep the controller-facing payload focused on provenance and scan summary.
+        # Bulky extracted chunks remain in artifacts/result data for follow-up access,
+        # but the default observation should stay compact enough for next-step decisions.
+        payload: dict[str, Any] = {}
+        for key in ("grounded", "partial", "scanned_files", "scan_truncated"):
+            if key in data:
+                payload[key] = data[key]
+        if isinstance(data.get("supported_files"), list):
+            payload["supported_files"] = data["supported_files"][:10]
+        if isinstance(data.get("unsupported_files"), list):
+            payload["unsupported_files"] = data["unsupported_files"][:10]
+        if isinstance(data.get("citations"), list):
+            payload["citations"] = data["citations"][:4]
+        return payload
 
     def format_result(self, action: str, result: ToolResult) -> str:
         lines = [result.summary]

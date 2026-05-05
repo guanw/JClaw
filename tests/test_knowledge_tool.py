@@ -111,7 +111,25 @@ def test_knowledge_tool_describe_exposes_structured_action_specs(tmp_path) -> No
 
     assert description["actions"]["analyze_paths"]["produces_artifacts"] == ["knowledge_context"]
     assert sorted(description["actions"].keys()) == ["analyze_paths"]
-    assert sorted(description["controller_contract"]["list_fields"].keys()) == ["citations", "supported_files", "unsupported_files"]
-    assert "grounded" in description["controller_contract"]["result_fields"]
-    assert description["controller_contract"]["result_previews"]["summary_text"] > 0
+    assert "controller_contract" not in description
+    db.close()
+
+
+def test_knowledge_controller_output_is_tool_owned(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "notes.txt"
+    target.write_text("hello world\n", encoding="utf-8")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_read(db, root)
+    tool = KnowledgeTool(db, tmp_path / "state", root)
+
+    result = tool.invoke("analyze_paths", {"paths": [str(target)]}, ToolContext(chat_id="chat-1"))
+    payload = tool.controller_output("analyze_paths", result)
+
+    assert payload["grounded"] is True
+    assert payload["partial"] is False
+    assert payload["scanned_files"] == 1
+    assert payload["supported_files"][0]["path"] == str(target.resolve())
+    assert "chunks" not in payload
     db.close()
