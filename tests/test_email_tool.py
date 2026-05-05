@@ -257,7 +257,6 @@ def test_email_materialize_params_normalizes_alias_and_placeholder_ids(tmp_path)
         "body": "hello",
         "thread_id": "thread-1",
     }
-
     thread_params = tool.materialize_params(
         "get_thread",
         {
@@ -270,6 +269,54 @@ def test_email_materialize_params_normalizes_alias_and_placeholder_ids(tmp_path)
         "alias": "gmail",
         "thread_id": "thread-1",
     }
+    db.close()
+
+
+def test_email_tool_describe_exposes_structured_actions_without_controller_contract(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    tool = EmailTool(
+        db,
+        oauth_client_path=Path("/tmp/client.json"),
+        token_dir=tmp_path / "tokens",
+        get_client=lambda alias: FakeGmailClient(),
+    )
+
+    description = tool.describe()
+
+    assert description["actions"]["search_messages"]["produces_artifacts"] == ["email_result_set"]
+    assert "controller_contract" not in description
+    db.close()
+
+
+def test_email_controller_output_is_tool_owned(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    fake_client = FakeGmailClient()
+    tool = EmailTool(
+        db,
+        oauth_client_path=Path("/tmp/client.json"),
+        token_dir=tmp_path / "tokens",
+        connect_account=lambda alias, scopes: ConnectedEmailAccount(
+            alias=alias,
+            provider="gmail",
+            email_address="me@example.com",
+            scopes=scopes,
+            metadata={"history_id": "123"},
+        ),
+        get_client=lambda alias: fake_client,
+    )
+    tool.invoke("connect_account", {"alias": "gmail"}, ToolContext(chat_id="chat-1"))
+
+    searched = tool.invoke("search_messages", {"alias": "gmail", "query": "tax"}, ToolContext(chat_id="chat-1"))
+    search_payload = tool.controller_output("search_messages", searched)
+    assert search_payload["alias"] == "gmail"
+    assert search_payload["query"] == "tax"
+    assert search_payload["messages"][0]["id"] == "msg-1"
+
+    message = tool.invoke("get_message", {"alias": "gmail", "message_id": "msg-1"}, ToolContext(chat_id="chat-1"))
+    message_payload = tool.controller_output("get_message", message)
+    assert message_payload["message"]["id"] == "msg-1"
+    assert message_payload["message"]["thread_id"] == "thread-1"
+    assert message_payload["message"]["text_body"] == "Can you review this?"
     db.close()
 
 

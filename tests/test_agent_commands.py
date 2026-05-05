@@ -1408,6 +1408,62 @@ def test_controller_state_uses_knowledge_controller_output_for_observation_previ
     db.close()
 
 
+def test_controller_state_uses_email_controller_output_for_observation_preview(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(config, db, DummyLLM())
+    email = agent.tools.get("email")
+    runtime = RuntimeState(request="search email")
+    result = ToolResult(
+        ok=True,
+        summary="Found 1 matching email.",
+        data={
+            "alias": "gmail",
+            "query": "tax",
+            "messages": [
+                {
+                    "id": "msg-1",
+                    "thread_id": "thread-1",
+                    "subject": "Taxes",
+                    "from": "alice@example.com",
+                    "date": "Mon, 20 Apr 2026 10:00:00 -0400",
+                    "snippet": "Can you review this?",
+                    "text_body": "Can you review this?",
+                }
+            ],
+            "artifacts": {},
+        },
+    )
+    runtime.append(
+        Observation.from_tool_result(
+            result,
+            controller_output=email.controller_output("search_messages", result),
+        )
+    )
+    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+        [{"tool": "email", "action": "search_messages", "reason": "Find matching email", "result": result}],
+        runtime,
+    )
+
+    latest_preview = controller_state["latest_observation"]["data_preview"]
+    assert latest_preview["alias"] == "gmail"
+    assert latest_preview["query"] == "tax"
+    assert latest_preview["messages"][0]["id"] == "msg-1"
+    db.close()
+
+
 def test_controller_state_preserves_workspace_patch_artifact_preview(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),

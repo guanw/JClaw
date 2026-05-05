@@ -46,6 +46,43 @@ class EmailTool:
             actions=specs,
         )
 
+    def controller_output(self, action: str, result: ToolResult) -> dict[str, Any]:
+        data = result.data if isinstance(result.data, dict) else {}
+        # Keep the controller-facing payload focused on actionable mailbox state.
+        # Full message/thread payloads remain in artifacts/result data for follow-up access,
+        # but the default observation should highlight only the fields needed for next-step decisions.
+        if action in {"connect_account"}:
+            return self._pick_controller_fields(data, "account")
+        if action in {"list_accounts"}:
+            payload: dict[str, Any] = {}
+            if isinstance(data.get("accounts"), list):
+                payload["accounts"] = data["accounts"][:10]
+            return payload
+        if action in {"list_unread", "search_messages"}:
+            payload = self._pick_controller_fields(data, "alias", "query")
+            if isinstance(data.get("messages"), list):
+                payload["messages"] = data["messages"][:10]
+            return payload
+        if action in {"select_message", "get_message"}:
+            payload = self._pick_controller_fields(data, "alias")
+            message = data.get("message")
+            if isinstance(message, dict):
+                payload["message"] = self._message_controller_view(message)
+            return payload
+        if action in {"get_thread"}:
+            payload = self._pick_controller_fields(data, "alias")
+            thread = data.get("thread")
+            if isinstance(thread, dict):
+                payload["thread"] = self._thread_controller_view(thread)
+            return payload
+        if action in {"draft_reply"}:
+            payload = self._pick_controller_fields(data, "alias")
+            draft = data.get("draft")
+            if isinstance(draft, dict):
+                payload["draft"] = self._draft_controller_view(draft)
+            return payload
+        return {}
+
     def format_result(self, action: str, result: ToolResult) -> str:
         data = result.data
         if action == "list_accounts":
@@ -234,6 +271,7 @@ class EmailTool:
             summary=f"Found {len(messages)} matching email(s) for '{query}'.",
             data={
                 "alias": alias,
+                "query": query,
                 "messages": messages,
                 "allow_tool_followup": True,
                 "artifacts": {
@@ -245,6 +283,46 @@ class EmailTool:
                 },
             },
         )
+
+    def _pick_controller_fields(self, data: dict[str, Any], *keys: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for key in keys:
+            if key in data:
+                payload[key] = data[key]
+        return payload
+
+    def _message_controller_view(self, message: dict[str, Any]) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for key in ("id", "thread_id", "subject", "from", "to", "date", "unread"):
+            if key in message:
+                payload[key] = message[key]
+        if "snippet" in message:
+            payload["snippet"] = self._preview_text(message.get("snippet"), limit=800)
+        if "text_body" in message:
+            payload["text_body"] = self._preview_text(message.get("text_body"), limit=2000)
+        return payload
+
+    def _thread_controller_view(self, thread: dict[str, Any]) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if "thread_id" in thread:
+            payload["thread_id"] = str(thread["thread_id"]).strip()
+        messages = thread.get("messages")
+        if isinstance(messages, list):
+            payload["messages"] = [self._message_controller_view(item) for item in messages[:10] if isinstance(item, dict)]
+        return payload
+
+    def _draft_controller_view(self, draft: dict[str, Any]) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for key in ("draft_id", "message_id", "thread_id", "subject", "to"):
+            if key in draft:
+                payload[key] = draft[key]
+        if "body_preview" in draft:
+            payload["body_preview"] = self._preview_text(draft.get("body_preview"), limit=1200)
+        return payload
+
+    def _preview_text(self, value: Any, *, limit: int) -> str:
+        text = str(value).strip()
+        return f"{text[:limit]}..." if len(text) > limit else text
 
     def _select_message(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         alias = self._resolve_alias(params)
