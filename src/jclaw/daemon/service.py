@@ -7,7 +7,7 @@ import time
 
 from jclaw.ai.agent import AssistantAgent
 from jclaw.ai.client import OpenAICompatibleClient
-from jclaw.channel.telegram import TelegramBotChannel
+from jclaw.channel.telegram import TelegramBotChannel, TelegramPollingConflictError
 from jclaw.core.config import Config
 from jclaw.core.db import Database
 from jclaw.core.scheduler import next_run_at, parse_schedule, to_utc_iso
@@ -63,6 +63,12 @@ class JClawDaemon:
                         time.sleep(self.config.daemon.idle_sleep_seconds)
                 except KeyboardInterrupt:
                     raise
+                except TelegramPollingConflictError:
+                    LOGGER.error(
+                        "stopping JClaw daemon because Telegram rejected getUpdates with 409 Conflict; "
+                        "another instance is already polling this bot"
+                    )
+                    self._running = False
                 except Exception:  # noqa: BLE001
                     LOGGER.exception("daemon loop failed")
                     time.sleep(max(self.config.daemon.idle_sleep_seconds, 3.0))

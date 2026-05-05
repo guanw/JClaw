@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import time
 
 from jclaw.channel.base import IncomingMessage
+from jclaw.channel.telegram import TelegramPollingConflictError
 from jclaw.core.db import Database
 from jclaw.daemon.service import JClawDaemon
 
@@ -81,6 +82,23 @@ def test_daemon_advances_offset_when_message_handling_fails() -> None:
     daemon.run_forever()
 
     assert daemon.db.offset == 8
+
+
+def test_daemon_stops_after_telegram_polling_conflict() -> None:
+    daemon = object.__new__(JClawDaemon)
+    daemon.config = SimpleNamespace(daemon=SimpleNamespace(idle_sleep_seconds=0.0))
+    daemon.db = FakeDB()
+    daemon.llm = SimpleNamespace(close=lambda: None)
+    daemon.channel = SimpleNamespace(
+        poll_updates=lambda offset: (_ for _ in ()).throw(TelegramPollingConflictError("conflict")),
+        close=lambda: None,
+    )
+    daemon._run_due_cron_jobs = lambda: None
+    daemon._running = True
+
+    daemon.run_forever()
+
+    assert daemon._running is False
 
 
 def test_run_due_cron_jobs_disables_one_off_job(tmp_path) -> None:

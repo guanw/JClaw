@@ -12,6 +12,11 @@ from jclaw.core.config import TelegramConfig
 
 LOGGER = logging.getLogger(__name__)
 
+
+class TelegramPollingConflictError(RuntimeError):
+    """Raised when another Telegram consumer is already polling this bot."""
+
+
 class TelegramBotChannel:
     _FENCED_CODE_PATTERN = re.compile(r"```(?:[\w.+-]+)?\n?(.*?)```", re.DOTALL)
 
@@ -81,7 +86,15 @@ class TelegramBotChannel:
         if not self.config.bot_token:
             raise RuntimeError("telegram.bot_token is missing")
         response = self._client.post(f"{self.config.base_url}{self.config.bot_token}/{method}", json=payload)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if method == "getUpdates" and exc.response.status_code == 409:
+                raise TelegramPollingConflictError(
+                    "telegram getUpdates returned 409 Conflict; another JClaw instance or webhook is already "
+                    "consuming updates for this bot"
+                ) from exc
+            raise
         data = response.json()
         if not data.get("ok"):
             raise RuntimeError(f"telegram API error for {method}: {data}")
