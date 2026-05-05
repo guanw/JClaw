@@ -50,6 +50,75 @@ jclaw run
 jclaw install-launchd
 ```
 
+## Prod Vs Dev
+
+JClaw can run cleanly with one production Telegram bot and one development Telegram bot.
+
+- `prod`: background `launchd` service, always-on bot, config at `~/.config/jclaw/config.toml`
+- `dev`: foreground process for interactive testing, separate bot, config at `~/.config/jclaw/config.dev.toml`
+
+The recommended pattern is:
+
+1. Keep `~/.config/jclaw/config.toml` as the full production config.
+2. Make `~/.config/jclaw/config.dev.toml` a small overlay that inherits from prod and overrides only the settings that should differ.
+
+Example `config.dev.toml`:
+
+```toml
+extends = "/Users/guanw/.config/jclaw/config.toml"
+
+[telegram]
+bot_token = "YOUR_DEV_BOT_TOKEN"
+allowed_chat_ids = []
+
+[daemon]
+state_dir = "/Users/guanw/Library/Application Support/JClawDev"
+db_path = "/Users/guanw/Library/Application Support/JClawDev/jclaw.db"
+stdout_log = "/Users/guanw/Library/Logs/JClawDev/stdout.log"
+stderr_log = "/Users/guanw/Library/Logs/JClawDev/stderr.log"
+launchd_label = "com.jclaw.dev"
+
+[memory]
+max_memory_items = 100
+```
+
+Notes:
+
+- `extends = "..."` loads the base config first, then applies overrides from the current file.
+- Use a different Telegram bot token for dev so dev and prod do not fight over `getUpdates`.
+- Use a separate `state_dir` and `db_path` for dev if you want dev memory, traces, and offsets isolated from prod.
+
+Start production:
+
+```bash
+scripts/bootstrap_local_prod.sh
+```
+
+Restart production after code changes:
+
+```bash
+scripts/bootstrap_local_prod.sh --restart-only
+```
+
+Start the dev Telegram loop in the foreground:
+
+```bash
+scripts/run_dev.sh
+```
+
+Run a local dev turn without starting a Telegram poller:
+
+```bash
+.venv/bin/python jclaw.py send --config ~/.config/jclaw/config.dev.toml "test prompt"
+```
+
+Important:
+
+- In the current CLI, `--config` must come after the subcommand, for example `jclaw.py run --config ...`.
+- `jclaw.py --config ... run` may silently fall back to the default prod config.
+
+This split avoids the common failure mode where two `jclaw run` processes use the same Telegram bot token and trigger Telegram `409 Conflict` errors.
+
 ## Telegram Setup
 
 Create a bot with `@BotFather`, copy the bot token into the config, and send the bot a message from Telegram. If you want to restrict access, set `telegram.allowed_chat_ids` after you learn your chat ID from the logs or database.

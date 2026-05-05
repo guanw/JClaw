@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
 from pathlib import Path
 import os
 import tomllib
@@ -74,6 +75,43 @@ def _env_list(name: str) -> tuple[str, ...]:
     if not raw:
         return ()
     return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
+def _merge_config_dicts(base: dict[str, object], override: dict[str, object]) -> dict[str, object]:
+    merged = deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_config_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_config_data(config_path: Path, seen: set[Path] | None = None) -> dict[str, object]:
+    resolved = config_path.expanduser().resolve()
+    active = set() if seen is None else seen
+    if resolved in active:
+        raise RuntimeError(f"Config extends cycle detected at {resolved}")
+    active.add(resolved)
+
+    data: dict[str, object] = {}
+    if resolved.exists():
+        with resolved.open("rb") as handle:
+            data = tomllib.load(handle)
+
+    extends = data.get("extends")
+    if extends in (None, ""):
+        active.remove(resolved)
+        return data
+
+    base_path = Path(str(extends)).expanduser()
+    if not base_path.is_absolute():
+        base_path = (resolved.parent / base_path).resolve()
+    base_data = _load_config_data(base_path, active)
+    active.remove(resolved)
+    current = dict(data)
+    current.pop("extends", None)
+    return _merge_config_dicts(base_data, current)
 
 
 def _detect_email_oauth_client(root: Path) -> Path:
@@ -267,10 +305,7 @@ max_answer_citations = {KNOWLEDGE_MAX_ANSWER_CITATIONS}
 
 def load_config(path: str | Path | None = None) -> Config:
     config_path = _expand_path(path, default_config_path())
-    data: dict[str, object] = {}
-    if config_path.exists():
-        with config_path.open("rb") as handle:
-            data = tomllib.load(handle)
+    data = _load_config_data(config_path)
 
     provider_data = data.get("provider", {})
     telegram_data = data.get("telegram", {})
@@ -315,15 +350,17 @@ def load_config(path: str | Path | None = None) -> Config:
     automation = AutomationConfig(
         enabled=bool(automation_data.get("enabled", AUTOMATION_ENABLED)),
     )
-    detected_oauth_client = _detect_email_oauth_client(repo_root())
     configured_oauth_path = email_data.get("oauth_client_path")
+    email_enabled = bool(email_data.get("enabled", EMAIL_ENABLED))
+    detected_oauth_client: Path | None = None
+    if email_enabled:
+        if configured_oauth_path not in (None, ""):
+            detected_oauth_client = _expand_path(configured_oauth_path, repo_root())
+        else:
+            detected_oauth_client = _detect_email_oauth_client(repo_root())
     email = EmailConfig(
-        enabled=bool(email_data.get("enabled", EMAIL_ENABLED)),
-        oauth_client_path=(
-            _expand_path(configured_oauth_path, detected_oauth_client)
-            if configured_oauth_path not in (None, "")
-            else detected_oauth_client
-        ),
+        enabled=email_enabled,
+        oauth_client_path=detected_oauth_client,
         token_dir=_expand_path(email_data.get("token_dir"), default_state_dir() / "tools" / "email" / "tokens"),
         default_account_alias=str(email_data.get("default_account_alias", EMAIL_DEFAULT_ACCOUNT_ALIAS)),
     )
