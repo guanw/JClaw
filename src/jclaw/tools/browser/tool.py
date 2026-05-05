@@ -127,6 +127,71 @@ class BrowserTool(
         )
         return "\n".join(lines)
 
+    def controller_output(self, action: str, result: ToolResult) -> dict[str, Any]:
+        data = result.data
+        # Browser steps can produce bulky page dumps and multi-step traces. The controller
+        # payload keeps only the page identity, short evidence, and compact progress state
+        # needed to decide the next browser action. Full page data remains in artifacts and
+        # raw tool result data for follow-up and debugging.
+        payload: dict[str, Any] = {}
+        for field in ("session_id", "tab_id", "url", "title", "page_kind", "mode", "query"):
+            value = data.get(field)
+            if value not in (None, "", []):
+                payload[field] = value
+        text = str(data.get("text", "")).strip()
+        if text:
+            payload["text"] = text[:1200] + ("..." if len(text) > 1200 else "")
+        fields = data.get("fields")
+        if isinstance(fields, dict) and fields:
+            payload["fields"] = fields
+        evidence_refs = data.get("evidence_refs")
+        if isinstance(evidence_refs, list) and evidence_refs:
+            payload["evidence_refs"] = [str(item) for item in evidence_refs[:8]]
+        missing_information = str(data.get("missing_information", "")).strip()
+        if missing_information:
+            payload["missing_information"] = missing_information[:300] + ("..." if len(missing_information) > 300 else "")
+        termination_reason = str(data.get("termination_reason", "")).strip()
+        if termination_reason:
+            payload["termination_reason"] = termination_reason
+        observations = data.get("observation_count")
+        if observations is not None:
+            payload["observation_count"] = observations
+        steps = data.get("steps")
+        if isinstance(steps, list) and steps:
+            payload["steps"] = [
+                {
+                    "action": str(step.get("action", "")),
+                    "reason": str(step.get("reason", ""))[:200],
+                    "url": str(step.get("url", "")),
+                    "title": str(step.get("title", ""))[:160],
+                }
+                for step in steps[:5]
+                if isinstance(step, dict)
+            ]
+        sources = data.get("sources")
+        if isinstance(sources, list) and sources:
+            payload["sources"] = [
+                {
+                    "url": str(source.get("url", "")),
+                    "title": str(source.get("title", ""))[:160],
+                }
+                for source in sources[:4]
+                if isinstance(source, dict)
+            ]
+        sessions = data.get("sessions")
+        if isinstance(sessions, list):
+            payload["sessions"] = [
+                {
+                    "session_id": str(session.get("session_id", "")),
+                    "current_url": str(session.get("current_url", "")),
+                    "visible": bool(session.get("visible", False)),
+                    "persistent": bool(session.get("persistent", False)),
+                }
+                for session in sessions[:5]
+                if isinstance(session, dict)
+            ]
+        return payload
+
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handlers = {
             "open_url": self._open_url,

@@ -258,6 +258,38 @@ def test_extract_reads_current_page_and_returns_structured_fields(tmp_path) -> N
     assert result.data["artifacts"]["browser_candidates:latest"]["count"] == 0
 
 
+def test_browser_controller_output_keeps_compact_page_evidence(tmp_path) -> None:
+    tool = _stub_browser(BrowserTool(tmp_path))
+    result = tool.invoke("read_page", {}, ToolContext(chat_id="chat-controller"))
+
+    payload = tool.controller_output("read_page", result)
+
+    assert payload["session_id"] == result.data["session_id"]
+    assert payload["url"] == result.data["url"]
+    assert payload.get("title", "") == result.data.get("title", "")
+    if "text" in payload:
+        assert isinstance(payload["text"], str)
+        assert len(payload["text"]) <= 1203
+
+
+def test_browser_controller_output_keeps_compact_objective_progress(tmp_path) -> None:
+    tool = _stub_browser(BrowserTool(tmp_path))
+    result = tool.invoke(
+        "run_objective",
+        {"objective": "Open example.com", "start_url": "https://example.com"},
+        ToolContext(chat_id="chat-objective"),
+    )
+
+    payload = tool.controller_output("run_objective", result)
+
+    assert payload["session_id"] == result.data["session_id"]
+    assert payload["termination_reason"] == result.data["termination_reason"]
+    assert payload["observation_count"] == result.data["observation_count"]
+    assert len(payload["steps"]) <= 5
+    if "sources" in payload:
+        assert len(payload["sources"]) <= 4
+
+
 def test_read_page_emits_page_and_candidate_artifacts(tmp_path) -> None:
     tool = _stub_browser(BrowserTool(tmp_path))
     result = tool.invoke("read_page", {}, ToolContext(chat_id="chat-read-page"))

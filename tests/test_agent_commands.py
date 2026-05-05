@@ -1464,6 +1464,67 @@ def test_controller_state_uses_email_controller_output_for_observation_preview(t
     db.close()
 
 
+def test_controller_state_uses_browser_controller_output_for_observation_preview(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(config, db, DummyLLM())
+    browser = agent.tools.get("browser")
+    runtime = RuntimeState(request="read page")
+    result = ToolResult(
+        ok=True,
+        summary="Read current page state.",
+        data={
+            "session_id": "sess_browser",
+            "tab_id": "tab-1",
+            "url": "https://example.com",
+            "title": "Example Domain",
+            "page_kind": "article",
+            "mode": "playwright",
+            "text": "x" * 2000,
+            "steps": [
+                {
+                    "action": "open_url",
+                    "reason": "Open the page.",
+                    "url": "https://example.com",
+                    "title": "Example Domain",
+                }
+            ],
+            "sources": [{"url": "https://example.com", "title": "Example Domain"}],
+            "artifacts": {},
+        },
+    )
+    runtime.append(
+        Observation.from_tool_result(
+            result,
+            controller_output=browser.controller_output("read_page", result),
+        )
+    )
+    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+        [{"tool": "browser", "action": "read_page", "reason": "Read page", "result": result}],
+        runtime,
+    )
+
+    latest_preview = controller_state["latest_observation"]["data_preview"]
+    assert latest_preview["session_id"] == "sess_browser"
+    assert latest_preview["url"] == "https://example.com"
+    assert latest_preview["title"] == "Example Domain"
+    assert len(latest_preview["text"]) == 1203
+    assert latest_preview["steps"][0]["action"] == "open_url"
+    db.close()
+
+
 def test_controller_state_preserves_workspace_patch_artifact_preview(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),
