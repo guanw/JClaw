@@ -775,19 +775,18 @@ def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> No
     assert description["actions"]["revert_last_change"]["produces_artifacts"] == ["workspace_patch"]
     assert description["actions"]["redo_last_change"]["produces_artifacts"] == ["workspace_patch"]
     assert description["actions"]["run_command"]["produces_artifacts"] == ["workspace_command_result"]
-    assert description["controller_contract"]["artifact_previews"]["workspace_symbol_search"]["query"] == 220
-    assert description["controller_contract"]["artifact_previews"]["workspace_file"]["content"] == 4000
-    assert description["controller_contract"]["artifact_previews"]["workspace_diff"]["diff"] == 4000
-    assert description["controller_contract"]["artifact_previews"]["workspace_patch"]["diff"] == 4000
-    assert description["controller_contract"]["artifact_previews"]["workspace_command_result"]["stdout"] == 4000
-    assert "content" in description["controller_contract"]["result_fields"]
-    assert "match_count" in description["controller_contract"]["result_fields"]
-    assert description["controller_contract"]["result_previews"]["content"] == 4000
     assert "bounded code section" in description["actions"]["read_snippet"]["description"]
     assert "Prefer this when the request names a function or class" in description["actions"]["find_symbol"]["description"]
     assert "affect callers or usages" in description["actions"]["find_references"]["description"]
     assert "generated file contents" in description["actions"]["write_file"]["description"]
     assert "small, localized edits" in description["actions"]["apply_patch"]["description"]
+
+    preview_limits = tool.artifact_preview_limits()
+    assert preview_limits["workspace_symbol_search"]["query"] == 220
+    assert preview_limits["workspace_file"]["content"] == 4000
+    assert preview_limits["workspace_diff"]["diff"] == 4000
+    assert preview_limits["workspace_patch"]["diff"] == 4000
+    assert preview_limits["workspace_command_result"]["stdout"] == 4000
     assert "after code edits" in description["actions"]["run_command"]["description"]
     assert "prepare_change" not in description["actions"]
     db.close()

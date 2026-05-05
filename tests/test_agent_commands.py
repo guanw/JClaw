@@ -1288,7 +1288,7 @@ def test_controller_state_preserves_workspace_file_and_diff_artifact_previews(tm
     runtime.append(
         Observation.from_tool_result(
             result,
-            controller_contract=agent.tools.get("workspace").describe()["controller_contract"],
+            controller_output=agent.tools.get("workspace").controller_output("read_file", result),
         )
     )
     controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
@@ -1797,17 +1797,15 @@ def test_tool_result_for_controller_includes_workspace_read_fields(tmp_path) -> 
         },
     )
 
-    controller_view = agent._tool_result_for_controller("workspace", result)  # noqa: SLF001
+    controller_view = agent._tool_result_for_controller("workspace", "read_file", result)  # noqa: SLF001
 
-    assert controller_view["content"] == "print('hello')\n"
+    assert controller_view["summary"] == "Read source file."
+    assert controller_view["needs_confirmation"] is False
+    assert controller_view["content"] == "print('hello')"
     assert controller_view["line_count"] == 1
     assert controller_view["start_line"] == 1
     assert controller_view["end_line"] == 1
     assert controller_view["bytes_read"] == 15
-    assert controller_view["git_root"] == "/repo"
-    assert controller_view["diff"] == "### Unstaged\n..."
-    assert controller_view["has_unstaged"] is True
-    assert controller_view["has_staged"] is False
     db.close()
 
 
@@ -1849,7 +1847,6 @@ def test_tool_catalog_and_controller_prompt_bias_workspace_line_requests_to_read
     read_snippet = workspace_tool["actions"]["read_snippet"]["description"]
     controller_guidance = workspace_tool["controller_guidance"]
 
-    assert "controller_contract" not in workspace_tool
     assert "Do not use this when the user asks for explicit line numbers" in read_file
     assert "Use this when the user asks for explicit line numbers" in read_snippet
     assert "switch to mutation as soon as the edit site is known" in controller_guidance

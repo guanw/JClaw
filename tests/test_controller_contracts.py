@@ -89,7 +89,7 @@ def test_observation_from_tool_result_truncates_large_preview_values() -> None:
     assert len(observation.data_preview["error"]) == 223
 
 
-def test_observation_from_tool_result_uses_controller_contract_preview_rules() -> None:
+def test_observation_from_tool_result_uses_generic_preview_rules_without_controller_output() -> None:
     result = ToolResult(
         ok=True,
         summary="Read source file.",
@@ -100,16 +100,10 @@ def test_observation_from_tool_result_uses_controller_contract_preview_rules() -
         },
     )
 
-    observation = Observation.from_tool_result(
-        result,
-        controller_contract={
-            "result_fields": ["content", "line_count"],
-            "result_previews": {"content": 4000},
-        },
-    )
+    observation = Observation.from_tool_result(result)
 
     assert observation.data_preview["line_count"] == 200
-    assert len(observation.data_preview["content"]) == 4003
+    assert len(observation.data_preview["content"]) == 223
 
 
 def test_observation_from_tool_result_prefers_explicit_controller_output() -> None:
@@ -125,10 +119,6 @@ def test_observation_from_tool_result_prefers_explicit_controller_output() -> No
 
     observation = Observation.from_tool_result(
         result,
-        controller_contract={
-            "result_fields": ["command", "stdout"],
-            "result_previews": {"stdout": 400},
-        },
         controller_output={
             "command": "pytest -q",
             "exit_code": 0,

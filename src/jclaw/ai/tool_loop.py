@@ -217,7 +217,6 @@ class AgentToolLoopMixin:
                 controller_output = self._tool_controller_output(decision.tool, decision.action, result)
                 observation = Observation.from_tool_result(
                     result,
-                    controller_contract=self._tool_controller_contract(decision.tool),
                     controller_output=controller_output,
                 )
                 runtime.append(observation)

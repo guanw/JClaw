@@ -104,62 +104,19 @@ class WorkspaceTool(
                 "home_dir": str(self.home_dir),
                 "common_home_aliases": sorted(self.COMMON_HOME_FOLDERS),
             },
-            controller_contract={
-                "result_fields": [
-                    "root_path",
-                    "target_path",
-                    "exists",
-                    "kind",
-                    "entry_count",
-                    "entries_truncated",
-                    "match_count",
-                    "query",
-                    "request_id",
-                    "request_kind",
-                    "diff_preview",
-                    "content",
-                    "cwd",
-                    "exit_code",
-                    "stdout",
-                    "stderr",
-                    "line_count",
-                    "start_line",
-                    "end_line",
-                    "char_count",
-                    "bytes_read",
-                    "truncated",
-                    "git_root",
-                    "status",
-                    "diff",
-                    "has_unstaged",
-                    "has_staged",
-                ],
-                "list_fields": {
-                    "entries": 10,
-                    "matches": 10,
-                    "symbols": 10,
-                    "touched_files": 10,
-                },
-                "result_previews": {
-                    "content": 4000,
-                    "diff": 4000,
-                    "stdout": 4000,
-                    "stderr": 4000,
-                },
-                "artifact_previews": {
-                    "workspace_file": {"content": 4000},
-                    "workspace_diff": {"diff": 4000},
-                    "workspace_patch": {"diff": 4000},
-                    "workspace_command_result": {
-                        "stdout": 4000,
-                        "stderr": 4000,
-                    },
-                    "workspace_symbol_search": {
-                        "query": 220,
-                    },
-                },
-            },
         )
+
+    def artifact_preview_limits(self) -> dict[str, dict[str, int]]:
+        return {
+            "workspace_file": {"content": 4000},
+            "workspace_diff": {"diff": 4000},
+            "workspace_patch": {"diff": 4000},
+            "workspace_command_result": {
+                "stdout": 4000,
+                "stderr": 4000,
+            },
+            "workspace_symbol_search": {"query": 220},
+        }
 
     def controller_output(self, action: str, result: ToolResult) -> dict[str, Any]:
         data = result.data if isinstance(result.data, dict) else {}

@@ -5,7 +5,7 @@ import logging
 import re
 from typing import Any
 
-from jclaw.tools.base import Decision, DecisionType, RuntimeState, ToolResult
+from jclaw.tools.base import Decision, DecisionType, Observation, RuntimeState, ToolResult
 
 
 LOGGER = logging.getLogger(__name__)
@@ -111,14 +111,14 @@ class AgentControllerMixin:
         runtime: RuntimeState,
     ) -> dict[str, Any]:
         now = self._controller_now()
-        artifact_preview_contracts = self._artifact_preview_contracts()
+        artifact_preview_limits = self._artifact_preview_limits()
         observations: list[dict[str, Any]] = []
         start_index = max(0, len(steps) - MAX_CONTROLLER_OBSERVATIONS)
         for index, step in enumerate(steps[start_index:], start=start_index + 1):
             observation = (
                 runtime.observations[index - 1].to_dict()
                 if index - 1 < len(runtime.observations)
-                else self._tool_result_for_controller(step["tool"], step["result"])
+                else self._tool_result_for_controller(step["tool"], step["action"], step["result"])
             )
             observations.append(
                 {
@@ -140,7 +140,7 @@ class AgentControllerMixin:
                 str(key): self._preview_runtime_value(
                     value,
                     artifact_type=str(key),
-                    artifact_preview_contracts=artifact_preview_contracts,
+                    artifact_preview_limits=artifact_preview_limits,
                 )
                 for key, value in runtime.artifacts_by_type.items()
             },
@@ -154,7 +154,7 @@ class AgentControllerMixin:
         *,
         depth: int = 0,
         artifact_type: str = "",
-        artifact_preview_contracts: dict[str, dict[str, int]] | None = None,
+        artifact_preview_limits: dict[str, dict[str, int]] | None = None,
     ) -> Any:
         if value is None or isinstance(value, bool | int | float):
             return value
@@ -168,13 +168,13 @@ class AgentControllerMixin:
                 self._preview_runtime_value(
                     item,
                     depth=depth + 1,
-                    artifact_preview_contracts=artifact_preview_contracts,
+                    artifact_preview_limits=artifact_preview_limits,
                 )
                 for item in value[:3]
             ]
         if isinstance(value, dict):
             preview: dict[str, Any] = {}
-            preview_limits = (artifact_preview_contracts or {}).get(artifact_type, {})
+            preview_limits = (artifact_preview_limits or {}).get(artifact_type, {})
             for index, (key, item) in enumerate(value.items()):
                 if index >= 8:
                     preview["__truncated__"] = True
@@ -187,24 +187,21 @@ class AgentControllerMixin:
                 preview[str(key)] = self._preview_runtime_value(
                     item,
                     depth=depth + 1,
-                    artifact_preview_contracts=artifact_preview_contracts,
+                    artifact_preview_limits=artifact_preview_limits,
                 )
             return preview
         return str(value)
 
-    def _tool_result_for_controller(self, tool_name: str, result: ToolResult) -> dict[str, Any]:
-        data = result.data
-        controller_data: dict[str, Any] = {
+    def _tool_result_for_controller(self, tool_name: str, action: str, result: ToolResult) -> dict[str, Any]:
+        controller_data = {
             "summary": result.summary,
             "needs_confirmation": result.needs_confirmation,
         }
-        contract = self._tool_controller_contract(tool_name)
-        for key in contract.get("result_fields", []):
-            if key in data:
-                controller_data[key] = data[key]
-        for key, limit in contract.get("list_fields", {}).items():
-            if key in data and isinstance(data[key], list):
-                controller_data[str(key)] = data[key][: int(limit)]
+        controller_output = self._tool_controller_output(tool_name, action, result)
+        if isinstance(controller_output, dict):
+            controller_data.update(controller_output)
+            return controller_data
+        controller_data.update(Observation.from_tool_result(result).data_preview)
         return controller_data
 
     def _tool_catalog_for_prompt(self, available_tools: list[dict[str, Any]]) -> str:
@@ -217,35 +214,34 @@ class AgentControllerMixin:
             if "actions" in tool:
                 entry["actions"] = tool["actions"]
             for key, value in tool.items():
-                if key in {"name", "description", "actions", "controller_contract"}:
+                if key in {"name", "description", "actions"}:
                     continue
                 entry[key] = value
             catalog.append(entry)
         return json.dumps(catalog, ensure_ascii=True)
 
-    def _tool_controller_contract(self, tool_name: str) -> dict[str, Any]:
-        description = self.tools.get(tool_name).describe()
-        contract = description.get("controller_contract", {})
-        return dict(contract) if isinstance(contract, dict) else {}
-
-    def _artifact_preview_contracts(self) -> dict[str, dict[str, int]]:
-        contracts: dict[str, dict[str, int]] = {}
-        for tool in self.tools.list_tools():
-            controller_contract = tool.get("controller_contract", {})
-            if not isinstance(controller_contract, dict):
+    def _artifact_preview_limits(self) -> dict[str, dict[str, int]]:
+        limits: dict[str, dict[str, int]] = {}
+        for tool_name, tool in self.tools._tools.items():  # noqa: SLF001
+            preview_limits = getattr(tool, "artifact_preview_limits", None)
+            if not callable(preview_limits):
                 continue
-            artifact_previews = controller_contract.get("artifact_previews", {})
-            if not isinstance(artifact_previews, dict):
+            try:
+                payload = preview_limits()
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("tool artifact_preview_limits failed tool=%s", tool_name)
                 continue
-            for artifact_type, field_limits in artifact_previews.items():
+            if not isinstance(payload, dict):
+                continue
+            for artifact_type, field_limits in payload.items():
                 if not isinstance(field_limits, dict):
                     continue
-                contracts[str(artifact_type)] = {
+                limits[str(artifact_type)] = {
                     str(field): int(limit)
                     for field, limit in field_limits.items()
                     if isinstance(limit, int | float) and int(limit) > 0
                 }
-        return contracts
+        return limits
 
     def _repair_controller_response(
         self,

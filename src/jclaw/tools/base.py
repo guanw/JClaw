@@ -165,7 +165,6 @@ class Observation:
         cls,
         result: ToolResult,
         *,
-        controller_contract: dict[str, Any] | None = None,
         controller_output: dict[str, Any] | None = None,
     ) -> "Observation":
         data = result.data if isinstance(result.data, dict) else {}
@@ -185,7 +184,6 @@ class Observation:
             artifact_types=artifact_types,
             data_preview=cls._build_data_preview(
                 data,
-                controller_contract=controller_contract,
                 controller_output=controller_output,
             ),
             missing_requirements=cls._normalize_string_list(data.get("missing_requirements", [])),
@@ -211,35 +209,12 @@ class Observation:
         cls,
         data: dict[str, Any],
         *,
-        controller_contract: dict[str, Any] | None = None,
         controller_output: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if isinstance(controller_output, dict):
             return dict(controller_output)
-        contract = controller_contract if isinstance(controller_contract, dict) else {}
-        result_fields = [str(item) for item in contract.get("result_fields", []) if str(item).strip()]
-        list_fields = contract.get("list_fields", {})
-        result_previews = contract.get("result_previews", {})
         excluded_keys = {"artifacts", "missing_requirements", "suggested_next_actions"}
         preview: dict[str, Any] = {}
-        if result_fields or (isinstance(list_fields, dict) and bool(list_fields)):
-            for key in result_fields:
-                if key in excluded_keys or key not in data:
-                    continue
-                preview[key] = cls._preview_value(data[key], field_name=key, preview_limits=result_previews)
-            if isinstance(list_fields, dict):
-                for key, limit in list_fields.items():
-                    if key in excluded_keys or key not in data or not isinstance(data[key], list):
-                        continue
-                    try:
-                        count = int(limit)
-                    except (TypeError, ValueError):
-                        continue
-                    preview[str(key)] = [
-                        cls._preview_value(item, preview_limits=result_previews, depth=1)
-                        for item in data[key][:count]
-                    ]
-            return preview
         for index, (key, value) in enumerate(data.items()):
             if key in excluded_keys:
                 continue
@@ -373,6 +348,9 @@ class Tool(Protocol):
         ...
 
     def controller_output(self, action: str, result: ToolResult) -> dict[str, Any]:
+        ...
+
+    def artifact_preview_limits(self) -> dict[str, dict[str, int]]:
         ...
 
     def materialize_params(
