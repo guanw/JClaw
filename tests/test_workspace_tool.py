@@ -754,6 +754,46 @@ def test_git_diff_returns_unstaged_and_staged_diffs_and_scopes_to_path(tmp_path)
     db.close()
 
 
+def test_git_log_returns_scoped_recent_commits(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "JClaw Test"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "jclaw@example.com"], cwd=root, check=True, capture_output=True, text=True)
+    app = root / "app.py"
+    other = root / "other.py"
+
+    app.write_text("print('one')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "Add app"], cwd=root, check=True, capture_output=True, text=True)
+
+    other.write_text("print('other')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "other.py"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "Add other"], cwd=root, check=True, capture_output=True, text=True)
+
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    history = tool.invoke(
+        "git_log",
+        {"path": str(app), "max_count": 5},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert history.ok is True
+    assert history.data["commit_count"] == 1
+    assert history.data["commits"][0]["subject"] == "Add app"
+    assert history.data["artifacts"]["workspace_git_log:latest"]["commit_count"] == 1
+    formatted = tool.format_result("git_log", history)
+    assert "Commits:" in formatted
+    assert "Add app" in formatted
+
+    controller_output = tool.controller_output("git_log", history)
+    assert controller_output["commit_count"] == 1
+    assert controller_output["commits"][0]["short_sha"]
+    db.close()
+
+
 def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> None:
     db = Database(tmp_path / "jclaw.db")
     tool = WorkspaceTool(db, tmp_path / "state", tmp_path / "repo", draft_change=lambda payload: None)
@@ -763,6 +803,7 @@ def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> No
     assert description["actions"]["inspect_root"]["produces_artifacts"] == ["workspace_path"]
     assert description["actions"]["search_contents"]["produces_artifacts"] == ["workspace_search_results"]
     assert description["actions"]["git_status"]["produces_artifacts"] == ["workspace_git_status"]
+    assert description["actions"]["git_log"]["produces_artifacts"] == ["workspace_git_log"]
     assert description["actions"]["read_file"]["produces_artifacts"] == ["workspace_file"]
     assert description["actions"]["read_snippet"]["produces_artifacts"] == ["workspace_file"]
     assert description["actions"]["list_file_symbols"]["produces_artifacts"] == ["workspace_symbol_search"]

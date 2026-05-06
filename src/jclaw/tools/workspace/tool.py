@@ -227,6 +227,21 @@ class WorkspaceTool(
             if "diff_stat" in data:
                 payload["diff_stat"] = self._controller_text(data.get("diff_stat"), limit=4000)
             return payload
+        if action in {"git_log"}:
+            payload = self._pick_controller_fields(
+                data,
+                "root_path",
+                "target_path",
+                "git_root",
+                "commit_count",
+                "since",
+                "until",
+                "author",
+                "rev",
+            )
+            if isinstance(data.get("commits"), list):
+                payload["commits"] = data["commits"][:10]
+            return payload
         if action in {"git_diff"}:
             payload = self._pick_controller_fields(
                 data,
@@ -279,6 +294,7 @@ class WorkspaceTool(
             "apply_change_request": self._apply_change_request,
             "apply_path_request": self._apply_path_request,
             "git_status": self._git_status,
+            "git_log": self._git_log,
             "git_diff": self._git_diff,
             "prepare_git_action": self._prepare_git_action,
             "apply_git_request": self._apply_git_request,
@@ -654,6 +670,19 @@ class WorkspaceTool(
                 description="Read local git status and diff summary.",
                 properties=self._path_properties(),
                 produces_artifacts=("workspace_git_status",),
+            ),
+            "git_log": self._read_action(
+                action="git_log",
+                description="Read local git commit history for the current repository or a scoped path, including recent, date-bounded, author-scoped, or path-scoped commit history.",
+                properties={
+                    **self._path_properties(),
+                    "since": {"type": "string"},
+                    "until": {"type": "string"},
+                    "author": {"type": "string"},
+                    "rev": {"type": "string"},
+                    "max_count": {"type": "integer"},
+                },
+                produces_artifacts=("workspace_git_log",),
             ),
             "git_diff": self._read_action(
                 action="git_diff",

@@ -81,6 +81,14 @@ class WorkspaceFormattingMixin:
                     lines.append(f"- {item['path']}")
             if data.get("match_count", 0) > len(data["matches"]):
                 lines.append(f"Shown {len(data['matches'])} of {data['match_count']} matches.")
+        if data.get("commits"):
+            lines.append("Commits:")
+            for item in data["commits"][:10]:
+                lines.append(
+                    f"- {item['short_sha']} {item['date']} {item['author']}: {item['subject']}"
+                )
+            if data.get("commit_count", 0) > len(data["commits"]):
+                lines.append(f"Shown {len(data['commits'])} of {data['commit_count']} commits.")
         if data.get("diff_preview"):
             lines.append(f"Diff preview:\n{self._code_block(str(data['diff_preview'])[:1500])}")
         if "diff" in data:

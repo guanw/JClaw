@@ -8,6 +8,105 @@ from jclaw.tools.base import ToolContext, ToolResult
 
 
 class WorkspaceGitOpsMixin:
+    def _git_log(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        objective = str(params.get("objective", "Inspect git commit history")).strip()
+        raw_target = params.get("path") or params.get("root_path")
+        target_path = self._resolve_target_path(raw_target)
+        root_path = self._default_root_for_path(target_path)
+        permission = self._ensure_grant(
+            root_path,
+            capabilities=("git",),
+            ctx=ctx,
+            objective=objective,
+            kind="grant",
+            continuation_action="git_log",
+            continuation_params=params,
+        )
+        if permission is not None:
+            return permission
+        git_root = self._detect_git_root(target_path)
+        if git_root is None:
+            return ToolResult(ok=False, summary=f"{root_path} is not inside a local git repository.", data={})
+
+        pathspec: list[str] = []
+        if raw_target not in (None, ""):
+            try:
+                relative = target_path.relative_to(git_root)
+            except ValueError:
+                return ToolResult(ok=False, summary="Target path is outside the detected git root.", data={})
+            if str(relative) != ".":
+                pathspec = [str(relative)]
+
+        max_count = max(1, min(int(params.get("max_count", 10)), 50))
+        argv = [
+            "git",
+            "-C",
+            str(git_root),
+            "log",
+            f"-n{max_count}",
+            "--date=iso-strict",
+            "--pretty=format:%H%x1f%h%x1f%an%x1f%aI%x1f%s",
+        ]
+        since = str(params.get("since", "")).strip()
+        until = str(params.get("until", "")).strip()
+        author = str(params.get("author", "")).strip()
+        rev = str(params.get("rev", "")).strip()
+        if since:
+            argv.append(f"--since={since}")
+        if until:
+            argv.append(f"--until={until}")
+        if author:
+            argv.append(f"--author={author}")
+        if rev:
+            argv.append(rev)
+        if pathspec:
+            argv.extend(["--", *pathspec])
+
+        result = self._run_command_result(argv, cwd=git_root, timeout=self.shell_timeout_seconds)
+        stderr = str(result["stderr"]).strip()
+        if int(result["exit_code"]) != 0:
+            if "does not have any commits yet" in stderr.lower():
+                commits: list[dict[str, str]] = []
+            else:
+                return ToolResult(
+                    ok=False,
+                    summary=stderr or "Failed to read local git log.",
+                    data={"root_path": str(git_root), "target_path": str(target_path)},
+                )
+        else:
+            commits = self._parse_git_log_output(str(result["stdout"]))
+
+        summary = f"Collected {len(commits)} local commit(s) from {git_root}."
+        return ToolResult(
+            ok=True,
+            summary=summary,
+            data={
+                "root_path": str(git_root),
+                "target_path": str(target_path),
+                "git_root": str(git_root),
+                "commit_count": len(commits),
+                "commits": commits,
+                "since": since,
+                "until": until,
+                "author": author,
+                "rev": rev,
+                "allow_tool_followup": True,
+                "artifacts": {
+                    "workspace_git_log:latest": {
+                        "root_path": str(git_root),
+                        "target_path": str(target_path),
+                        "git_root": str(git_root),
+                        "commit_count": len(commits),
+                        "commits": commits[:10],
+                        "since": since,
+                        "until": until,
+                        "author": author,
+                        "rev": rev,
+                    }
+                },
+            },
+        )
+
     def _git_status(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         objective = str(params.get("objective", "Inspect git status")).strip()
         target_path = self._resolve_target_path(params.get("path") or params.get("root_path"))
@@ -206,6 +305,26 @@ class WorkspaceGitOpsMixin:
             "unstaged": unstaged["stdout"],
             "staged": staged["stdout"],
         }
+
+    def _parse_git_log_output(self, stdout: str) -> list[dict[str, str]]:
+        commits: list[dict[str, str]] = []
+        for line in stdout.splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\x1f")
+            if len(parts) != 5:
+                continue
+            sha, short_sha, author, authored_at, subject = parts
+            commits.append(
+                {
+                    "sha": sha,
+                    "short_sha": short_sha,
+                    "author": author,
+                    "date": authored_at,
+                    "subject": subject,
+                }
+            )
+        return commits
 
     def _plan_git_action(self, *, params: dict[str, Any], objective: str, git_root: Path) -> dict[str, Any] | None:
         requested_action = str(params.get("git_action") or params.get("action") or "").strip().lower()
