@@ -7,6 +7,7 @@ from .client import (
     NotionRateLimitedError,
     NotionUnauthorizedError,
 )
+from .tool import NotionTool
 
 __all__ = [
     "NotionClient",
@@ -16,4 +17,5 @@ __all__ = [
     "NotionNotFoundError",
     "NotionRateLimitedError",
     "NotionUnauthorizedError",
+    "NotionTool",
 ]

@@ -18,6 +18,7 @@ from jclaw.tools.browser.tool import BrowserTool
 from jclaw.tools.email.tool import EmailTool
 from jclaw.tools.knowledge.tool import KnowledgeTool
 from jclaw.tools.memory.tool import MemoryTool
+from jclaw.tools.notion.tool import NotionTool
 from jclaw.tools.permissions.tool import PermissionsTool
 from jclaw.tools.registry import ToolRegistry
 from jclaw.tools.workspace.tool import WorkspaceTool
@@ -106,6 +107,8 @@ class AssistantAgent(
                     },
                 )
             )
+        if config.notion.enabled:
+            self.tools.register(NotionTool(config.notion))
 
     def handle_text(self, chat_id: str, text: str, *, user_name: str = "") -> str:
         command_reply = self._handle_command(chat_id, text)

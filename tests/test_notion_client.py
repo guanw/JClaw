@@ -74,3 +74,23 @@ def test_notion_client_uses_expected_headers_on_success() -> None:
     assert payload["object"] == "list"
     assert seen["auth"] == "Bearer secret-token"
     assert seen["version"] == "2025-01-01"
+
+
+def test_notion_client_search_pages_posts_expected_payload() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["body"] = request.content.decode("utf-8")
+        return httpx.Response(200, json={"results": []})
+
+    transport = httpx.MockTransport(handler)
+    client = NotionClient("secret-token", http_client=httpx.Client(transport=transport))
+
+    client.search_pages("roadmap", limit=7)
+
+    assert seen["method"] == "POST"
+    assert seen["path"] == "/v1/search"
+    assert '"query":"roadmap"' in str(seen["body"]).replace(" ", "")
+    assert '"page_size":7' in str(seen["body"]).replace(" ", "")

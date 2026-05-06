@@ -81,6 +81,19 @@ class NotionClient:
     def post(self, path: str, *, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.request("POST", path, json=payload)
 
+    def search_pages(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "query": str(query).strip(),
+            "filter": {"property": "object", "value": "page"},
+            "page_size": max(1, min(int(limit), 100)),
+        }
+        return self.post("/search", payload=payload)
+
     def request(
         self,
         method: str,
