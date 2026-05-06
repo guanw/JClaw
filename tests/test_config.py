@@ -89,3 +89,24 @@ def test_load_config_rejects_extends_cycles(tmp_path) -> None:
         assert "cycle" in str(exc).lower()
     else:  # pragma: no cover
         raise AssertionError("expected extends cycle to raise RuntimeError")
+
+
+def test_load_config_reads_notion_settings(tmp_path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[notion]
+enabled = true
+api_token = "secret-token"
+default_parent_id = "page-123"
+writable_parent_ids = ["page-123", "db-456"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.notion.enabled is True
+    assert config.notion.api_token == "secret-token"
+    assert config.notion.default_parent_id == "page-123"
+    assert config.notion.writable_parent_ids == ("page-123", "db-456")

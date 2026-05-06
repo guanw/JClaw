@@ -30,6 +30,9 @@ from jclaw.core.defaults import (
     KNOWLEDGE_TEXT_PREVIEW_CHARS,
     MEMORY_MAX_CONTEXT_MESSAGES,
     MEMORY_MAX_MEMORY_ITEMS,
+    NOTION_API_BASE_URL,
+    NOTION_API_VERSION,
+    NOTION_ENABLED,
     PROVIDER_MAX_TOKENS,
     PROVIDER_SYSTEM_PROMPT_FILES,
     PROVIDER_TEMPERATURE,
@@ -209,6 +212,16 @@ class KnowledgeConfig:
 
 
 @dataclass(slots=True)
+class NotionConfig:
+    enabled: bool = NOTION_ENABLED
+    api_token: str = ""
+    default_parent_id: str = ""
+    writable_parent_ids: tuple[str, ...] = ()
+    base_url: str = NOTION_API_BASE_URL
+    notion_version: str = NOTION_API_VERSION
+
+
+@dataclass(slots=True)
 class Config:
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
@@ -219,6 +232,7 @@ class Config:
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
+    notion: NotionConfig = field(default_factory=NotionConfig)
     config_path: Path = field(default_factory=default_config_path)
     repo_root: Path = field(default_factory=repo_root)
 
@@ -300,6 +314,12 @@ max_chunks_per_file = {KNOWLEDGE_MAX_CHUNKS_PER_FILE}
 max_total_chunks = {KNOWLEDGE_MAX_TOTAL_CHUNKS}
 text_preview_chars = {KNOWLEDGE_TEXT_PREVIEW_CHARS}
 max_answer_citations = {KNOWLEDGE_MAX_ANSWER_CITATIONS}
+
+[notion]
+enabled = {str(NOTION_ENABLED).lower()}
+api_token = ""
+default_parent_id = ""
+writable_parent_ids = []
 """
 
 
@@ -316,6 +336,7 @@ def load_config(path: str | Path | None = None) -> Config:
     browser_data = data.get("browser", {})
     workspace_data = data.get("workspace", {})
     knowledge_data = data.get("knowledge", {})
+    notion_data = data.get("notion", {})
 
     provider = ProviderConfig(
         api_key=str(os.environ.get("JCLAW_API_KEY", provider_data.get("api_key", ""))),
@@ -410,6 +431,15 @@ def load_config(path: str | Path | None = None) -> Config:
             knowledge_data.get("max_answer_citations", KNOWLEDGE_MAX_ANSWER_CITATIONS)
         ),
     )
+    notion = NotionConfig(
+        enabled=bool(notion_data.get("enabled", NOTION_ENABLED)),
+        api_token=str(os.environ.get("JCLAW_NOTION_API_TOKEN", notion_data.get("api_token", ""))),
+        default_parent_id=str(notion_data.get("default_parent_id", "")),
+        writable_parent_ids=_env_list("JCLAW_NOTION_WRITABLE_PARENT_IDS")
+        or tuple(str(value) for value in notion_data.get("writable_parent_ids", [])),
+        base_url=str(notion_data.get("base_url", NOTION_API_BASE_URL)),
+        notion_version=str(notion_data.get("notion_version", NOTION_API_VERSION)),
+    )
 
     config = Config(
         provider=provider,
@@ -421,6 +451,7 @@ def load_config(path: str | Path | None = None) -> Config:
         browser=browser,
         workspace=workspace,
         knowledge=knowledge,
+        notion=notion,
         config_path=config_path,
         repo_root=repo_root(),
     )
