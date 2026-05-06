@@ -135,7 +135,7 @@ class WorkspaceTool(
             if isinstance(data.get("entries"), list):
                 payload["entries"] = data["entries"][:10]
             return payload
-        if action in {"find_files", "search_contents"}:
+        if action in {"find_files", "search_contents", "grep"}:
             payload = self._pick_controller_fields(
                 data,
                 "root_path",
@@ -316,6 +316,7 @@ class WorkspaceTool(
             "path_metadata": self._path_metadata,
             "find_files": self._find_files,
             "search_contents": self._search_contents,
+            "grep": self._search_contents,
             "read_file": self._read_file,
             "read_snippet": self._read_snippet,
             "list_file_symbols": self._list_file_symbols,
@@ -581,6 +582,19 @@ class WorkspaceTool(
             "search_contents": self._read_action(
                 action="search_contents",
                 description="Search literal text inside readable local files under an approved path.",
+                properties={
+                    **self._root_search_properties(),
+                    "query": {"type": "string"},
+                    "text": {"type": "string"},
+                    "regex": {"type": "boolean"},
+                    "case_sensitive": {"type": "boolean"},
+                    "file_pattern": {"type": "string"},
+                },
+                produces_artifacts=("workspace_search_results",),
+            ),
+            "grep": self._read_action(
+                action="grep",
+                description="Search literal text inside readable local files under an approved path. Alias of search_contents for controller/tooling compatibility.",
                 properties={
                     **self._root_search_properties(),
                     "query": {"type": "string"},

@@ -117,6 +117,15 @@ def test_path_metadata_find_files_and_search_contents(tmp_path) -> None:
     assert searched.data["allow_tool_followup"] is True
     assert searched.data["artifacts"]["workspace_search_results:latest"]["query"] == "keyword"
 
+    grepped = tool.invoke(
+        "grep",
+        {"path": str(root), "query": "keyword"},
+        ToolContext(chat_id="chat-1"),
+    )
+    assert grepped.ok is True
+    assert grepped.data["match_count"] == 2
+    assert {item["path"] for item in grepped.data["matches"]} == {"docs/notes.txt", "docs/todo.md"}
+
     db.close()
 
 
@@ -803,6 +812,7 @@ def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> No
 
     assert description["actions"]["inspect_root"]["produces_artifacts"] == ["workspace_path"]
     assert description["actions"]["search_contents"]["produces_artifacts"] == ["workspace_search_results"]
+    assert description["actions"]["grep"]["produces_artifacts"] == ["workspace_search_results"]
     assert description["actions"]["git_status"]["produces_artifacts"] == ["workspace_git_status"]
     assert description["actions"]["git_log"]["produces_artifacts"] == ["workspace_git_log"]
     assert description["actions"]["read_file"]["produces_artifacts"] == ["workspace_file"]

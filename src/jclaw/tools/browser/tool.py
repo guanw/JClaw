@@ -129,10 +129,6 @@ class BrowserTool(
 
     def controller_output(self, action: str, result: ToolResult) -> dict[str, Any]:
         data = result.data
-        # Browser steps can produce bulky page dumps and multi-step traces. The controller
-        # payload keeps only the page identity, short evidence, and compact progress state
-        # needed to decide the next browser action. Full page data remains in artifacts and
-        # raw tool result data for follow-up and debugging.
         payload: dict[str, Any] = {}
         for field in ("session_id", "tab_id", "url", "title", "page_kind", "mode", "query"):
             value = data.get(field)
