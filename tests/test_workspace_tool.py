@@ -116,6 +116,7 @@ def test_path_metadata_find_files_and_search_contents(tmp_path) -> None:
     assert {item["path"] for item in searched.data["matches"]} == {"docs/notes.txt", "docs/todo.md"}
     assert searched.data["allow_tool_followup"] is True
     assert searched.data["artifacts"]["workspace_search_results:latest"]["query"] == "keyword"
+
     db.close()
 
 
@@ -1059,6 +1060,32 @@ def test_run_command_returns_structured_success_and_failure_results(tmp_path) ->
     assert failure.data["exit_code"] == 7
     assert "boom" in failure.data["stderr"]
     assert failure.data["artifacts"]["workspace_command_result:latest"]["ok"] is False
+    db.close()
+
+
+def test_run_command_uses_repo_local_venv_bin_when_present(tmp_path) -> None:
+    root = tmp_path / "repo"
+    nested = root / "nested"
+    venv_bin = root / ".venv" / "bin"
+    nested.mkdir(parents=True)
+    venv_bin.mkdir(parents=True)
+    fake_python = venv_bin / "python"
+    fake_python.write_text("#!/bin/sh\necho repo-local-python\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    success = tool.invoke(
+        "run_command",
+        {"command": "python -c \"print('ignored')\"", "cwd": str(nested)},
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert success.ok is True
+    assert success.data["exit_code"] == 0
+    assert success.data["stdout"].strip() == "repo-local-python"
     db.close()
 
 

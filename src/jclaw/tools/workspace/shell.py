@@ -13,6 +13,35 @@ from jclaw.tools.base import ToolContext, ToolResult
 
 
 class WorkspaceShellMixin:
+    def _command_env(self, *, cwd: Path | None = None) -> dict[str, str]:
+        path_entries = [
+            Path("/usr/bin"),
+            Path("/bin"),
+            Path("/usr/sbin"),
+            Path("/sbin"),
+            Path("/opt/homebrew/bin"),
+        ]
+        if cwd is not None:
+            try:
+                cwd.resolve().relative_to(self.repo_root.resolve())
+            except ValueError:
+                pass
+            else:
+                venv_bin = self.repo_root / ".venv" / "bin"
+                if venv_bin.exists():
+                    path_entries.insert(0, venv_bin)
+        return {
+            "HOME": str(Path.home()),
+            "LANG": "en_US.UTF-8",
+            "LC_ALL": "en_US.UTF-8",
+            "PATH": ":".join(str(entry) for entry in path_entries),
+            "NO_PROXY": "*",
+            "http_proxy": "",
+            "https_proxy": "",
+            "HTTP_PROXY": "",
+            "HTTPS_PROXY": "",
+        }
+
     def _prepare_shell_action(self, params: dict[str, object], ctx: ToolContext) -> ToolResult:
         command = str(params.get("command") or params.get("objective") or "").strip()
         if not command:
@@ -188,17 +217,7 @@ class WorkspaceShellMixin:
             check=check,
             text=True,
             timeout=timeout,
-            env={
-                "HOME": str(Path.home()),
-                "LANG": "en_US.UTF-8",
-                "LC_ALL": "en_US.UTF-8",
-                "PATH": str(Path("/usr/bin")) + ":" + str(Path("/bin")) + ":" + str(Path("/usr/sbin")) + ":" + str(Path("/sbin")) + ":" + str(Path("/opt/homebrew/bin")),
-                "NO_PROXY": "*",
-                "http_proxy": "",
-                "https_proxy": "",
-                "HTTP_PROXY": "",
-                "HTTPS_PROXY": "",
-            },
+            env=self._command_env(cwd=cwd),
         )
         return {
             "exit_code": result.returncode,

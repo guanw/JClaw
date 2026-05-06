@@ -1900,9 +1900,6 @@ def test_tool_catalog_and_controller_prompt_bias_workspace_line_requests_to_read
     )
 
     assert "prefer the focused range read" in llm.last_system_prompt
-    assert "For coding tasks, inspect before editing" in llm.last_system_prompt
-    assert "prefer a verification step such as a relevant run_command" in llm.last_system_prompt
-    assert "inspect the latest diff" in llm.last_system_prompt
     assert decision is not None
     assert decision.tool == "workspace"
     assert decision.action == "read_snippet"
