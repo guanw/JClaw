@@ -70,6 +70,40 @@ class FreshToolReplyLLM:
         return "unexpected"
 
 
+class StrictGroundingToolReplyLLM:
+    def __init__(self) -> None:
+        self.calls: list[list[dict[str, str]]] = []
+
+    def chat(self, messages):  # noqa: ANN001
+        self.calls.append(messages)
+        flattened = "\n".join(message["content"] for message in messages)
+        if "tests/tools/browser/test_browser_tool.py" in flattened:
+            return "stale-test-output-leaked"
+        if "Do not mention tests, commands, diffs, edits, or verification unless the latest tool result explicitly contains them." not in flattened:
+            return "missing-strict-grounding"
+        if "Read lines 128-138 from /repo/browser/tool.py." in flattened and "def controller_output(...)" in flattened:
+            return "grounded-snippet-reply"
+        return "unexpected"
+
+
+class CompletionGroundingToolReplyLLM:
+    def __init__(self) -> None:
+        self.calls: list[list[dict[str, str]]] = []
+
+    def chat(self, messages):  # noqa: ANN001
+        self.calls.append(messages)
+        flattened = "\n".join(message["content"] for message in messages)
+        if "Recent relevant observations:" not in flattened:
+            return "missing-recent-observations"
+        if "Read lines 128-138 from /repo/browser/tool.py." not in flattened:
+            return "missing-snippet-evidence"
+        if "Browser steps can produce bulky page dumps" not in flattened:
+            return "missing-code-context"
+        if "22 passed" not in flattened:
+            return "missing-verification-result"
+        return "grounded-completion-reply"
+
+
 def _build_agent_for_test(tmp_path, llm) -> tuple[AssistantAgent, Database]:  # noqa: ANN001
     config = Config(
         provider=ProviderConfig(),
@@ -2133,6 +2167,97 @@ def test_compose_tool_reply_uses_latest_tool_result_not_stale_history(tmp_path) 
     )
 
     assert reply == "fresh-tool-result-used"
+    db.close()
+
+
+def test_compose_tool_reply_uses_strict_grounding_for_workspace_code_reads(tmp_path) -> None:
+    agent, db = _build_agent_for_test(tmp_path, StrictGroundingToolReplyLLM())
+    db.store_message(
+        "chat-1",
+        "assistant",
+        "============================================================ test session starts ============================================================\n"
+        "tests/tools/browser/test_browser_tool.py ....\n"
+        "============================================================ 4 passed in 0.64s ============================================================",
+    )
+
+    reply = agent._compose_tool_reply(  # noqa: SLF001
+        "chat-1",
+        "Add a short comment above controller_output in src/jclaw/tools/browser/tool.py explaining why the payload is selective.",
+        user_name="tester",
+        decision={"tool": "workspace", "action": "read_snippet", "reason": "Inspect code", "params": {}},
+        result=ToolResult(
+            ok=True,
+            summary="Read lines 128-138 from /repo/browser/tool.py.",
+            data={"content": "def controller_output(...)", "start_line": 128, "end_line": 138},
+        ),
+    )
+
+    assert reply == "grounded-snippet-reply"
+    db.close()
+
+
+def test_compose_tool_reply_includes_recent_workspace_evidence_for_verification_results(tmp_path) -> None:
+    agent, db = _build_agent_for_test(tmp_path, CompletionGroundingToolReplyLLM())
+    runtime = RuntimeState(request="Add a short comment above controller_output and verify browser tests.")
+    snippet_result = ToolResult(
+        ok=True,
+        summary="Read lines 128-138 from /repo/browser/tool.py.",
+        data={
+            "content": (
+                "# Browser steps can produce bulky page dumps and multi-step traces.\n"
+                "def controller_output(...):"
+            ),
+            "start_line": 128,
+            "end_line": 138,
+        },
+    )
+    command_result = ToolResult(
+        ok=True,
+        summary="Command succeeded: pytest tests/test_browser_tool.py -v",
+        data={
+            "command": "pytest tests/test_browser_tool.py -v",
+            "exit_code": 0,
+            "stdout": "============================= 22 passed in 0.64s =============================",
+            "stderr": "",
+        },
+    )
+    runtime.append(Observation.from_tool_result(snippet_result, controller_output={"content": snippet_result.data["content"]}))
+    runtime.append(
+        Observation.from_tool_result(
+            command_result,
+            controller_output={
+                "command": command_result.data["command"],
+                "exit_code": command_result.data["exit_code"],
+                "stdout": command_result.data["stdout"],
+            },
+        )
+    )
+    steps = [
+        {
+            "tool": "workspace",
+            "action": "read_snippet",
+            "reason": "Inspect code",
+            "result": snippet_result,
+        },
+        {
+            "tool": "workspace",
+            "action": "run_command",
+            "reason": "Verify tests",
+            "result": command_result,
+        },
+    ]
+
+    reply = agent._compose_tool_reply(  # noqa: SLF001
+        "chat-1",
+        "Add a short comment above controller_output in src/jclaw/tools/browser/tool.py explaining why the payload is selective, and verify browser-related tests still pass.",
+        user_name="tester",
+        decision={"tool": "workspace", "action": "run_command", "reason": "Verify tests", "params": {}},
+        result=command_result,
+        runtime=runtime,
+        steps=steps,
+    )
+
+    assert reply == "grounded-completion-reply"
     db.close()
 
 

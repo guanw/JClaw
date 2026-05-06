@@ -353,6 +353,14 @@ class Tool(Protocol):
     def artifact_preview_limits(self) -> dict[str, dict[str, int]]:
         ...
 
+    def reply_evidence(
+        self,
+        action: str,
+        runtime: RuntimeState,
+        steps: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        ...
+
     def materialize_params(
         self,
         action: str,

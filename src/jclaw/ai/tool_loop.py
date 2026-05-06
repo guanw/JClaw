@@ -241,6 +241,8 @@ class AgentToolLoopMixin:
                         user_name=user_name,
                         decision=decision.to_dict(),
                         result=result,
+                        runtime=runtime,
+                        steps=steps,
                     )
                 if result.data.get("allow_tool_followup") is False:
                     self._set_execution_trace_status(chat_id, "completed")
@@ -250,6 +252,8 @@ class AgentToolLoopMixin:
                         user_name=user_name,
                         decision=decision.to_dict(),
                         result=result,
+                        runtime=runtime,
+                        steps=steps,
                     )
 
                 next_decision = self._decide_next_tool_step(
@@ -274,6 +278,8 @@ class AgentToolLoopMixin:
                         user_name=user_name,
                         decision=decision.to_dict(),
                         result=result,
+                        runtime=runtime,
+                        steps=steps,
                     )
                 if next_decision.type is DecisionType.ANSWER:
                     self._pending_tool_loop_continuations.pop(chat_id, None)
@@ -300,6 +306,8 @@ class AgentToolLoopMixin:
                         user_name=user_name,
                         decision=decision.to_dict(),
                         result=result,
+                        runtime=runtime,
+                        steps=steps,
                     )
                 if next_decision.type is DecisionType.COMPLETE:
                     self._pending_tool_loop_continuations.pop(chat_id, None)
@@ -316,6 +324,8 @@ class AgentToolLoopMixin:
                         user_name=user_name,
                         decision=decision.to_dict(),
                         result=result,
+                        runtime=runtime,
+                        steps=steps,
                     )
                 decision = next_decision
             paused = True

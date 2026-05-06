@@ -17,7 +17,7 @@ from jclaw.core.defaults import (
     WORKSPACE_SHELL_OUTPUT_CHARS,
     WORKSPACE_SHELL_TIMEOUT_SECONDS,
 )
-from jclaw.tools.base import ActionSpec, ToolContext, ToolResult, build_tool_description
+from jclaw.tools.base import ActionSpec, RuntimeState, ToolContext, ToolResult, build_tool_description
 from jclaw.tools.workspace.formatting import WorkspaceFormattingMixin
 from jclaw.tools.workspace.git_ops import WorkspaceGitOpsMixin
 from jclaw.tools.workspace.mutations import WorkspaceMutationsMixin
@@ -269,6 +269,46 @@ class WorkspaceTool(
                 payload["touched_files"] = data["touched_files"][:10]
             return payload
         return {}
+
+    def reply_evidence(
+        self,
+        action: str,
+        runtime: RuntimeState,
+        steps: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if action not in {"run_command", "apply_shell_request"}:
+            return []
+        # Verification replies need recent code/diff evidence so the agent can
+        # describe what changed without inventing edit details from the test result alone.
+        evidence_actions = {
+            "read_file",
+            "read_snippet",
+            "find_symbol",
+            "find_references",
+            "list_file_symbols",
+            "apply_patch",
+            "write_file",
+            "create_file",
+            "git_diff",
+        }
+        evidence: list[dict[str, Any]] = []
+        paired = list(zip(steps, runtime.observations, strict=False))
+        for step, observation in reversed(paired[:-1]):
+            if step.get("tool") != self.name:
+                continue
+            if step.get("action") not in evidence_actions:
+                continue
+            payload: dict[str, Any] = {
+                "action": step.get("action"),
+                "summary": observation.summary,
+            }
+            if observation.data_preview:
+                payload["data_preview"] = observation.data_preview
+            evidence.append(payload)
+            if len(evidence) >= 3:
+                break
+        evidence.reverse()
+        return evidence
 
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handlers = {
