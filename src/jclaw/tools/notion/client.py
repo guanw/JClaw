@@ -94,6 +94,54 @@ class NotionClient:
         }
         return self.post("/search", payload=payload)
 
+    def get_page(self, page_id: str) -> dict[str, Any]:
+        return self.get(f"/pages/{str(page_id).strip()}")
+
+    def get_block_children(
+        self,
+        block_id: str,
+        *,
+        page_size: int = 100,
+        start_cursor: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "page_size": max(1, min(int(page_size), 100)),
+        }
+        cursor = str(start_cursor or "").strip()
+        if cursor:
+            params["start_cursor"] = cursor
+        return self.get(f"/blocks/{str(block_id).strip()}/children", params=params)
+
+    def get_page_content(
+        self,
+        page_id: str,
+        *,
+        max_blocks: int = 50,
+    ) -> dict[str, Any]:
+        remaining = max(1, int(max_blocks))
+        all_results: list[dict[str, Any]] = []
+        next_cursor = ""
+        has_more = False
+        while remaining > 0:
+            payload = self.get_block_children(
+                page_id,
+                page_size=min(remaining, 100),
+                start_cursor=next_cursor or None,
+            )
+            raw_results = payload.get("results", [])
+            page_results = [item for item in raw_results if isinstance(item, dict)]
+            all_results.extend(page_results)
+            has_more = bool(payload.get("has_more"))
+            next_cursor = str(payload.get("next_cursor", "") or "")
+            remaining = max_blocks - len(all_results)
+            if remaining <= 0 or not has_more or not next_cursor:
+                break
+        return {
+            "results": all_results[:max_blocks],
+            "has_more": has_more and len(all_results) >= max_blocks,
+            "next_cursor": next_cursor,
+        }
+
     def request(
         self,
         method: str,

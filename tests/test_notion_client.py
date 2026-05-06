@@ -94,3 +94,41 @@ def test_notion_client_search_pages_posts_expected_payload() -> None:
     assert seen["path"] == "/v1/search"
     assert '"query":"roadmap"' in str(seen["body"]).replace(" ", "")
     assert '"page_size":7' in str(seen["body"]).replace(" ", "")
+
+
+def test_notion_client_get_page_uses_expected_endpoint() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"id": "page-1"})
+
+    transport = httpx.MockTransport(handler)
+    client = NotionClient("secret-token", http_client=httpx.Client(transport=transport))
+
+    payload = client.get_page("page-1")
+
+    assert payload["id"] == "page-1"
+    assert seen["method"] == "GET"
+    assert seen["path"] == "/v1/pages/page-1"
+
+
+def test_notion_client_get_page_content_uses_block_children_endpoint() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["query"] = str(request.url.query)
+        return httpx.Response(200, json={"results": [], "has_more": False, "next_cursor": None})
+
+    transport = httpx.MockTransport(handler)
+    client = NotionClient("secret-token", http_client=httpx.Client(transport=transport))
+
+    payload = client.get_page_content("page-1", max_blocks=12)
+
+    assert payload["results"] == []
+    assert seen["method"] == "GET"
+    assert seen["path"] == "/v1/blocks/page-1/children"
+    assert "page_size=12" in str(seen["query"])
