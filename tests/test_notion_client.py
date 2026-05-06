@@ -132,3 +132,30 @@ def test_notion_client_get_page_content_uses_block_children_endpoint() -> None:
     assert seen["method"] == "GET"
     assert seen["path"] == "/v1/blocks/page-1/children"
     assert "page_size=12" in str(seen["query"])
+
+
+def test_notion_client_create_page_posts_expected_payload() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["body"] = request.content.decode("utf-8")
+        return httpx.Response(200, json={"id": "page-created"})
+
+    transport = httpx.MockTransport(handler)
+    client = NotionClient("secret-token", http_client=httpx.Client(transport=transport))
+
+    payload = client.create_page(
+        parent={"page_id": "parent-1"},
+        properties={"title": {"title": [{"type": "text", "text": {"content": "Sprint notes"}}]}},
+        children=[{"object": "block", "type": "paragraph", "paragraph": {"rich_text": []}}],
+    )
+
+    assert payload["id"] == "page-created"
+    assert seen["method"] == "POST"
+    assert seen["path"] == "/v1/pages"
+    body = str(seen["body"]).replace(" ", "")
+    assert '"page_id":"parent-1"' in body
+    assert '"content":"Sprintnotes"' in body
+    assert '"children":' in body

@@ -94,6 +94,21 @@ class NotionClient:
         }
         return self.post("/search", payload=payload)
 
+    def create_page(
+        self,
+        *,
+        parent: dict[str, Any],
+        properties: dict[str, Any],
+        children: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "parent": dict(parent),
+            "properties": dict(properties),
+        }
+        if isinstance(children, list) and children:
+            payload["children"] = list(children)
+        return self.post("/pages", payload=payload)
+
     def get_page(self, page_id: str) -> dict[str, Any]:
         return self.get(f"/pages/{str(page_id).strip()}")
 

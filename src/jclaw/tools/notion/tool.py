@@ -172,6 +172,162 @@ def _content_preview(blocks: list[dict[str, Any]], *, limit: int = 6) -> str:
     return "\n".join(parts)
 
 
+def _rich_text(text: Any) -> list[dict[str, Any]]:
+    value = str(text or "").strip()
+    if not value:
+        return []
+    return [{"type": "text", "text": {"content": value}}]
+
+
+def _normalize_create_property_value(name: str, value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"Property '{name}' must use an explicit Notion property payload shape, for example "
+            "{'number': 3} or {'select': {'name': 'Draft'}}."
+        )
+    allowed_keys = {
+        "rich_text",
+        "number",
+        "checkbox",
+        "select",
+        "status",
+        "multi_select",
+        "date",
+        "url",
+        "email",
+        "phone_number",
+    }
+    present = [key for key in allowed_keys if key in value]
+    if len(present) != 1:
+        raise ValueError(
+            f"Property '{name}' must contain exactly one supported Notion property type: "
+            + ", ".join(sorted(allowed_keys))
+        )
+    kind = present[0]
+    raw = value.get(kind)
+    if kind == "rich_text":
+        if isinstance(raw, list):
+            return {"rich_text": raw}
+        return {"rich_text": _rich_text(raw)}
+    if kind == "number":
+        if not isinstance(raw, int | float) or isinstance(raw, bool):
+            raise ValueError(f"Property '{name}' number value must be numeric.")
+        return {"number": raw}
+    if kind == "checkbox":
+        return {"checkbox": bool(raw)}
+    if kind in {"url", "email", "phone_number"}:
+        return {kind: str(raw or "").strip()}
+    if kind in {"select", "status"}:
+        if isinstance(raw, str):
+            return {kind: {"name": raw.strip()}}
+        if isinstance(raw, dict):
+            option_name = str(raw.get("name", "")).strip()
+            if not option_name:
+                raise ValueError(f"Property '{name}' {kind} value must include a non-empty name.")
+            return {kind: {"name": option_name}}
+        raise ValueError(f"Property '{name}' {kind} value must be a string or {{'name': ...}}.")
+    if kind == "multi_select":
+        if not isinstance(raw, list):
+            raise ValueError(f"Property '{name}' multi_select value must be a list.")
+        items: list[dict[str, str]] = []
+        for item in raw:
+            if isinstance(item, str):
+                option_name = item.strip()
+            elif isinstance(item, dict):
+                option_name = str(item.get("name", "")).strip()
+            else:
+                option_name = ""
+            if option_name:
+                items.append({"name": option_name})
+        return {"multi_select": items}
+    if kind == "date":
+        if not isinstance(raw, dict):
+            raise ValueError(f"Property '{name}' date value must be an object with start/end.")
+        start = str(raw.get("start", "")).strip()
+        end = str(raw.get("end", "")).strip() or None
+        if not start:
+            raise ValueError(f"Property '{name}' date value must include a non-empty start.")
+        return {"date": {"start": start, "end": end}}
+    raise ValueError(f"Property '{name}' uses an unsupported Notion property type.")
+
+
+def _build_create_properties(
+    title: str,
+    extra_properties: Any,
+    *,
+    parent_type: str,
+    title_property: str,
+) -> dict[str, Any]:
+    title_key = "title" if parent_type == "page_id" else title_property
+    properties: dict[str, Any] = {
+        title_key: {
+            "title": _rich_text(title),
+        }
+    }
+    if not isinstance(extra_properties, dict):
+        return properties
+    for key, value in extra_properties.items():
+        clean_key = str(key).strip()
+        if not clean_key or clean_key == title_key:
+            continue
+        properties[clean_key] = _normalize_create_property_value(clean_key, value)
+    return properties
+
+
+def _build_content_blocks(content: Any) -> list[dict[str, Any]]:
+    if content in (None, ""):
+        return []
+    lines: list[str]
+    if isinstance(content, str):
+        lines = content.splitlines()
+    elif isinstance(content, list):
+        lines = [str(item) for item in content]
+    else:
+        lines = [str(content)]
+
+    blocks: list[dict[str, Any]] = []
+    for raw_line in lines:
+        line = str(raw_line).rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            blocks.append(
+                {
+                    "object": "block",
+                    "type": "bulleted_list_item",
+                    "bulleted_list_item": {"rich_text": _rich_text(stripped[2:])},
+                }
+            )
+            continue
+        if stripped.startswith("[ ] "):
+            blocks.append(
+                {
+                    "object": "block",
+                    "type": "to_do",
+                    "to_do": {"rich_text": _rich_text(stripped[4:]), "checked": False},
+                }
+            )
+            continue
+        if stripped.startswith("[x] ") or stripped.startswith("[X] "):
+            blocks.append(
+                {
+                    "object": "block",
+                    "type": "to_do",
+                    "to_do": {"rich_text": _rich_text(stripped[4:]), "checked": True},
+                }
+            )
+            continue
+        blocks.append(
+            {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": _rich_text(stripped)},
+            }
+        )
+    return blocks
+
+
 class NotionTool:
     name = "notion"
 
@@ -187,7 +343,7 @@ class NotionTool:
     def describe(self) -> dict[str, Any]:
         return build_tool_description(
             name=self.name,
-            description="Search and read Notion pages through the Notion API.",
+            description="Search, read, and create simple Notion pages through the Notion API.",
             actions=self._action_specs(),
         )
 
@@ -196,6 +352,7 @@ class NotionTool:
             "search_pages": self._search_pages,
             "get_page": self._get_page,
             "get_page_content": self._get_page_content,
+            "create_page": self._create_page,
         }
         handler = handlers.get(action)
         if handler is None:
@@ -232,6 +389,15 @@ class NotionTool:
             if isinstance(blocks, list):
                 payload["blocks"] = blocks[:12]
             return payload
+        if action == "create_page":
+            payload = {}
+            for field in ("page_id", "title", "url", "last_edited_time", "parent", "block_count"):
+                if field in data:
+                    payload[field] = data.get(field)
+            properties = data.get("properties")
+            if isinstance(properties, dict):
+                payload["properties"] = dict(list(properties.items())[:12])
+            return payload
         return {}
 
     def format_result(self, action: str, result: ToolResult) -> str:
@@ -258,6 +424,12 @@ class NotionTool:
             if preview:
                 lines.append("Content preview:")
                 lines.append(preview)
+        elif action == "create_page":
+            properties = result.data.get("properties")
+            if isinstance(properties, dict) and properties:
+                lines.append("Properties:")
+                for key, value in list(properties.items())[:12]:
+                    lines.append(f"- {key}: {value}")
         return "\n".join(lines)
 
     def _search_pages(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -368,6 +540,75 @@ class NotionTool:
             },
         )
 
+    def _create_page(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        parent_id = str(params.get("parent_id") or self.config.default_parent_id).strip()
+        if not parent_id:
+            return ToolResult(ok=False, summary="create_page requires a parent_id or configured default_parent_id.", data={})
+        title = str(params.get("title", "")).strip()
+        if not title:
+            return ToolResult(ok=False, summary="create_page requires a title.", data={"parent_id": parent_id})
+
+        writable = tuple(str(item).strip() for item in self.config.writable_parent_ids if str(item).strip())
+        if writable and parent_id not in writable:
+            return ToolResult(
+                ok=False,
+                summary=f"Notion writes are not allowed under parent '{parent_id}'.",
+                data={"parent_id": parent_id, "title": title},
+            )
+
+        parent_type = str(params.get("parent_type", "page_id")).strip() or "page_id"
+        if parent_type not in {"page_id", "database_id"}:
+            return ToolResult(
+                ok=False,
+                summary="create_page parent_type must be 'page_id' or 'database_id'.",
+                data={"parent_id": parent_id, "title": title, "parent_type": parent_type},
+            )
+        title_property = str(params.get("title_property", "Name")).strip() or "Name"
+        try:
+            properties = _build_create_properties(
+                title,
+                params.get("properties"),
+                parent_type=parent_type,
+                title_property=title_property,
+            )
+        except ValueError as exc:
+            return ToolResult(
+                ok=False,
+                summary=str(exc),
+                data={"parent_id": parent_id, "title": title, "parent_type": parent_type},
+            )
+        children = _build_content_blocks(params.get("content"))
+        try:
+            client = self._build_client(self.config)
+            payload = client.create_page(
+                parent={parent_type: parent_id},
+                properties=properties,
+                children=children,
+            )
+        except (NotionDisabledError, NotionConfigError, NotionUnauthorizedError, NotionNotFoundError, NotionRateLimitedError, NotionError) as exc:
+            return ToolResult(ok=False, summary=str(exc), data={"parent_id": parent_id, "title": title})
+
+        normalized = normalize_notion_page(payload)
+        normalized_properties = _normalize_page_properties(payload)
+        artifact = {
+            **normalized,
+            "properties": normalized_properties,
+            "block_count": len(children),
+        }
+        return ToolResult(
+            ok=True,
+            summary=f"Created Notion page '{normalized['title']}' ({normalized['page_id']}).",
+            data={
+                **normalized,
+                "properties": normalized_properties,
+                "block_count": len(children),
+                "allow_tool_followup": False,
+                "artifacts": {
+                    "notion_page:latest": artifact,
+                },
+            },
+        )
+
     def _action_specs(self) -> dict[str, ActionSpec]:
         return {
             "search_pages": ActionSpec(
@@ -413,6 +654,25 @@ class NotionTool:
                     "required": ["page_id"],
                 },
                 reads=True,
+                produces_artifacts=("notion_page",),
+            ),
+            "create_page": ActionSpec(
+                tool=self.name,
+                action="create_page",
+                description="Create a simple Notion page under a parent page or database with constrained content and properties.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "parent_id": {"type": "string"},
+                        "parent_type": {"type": "string"},
+                        "title": {"type": "string"},
+                        "title_property": {"type": "string"},
+                        "content": {},
+                        "properties": {"type": "object"},
+                    },
+                    "required": ["title"],
+                },
+                writes=True,
                 produces_artifacts=("notion_page",),
             ),
         }

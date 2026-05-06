@@ -5,13 +5,15 @@ from jclaw.tools.notion.tool import NotionTool
 
 
 class FakeNotionClient:
-    def __init__(self, results=None, page=None, content=None) -> None:  # noqa: ANN001
+    def __init__(self, results=None, page=None, content=None, created_page=None) -> None:  # noqa: ANN001
         self.results = results or []
         self.page = page or {}
         self.content = content or {"results": [], "has_more": False}
+        self.created_page = created_page or {}
         self.calls: list[tuple[str, int]] = []
         self.page_calls: list[str] = []
         self.content_calls: list[tuple[str, int]] = []
+        self.create_calls: list[dict] = []
 
     def search_pages(self, query: str, *, limit: int = 10) -> dict:
         self.calls.append((query, limit))
@@ -24,6 +26,16 @@ class FakeNotionClient:
     def get_page_content(self, page_id: str, *, max_blocks: int = 50) -> dict:
         self.content_calls.append((page_id, max_blocks))
         return dict(self.content)
+
+    def create_page(self, *, parent: dict, properties: dict, children: list[dict] | None = None) -> dict:
+        self.create_calls.append(
+            {
+                "parent": dict(parent),
+                "properties": dict(properties),
+                "children": list(children or []),
+            }
+        )
+        return dict(self.created_page)
 
 
 def test_notion_search_pages_returns_compact_results() -> None:
@@ -201,7 +213,90 @@ def test_notion_get_page_content_returns_normalized_blocks() -> None:
     assert controller_output["blocks"][0]["type"] == "heading_2"
 
 
-def test_notion_tool_describe_exposes_read_actions() -> None:
+def test_notion_create_page_shapes_parent_properties_and_children() -> None:
+    created_page = {
+        "id": "page-created",
+        "url": "https://notion.so/page-created",
+        "last_edited_time": "2026-05-06T00:00:00.000Z",
+        "parent": {"type": "page_id", "page_id": "parent-1"},
+        "properties": {
+            "title": {"type": "title", "title": [{"plain_text": "Sprint notes"}]},
+            "Status": {"type": "select", "select": {"name": "Draft"}},
+            "Points": {"type": "number", "number": 2},
+        },
+    }
+    fake = FakeNotionClient(created_page=created_page)
+    tool = NotionTool(
+        NotionConfig(enabled=True, api_token="secret-token"),
+        build_client=lambda config: fake,
+    )
+
+    result = tool.invoke(
+        "create_page",
+        {
+            "parent_id": "parent-1",
+            "title": "Sprint notes",
+            "content": ["Intro line", "- Ship search", "[x] Add tests"],
+            "properties": {"Status": {"select": {"name": "Draft"}}, "Points": {"number": 2}},
+        },
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert result.ok is True
+    assert result.data["page_id"] == "page-created"
+    assert result.data["properties"]["Status"] == "Draft"
+    assert result.data["block_count"] == 3
+    assert fake.create_calls[0]["parent"] == {"page_id": "parent-1"}
+    assert fake.create_calls[0]["properties"]["title"]["title"][0]["text"]["content"] == "Sprint notes"
+    assert fake.create_calls[0]["properties"]["Status"]["select"]["name"] == "Draft"
+    assert fake.create_calls[0]["children"][1]["type"] == "bulleted_list_item"
+    assert fake.create_calls[0]["children"][2]["type"] == "to_do"
+    controller_output = tool.controller_output("create_page", result)
+    assert controller_output["page_id"] == "page-created"
+    assert controller_output["block_count"] == 3
+
+
+def test_notion_create_page_rejects_implicit_property_shapes() -> None:
+    fake = FakeNotionClient(created_page={})
+    tool = NotionTool(
+        NotionConfig(enabled=True, api_token="secret-token"),
+        build_client=lambda config: fake,
+    )
+
+    result = tool.invoke(
+        "create_page",
+        {
+            "parent_id": "parent-1",
+            "title": "Sprint notes",
+            "properties": {"Points": 2},
+        },
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert result.ok is False
+    assert "explicit notion property payload shape" in result.summary.lower()
+    assert fake.create_calls == []
+
+
+def test_notion_create_page_enforces_writable_parent_ids() -> None:
+    fake = FakeNotionClient(created_page={})
+    tool = NotionTool(
+        NotionConfig(enabled=True, api_token="secret-token", writable_parent_ids=("allowed-parent",)),
+        build_client=lambda config: fake,
+    )
+
+    result = tool.invoke(
+        "create_page",
+        {"parent_id": "blocked-parent", "title": "Sprint notes"},
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert result.ok is False
+    assert "not allowed" in result.summary.lower()
+    assert fake.create_calls == []
+
+
+def test_notion_tool_describe_exposes_read_and_write_actions() -> None:
     tool = NotionTool(NotionConfig(enabled=True, api_token="secret-token"))
 
     description = tool.describe()
@@ -210,3 +305,4 @@ def test_notion_tool_describe_exposes_read_actions() -> None:
     assert description["actions"]["search_pages"]["produces_artifacts"] == ["notion_search_results"]
     assert description["actions"]["get_page"]["produces_artifacts"] == ["notion_page"]
     assert description["actions"]["get_page_content"]["produces_artifacts"] == ["notion_page"]
+    assert description["actions"]["create_page"]["produces_artifacts"] == ["notion_page"]
