@@ -244,17 +244,6 @@ class AgentToolLoopMixin:
                         runtime=runtime,
                         steps=steps,
                     )
-                if result.data.get("allow_tool_followup") is False:
-                    self._set_execution_trace_status(chat_id, "completed")
-                    return self._compose_tool_reply(
-                        chat_id,
-                        text,
-                        user_name=user_name,
-                        decision=decision.to_dict(),
-                        result=result,
-                        runtime=runtime,
-                        steps=steps,
-                    )
 
                 next_decision = self._decide_next_tool_step(
                     chat_id,

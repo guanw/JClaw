@@ -89,7 +89,6 @@ def test_notion_search_pages_returns_compact_results() -> None:
     assert controller_output["query"] == "roadmap"
     assert controller_output["result_count"] == 1
     assert controller_output["results"][0]["page_id"] == "page-1"
-    assert result.data["allow_tool_followup"] is True
     assert "Project roadmap" in tool.format_result("search_pages", result)
 
 

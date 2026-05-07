@@ -439,7 +439,6 @@ class FakeBrowserObjectiveTool:
                 "url": "https://example.com",
                 "title": "Example Domain",
                 "text": "Example Domain",
-                "allow_tool_followup": False,
             },
         )
 
@@ -585,6 +584,7 @@ def test_llm_selected_tool_routes_to_memory_remember(tmp_path) -> None:
         SequenceLLM(
             [
                 '{"type":"tool_call","tool":"memory","action":"remember_fact","params":{"key":"favorite_color","value":"blue"},"reason":"The user asked to remember a preference."}',
+                '{"type":"complete","reason":"The memory write is done."}',
             ]
         ),
     )
@@ -617,6 +617,7 @@ def test_llm_selected_tool_routes_to_memory_search(tmp_path) -> None:
         SequenceLLM(
             [
                 '{"type":"tool_call","tool":"memory","action":"search_memories","params":{"query":"favorite color"},"reason":"The user is asking what is remembered."}',
+                '{"type":"complete","reason":"The memory search result answers the request."}',
             ]
         ),
     )
@@ -648,6 +649,7 @@ def test_llm_selected_tool_routes_to_permissions_list_grants(tmp_path) -> None:
         SequenceLLM(
             [
                 '{"type":"tool_call","tool":"permissions","action":"list_grants","params":{},"reason":"The user is asking what access has been granted."}',
+                '{"type":"complete","reason":"The permissions listing answers the request."}',
             ]
         ),
     )
@@ -687,6 +689,7 @@ def test_llm_selected_tool_routes_to_email_list_accounts(tmp_path) -> None:
         SequenceLLM(
             [
                 '{"type":"tool_call","tool":"email","action":"list_accounts","params":{},"reason":"The user is asking which mail accounts are connected."}',
+                '{"type":"complete","reason":"The account listing answers the request."}',
             ]
         ),
     )
@@ -941,6 +944,7 @@ def test_llm_selected_tool_routes_to_browser(tmp_path) -> None:
         SequenceLLM(
             [
                 '{"type":"tool_call","tool":"browser","action":"run_objective","params":{"objective":"open example.com","start_url":"https://example.com"},"reason":"The user wants browser help."}',
+                '{"type":"complete","reason":"The browser objective completed successfully."}',
             ]
         ),
     )
@@ -2760,7 +2764,7 @@ def test_llm_selected_tool_routes_to_automation(tmp_path) -> None:
     db.close()
 
 
-def test_automation_terminal_result_skips_continuation_controller_turn(tmp_path) -> None:
+def test_automation_terminal_result_completes_with_controller_turn(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),
         telegram=TelegramConfig(),
@@ -2781,6 +2785,7 @@ def test_automation_terminal_result_skips_continuation_controller_turn(tmp_path)
         SequenceLLM(
             [
                 '{"type":"tool_call","tool":"automation","action":"create_schedule","params":{"when":{"kind":"once","interval_seconds":1800},"prompt":"stretch"},"reason":"The user wants a one-off reminder."}',
+                '{"type":"complete","reason":"The schedule was created."}',
             ]
         ),
     )

@@ -48,7 +48,6 @@ class WorkspacePythonSymbolsMixin:
                 "target_path": str(target_path),
                 "symbols": symbols,
                 "match_count": len(symbols),
-                "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_symbol_search:latest": artifact,
                 },
@@ -97,7 +96,6 @@ class WorkspacePythonSymbolsMixin:
                 "query": symbol_name,
                 "matches": matches,
                 "match_count": len(matches),
-                "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_symbol_search:latest": artifact,
                 },
@@ -162,7 +160,6 @@ class WorkspacePythonSymbolsMixin:
                 "query": symbol_name,
                 "matches": matches,
                 "match_count": len(matches),
-                "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_symbol_search:latest": artifact,
                 },

@@ -90,7 +90,6 @@ class WorkspaceGitOpsMixin:
                 "until": until,
                 "author": author,
                 "rev": rev,
-                "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_git_log:latest": {
                         "root_path": str(git_root),
@@ -133,7 +132,6 @@ class WorkspaceGitOpsMixin:
                 "root_path": str(git_root),
                 "status": git_data["status"],
                 "diff_stat": git_data["diff_stat"],
-                "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_git_status:latest": {
                         "root_path": str(git_root),
@@ -207,7 +205,6 @@ class WorkspaceGitOpsMixin:
                 "diff": combined_diff,
                 "has_unstaged": has_unstaged,
                 "has_staged": has_staged,
-                "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_diff:latest": artifact,
                 },

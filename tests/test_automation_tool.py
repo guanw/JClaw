@@ -24,7 +24,6 @@ def test_automation_tool_creates_and_lists_schedule(tmp_path) -> None:
     assert listed.ok is True
     assert len(listed.data["jobs"]) == 1
     assert listed.data["jobs"][0]["prompt"] == "stretch"
-    assert listed.data["allow_tool_followup"] is True
     db.close()
 
 

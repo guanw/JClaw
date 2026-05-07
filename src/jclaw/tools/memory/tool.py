@@ -71,7 +71,6 @@ class MemoryTool:
             data={
                 "key": key,
                 "value": value,
-                "allow_tool_followup": False,
                 "artifacts": {
                     "memory_fact:latest": {
                         "key": key,
@@ -84,7 +83,7 @@ class MemoryTool:
     def _list_memories(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         items = self.memories.list(ctx.chat_id, limit=self.search_limit)
         if not items:
-            return ToolResult(ok=True, summary="No memories stored yet.", data={"items": [], "allow_tool_followup": False})
+            return ToolResult(ok=True, summary="No memories stored yet.", data={"items": []})
         return ToolResult(
             ok=True,
             summary=f"Listed {len(items)} stored memories.",
@@ -95,7 +94,6 @@ class MemoryTool:
                         "items": [{"key": item.key, "value": item.value} for item in items],
                     }
                 },
-                "allow_tool_followup": False,
             },
         )
 
@@ -105,7 +103,7 @@ class MemoryTool:
             return ToolResult(ok=False, summary="search_memories requires a query.", data={})
         items = self.memories.search(ctx.chat_id, query, self.search_limit)
         if not items:
-            return ToolResult(ok=True, summary=f"No stored memories matched '{query}'.", data={"items": [], "allow_tool_followup": False})
+            return ToolResult(ok=True, summary=f"No stored memories matched '{query}'.", data={"items": []})
         return ToolResult(
             ok=True,
             summary=f"Found {len(items)} memory match(es) for '{query}'.",
@@ -117,7 +115,6 @@ class MemoryTool:
                         "items": [{"key": item.key, "value": item.value} for item in items],
                     }
                 },
-                "allow_tool_followup": False,
             },
         )
 
@@ -127,8 +124,8 @@ class MemoryTool:
             return ToolResult(ok=False, summary="forget_memory requires a key.", data={})
         deleted = self.memories.forget(ctx.chat_id, key)
         if not deleted:
-            return ToolResult(ok=False, summary=f"I didn't have a memory stored for '{key}'.", data={"key": key, "allow_tool_followup": False})
-        return ToolResult(ok=True, summary=f"Forgot '{key}'.", data={"key": key, "allow_tool_followup": False})
+            return ToolResult(ok=False, summary=f"I didn't have a memory stored for '{key}'.", data={"key": key})
+        return ToolResult(ok=True, summary=f"Forgot '{key}'.", data={"key": key})
 
     def _action_specs(self) -> dict[str, ActionSpec]:
         return {

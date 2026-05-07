@@ -48,7 +48,6 @@ class WorkspaceMutationsMixin:
                         "root_path": str(root_path),
                         "target_path": str(target_path),
                         "touched_files": [],
-                        "allow_tool_followup": True,
                     },
                 )
             if before:
@@ -173,7 +172,6 @@ class WorkspaceMutationsMixin:
                     "root_path": str(root_path),
                     "target_path": str(target_path),
                     "touched_files": [],
-                    "allow_tool_followup": True,
                 },
             )
         target_path.write_text(after, encoding="utf-8")
@@ -215,7 +213,6 @@ class WorkspaceMutationsMixin:
                 "request_id": request.request_id,
                 "root_path": request.root_path,
                 "touched_files": touched_files,
-                "allow_tool_followup": True,
             },
         )
         self._record_workspace_change(
@@ -526,7 +523,6 @@ class WorkspaceMutationsMixin:
                 "char_count": len(content),
                 "bytes_read": min(len(after_bytes), self.max_internal_read_bytes),
                 "truncated": truncated,
-                "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_patch:latest": patch_artifact,
                     "workspace_file:latest": file_artifact,
@@ -623,7 +619,6 @@ class WorkspaceMutationsMixin:
                 "target_path": str(root_path),
                 "touched_files": touched_files,
                 "diff_preview": diff_preview,
-                "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_patch:latest": patch_artifact,
                 },

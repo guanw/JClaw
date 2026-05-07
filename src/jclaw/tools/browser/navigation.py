@@ -314,7 +314,6 @@ class BrowserNavigationMixin:
             summary=f"Listed {len(sessions)} browser sessions.",
             data={
                 "sessions": [session.as_dict() for session in sessions],
-                "allow_tool_followup": True,
                 "artifacts": {
                     "browser_sessions:latest": {
                         "count": len(sessions),

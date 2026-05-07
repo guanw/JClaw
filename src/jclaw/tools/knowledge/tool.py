@@ -177,7 +177,6 @@ class KnowledgeTool:
             summary=f"Analyzed {len(payload['supported_files'])} readable file(s).",
             data={
                 **payload,
-                "allow_tool_followup": True,
                 "artifacts": {
                     "knowledge_context:latest": self._knowledge_context_artifact(payload),
                 },

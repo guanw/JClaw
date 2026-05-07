@@ -167,6 +167,4 @@ class AgentReplyingMixin:
         }
 
     def _should_return_direct_tool_result(self, result: ToolResult) -> bool:
-        if result.needs_confirmation:
-            return True
-        return result.data.get("allow_tool_followup") is False
+        return result.needs_confirmation

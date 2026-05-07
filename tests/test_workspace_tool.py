@@ -30,7 +30,6 @@ def test_inspect_root_requires_grant_then_lists_entries(tmp_path) -> None:
     assert inspected.data["entry_count"] == 1
     assert inspected.data["entries_truncated"] is False
     assert inspected.data["entries"][0]["name"] == "notes.txt"
-    assert inspected.data["allow_tool_followup"] is True
     assert inspected.data["artifacts"]["workspace_path:latest"]["target_path"] == str(root.resolve())
     db.close()
 
@@ -114,7 +113,6 @@ def test_path_metadata_find_files_and_search_contents(tmp_path) -> None:
     assert searched.ok is True
     assert searched.data["match_count"] == 2
     assert {item["path"] for item in searched.data["matches"]} == {"docs/notes.txt", "docs/todo.md"}
-    assert searched.data["allow_tool_followup"] is True
     assert searched.data["artifacts"]["workspace_search_results:latest"]["query"] == "keyword"
 
     grepped = tool.invoke(
@@ -247,7 +245,6 @@ def test_read_file_requires_grant_then_returns_workspace_file_artifact(tmp_path)
     assert result.data["content"] == "print('hello')\nprint('world')\n"
     assert result.data["line_count"] == 2
     assert result.data["truncated"] is False
-    assert result.data["allow_tool_followup"] is True
     assert result.data["artifacts"]["workspace_file:latest"]["start_line"] == 1
     assert result.data["artifacts"]["workspace_file:latest"]["end_line"] == 2
     db.close()
@@ -722,7 +719,6 @@ def test_git_status_emits_followup_artifact(tmp_path) -> None:
     status = tool.invoke("git_status", {"path": str(root)}, ToolContext(chat_id="chat-1"))
 
     assert status.ok is True
-    assert status.data["allow_tool_followup"] is True
     assert status.data["artifacts"]["workspace_git_status:latest"]["root_path"] == str(root.resolve())
     db.close()
 

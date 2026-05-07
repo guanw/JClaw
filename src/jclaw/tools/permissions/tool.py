@@ -100,11 +100,11 @@ class PermissionsTool:
     def _list_grants(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         grants = [self._serialize_grant(item) for item in self.db.list_grants(active_only=True)]
         if not grants:
-            return ToolResult(ok=True, summary="No active grants.", data={"grants": [], "allow_tool_followup": False})
+            return ToolResult(ok=True, summary="No active grants.", data={"grants": []})
         return ToolResult(
             ok=True,
             summary=f"Found {len(grants)} active grant(s).",
-            data={"grants": grants, "allow_tool_followup": False},
+            data={"grants": grants},
         )
 
     def _grant_access(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -122,7 +122,7 @@ class PermissionsTool:
         return ToolResult(
             ok=True,
             summary=f"Granted {', '.join(grant.capabilities)} access for {grant.root_path}.",
-            data={"grant": self._serialize_grant(grant), "allow_tool_followup": False},
+            data={"grant": self._serialize_grant(grant)},
         )
 
     def _revoke_grant(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -136,7 +136,7 @@ class PermissionsTool:
         return ToolResult(
             ok=True,
             summary=f"Grant {grant_id} revoked.",
-            data={"grant_id": grant_id, "revoked": True, "allow_tool_followup": False},
+            data={"grant_id": grant_id, "revoked": True},
         )
 
     def _list_pending_requests(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -145,12 +145,12 @@ class PermissionsTool:
             return ToolResult(
                 ok=True,
                 summary="No pending approval requests.",
-                data={"requests": [], "allow_tool_followup": False},
+                data={"requests": []},
             )
         return ToolResult(
             ok=True,
             summary=f"Found {len(requests)} pending approval request(s).",
-            data={"requests": requests, "allow_tool_followup": False},
+            data={"requests": requests},
         )
 
     def _serialize_grant(self, grant: Any) -> dict[str, Any]:

@@ -24,7 +24,6 @@ class BrowserObservationsMixin:
         if include_screenshot is not None:
             artifacts["browser_screenshot:latest"] = dict(include_screenshot)
         return {
-            "allow_tool_followup": True,
             "artifacts": artifacts,
         }
 

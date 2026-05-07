@@ -232,17 +232,17 @@ class EmailTool:
         return ToolResult(
             ok=True,
             summary=f"Connected Gmail account {record.email_address} as '{record.alias}'.",
-            data={"account": self._serialize_account(record), "allow_tool_followup": False},
+            data={"account": self._serialize_account(record)},
         )
 
     def _list_accounts(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         accounts = [self._serialize_account(item) for item in self.email_accounts.list_accounts()]
         if not accounts:
-            return ToolResult(ok=True, summary="No email accounts connected.", data={"accounts": [], "allow_tool_followup": False})
+            return ToolResult(ok=True, summary="No email accounts connected.", data={"accounts": []})
         return ToolResult(
             ok=True,
             summary=f"Listed {len(accounts)} connected email account(s).",
-            data={"accounts": accounts, "allow_tool_followup": False},
+            data={"accounts": accounts},
         )
 
     def _list_unread(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -254,7 +254,7 @@ class EmailTool:
         return ToolResult(
             ok=True,
             summary=f"Found {len(messages)} unread email(s).",
-            data={"alias": alias, "messages": messages, "allow_tool_followup": False},
+            data={"alias": alias, "messages": messages},
         )
 
     def _search_messages(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -273,7 +273,6 @@ class EmailTool:
                 "alias": alias,
                 "query": query,
                 "messages": messages,
-                "allow_tool_followup": True,
                 "artifacts": {
                     "email_result_set:latest": {
                         "alias": alias,
@@ -345,7 +344,6 @@ class EmailTool:
             data={
                 "alias": alias,
                 "message": message,
-                "allow_tool_followup": True,
                 "artifacts": {
                     "message_ref:selected": self._message_ref_artifact(alias, message),
                 },
@@ -365,7 +363,6 @@ class EmailTool:
             data={
                 "alias": alias,
                 "message": message,
-                "allow_tool_followup": True,
                 "artifacts": {
                     "message_ref:latest": self._message_ref_artifact(alias, message),
                 },
@@ -385,7 +382,6 @@ class EmailTool:
             data={
                 "alias": alias,
                 "thread": thread,
-                "allow_tool_followup": True,
                 "artifacts": {
                     "thread_ref:latest": {
                         "alias": alias,
@@ -427,7 +423,6 @@ class EmailTool:
             data={
                 "alias": alias,
                 "draft": draft,
-                "allow_tool_followup": False,
                 "artifacts": {
                     "email_draft:latest": {
                         "alias": alias,

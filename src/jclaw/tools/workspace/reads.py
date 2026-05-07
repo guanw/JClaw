@@ -60,7 +60,6 @@ class WorkspaceReadsMixin:
                 "entries_truncated": entries_truncated,
                 "git_root": None if git_root is None else str(git_root),
                 "approved_path": str(target_path),
-                "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_path:latest": {
                         "root_path": str(root_path),
@@ -110,7 +109,6 @@ class WorkspaceReadsMixin:
                 "exists": True,
                 "kind": kind,
                 "metadata": metadata,
-                "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_path:latest": {
                         "root_path": str(root_path),
@@ -170,7 +168,6 @@ class WorkspaceReadsMixin:
                 "target_path": str(search_root),
                 "matches": matches,
                 "match_count": match_count,
-                "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_search_results:latest": {
                         "root_path": str(root_path),
@@ -252,7 +249,6 @@ class WorkspaceReadsMixin:
                 "target_path": str(search_root),
                 "matches": matches,
                 "match_count": match_count,
-                "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_search_results:latest": {
                         "root_path": str(root_path),
@@ -317,7 +313,6 @@ class WorkspaceReadsMixin:
                 "bytes_read": int(file_state["bytes_read"]),
                 "truncated": bool(file_state["truncated"]),
                 "git_root": None if git_root is None else str(git_root),
-                "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_file:latest": artifact,
                 },
@@ -397,7 +392,6 @@ class WorkspaceReadsMixin:
                 "bytes_read": snippet_bytes_read,
                 "truncated": snippet_truncated,
                 "git_root": None if git_root is None else str(git_root),
-                "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_file:latest": artifact,
                 },

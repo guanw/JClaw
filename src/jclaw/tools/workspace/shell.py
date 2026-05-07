@@ -166,7 +166,6 @@ class WorkspaceShellMixin:
                 "exit_code": result["exit_code"],
                 "stdout": result["stdout"],
                 "stderr": result["stderr"],
-                "allow_tool_followup": True,
                 "artifacts": {
                     "workspace_command_result:latest": artifact,
                 },

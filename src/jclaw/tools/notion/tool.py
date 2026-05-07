@@ -525,7 +525,6 @@ class NotionTool:
                 "parent_id": parent_id,
                 "result_count": result_count,
                 "results": normalized,
-                "allow_tool_followup": True,
                 "artifacts": {
                     "notion_search_results:latest": artifact,
                 },
@@ -554,7 +553,6 @@ class NotionTool:
             data={
                 **normalized,
                 "properties": properties,
-                "allow_tool_followup": False,
                 "artifacts": {
                     "notion_page:latest": artifact,
                 },
@@ -594,7 +592,6 @@ class NotionTool:
                 "truncated": truncated,
                 "blocks": blocks,
                 "content_preview": preview,
-                "allow_tool_followup": False,
                 "artifacts": {
                     "notion_page:latest": artifact,
                 },
@@ -663,7 +660,6 @@ class NotionTool:
                 **normalized,
                 "properties": normalized_properties,
                 "block_count": len(children),
-                "allow_tool_followup": False,
                 "artifacts": {
                     "notion_page:latest": artifact,
                 },
@@ -747,7 +743,6 @@ class NotionTool:
                 "updated_properties": updated_properties,
                 "content_updated": has_content,
                 "content_preview": content_preview,
-                "allow_tool_followup": False,
                 "artifacts": {
                     "notion_page:latest": artifact,
                 },

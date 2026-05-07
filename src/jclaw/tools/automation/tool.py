@@ -87,13 +87,12 @@ class AutomationTool:
     def _list_schedules(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         jobs = self.cron.list_jobs(ctx.chat_id)
         if not jobs:
-            return ToolResult(ok=True, summary="No schedules configured.", data={"jobs": [], "allow_tool_followup": False})
+            return ToolResult(ok=True, summary="No schedules configured.", data={"jobs": []})
         return ToolResult(
             ok=True,
             summary=f"Listed {len(jobs)} schedules.",
             data={
                 "jobs": [self._serialize_job(job) for job in jobs],
-                "allow_tool_followup": True,
                 "artifacts": {
                     "automation_job_list:latest": {
                         "jobs": [self._serialize_job(job) for job in jobs],
@@ -109,7 +108,7 @@ class AutomationTool:
             return ToolResult(
                 ok=False,
                 summary="Creating a schedule requires prompt plus a structured when object.",
-                data={"allow_tool_followup": False},
+                data={},
             )
         try:
             spec = parse_schedule_input(when=when)
@@ -117,7 +116,7 @@ class AutomationTool:
             return ToolResult(
                 ok=False,
                 summary=str(exc),
-                data={"when": when, "allow_tool_followup": False},
+                data={"when": when},
             )
         next_run = to_utc_iso(next_run_at(spec))
         job_id = self.cron.add_job(ctx.chat_id, spec.raw, prompt, next_run)
@@ -128,7 +127,6 @@ class AutomationTool:
             summary=f"Created schedule {job_id}.",
             data={
                 "job": self._serialize_job(job),
-                "allow_tool_followup": False,
                 "artifacts": {
                     "automation_job:latest": self._serialize_job(job),
                 },
@@ -139,10 +137,10 @@ class AutomationTool:
         try:
             job_id = int(params.get("job_id"))
         except (TypeError, ValueError):
-            return ToolResult(ok=False, summary="Updating a schedule requires a numeric job_id.", data={"allow_tool_followup": False})
+            return ToolResult(ok=False, summary="Updating a schedule requires a numeric job_id.", data={})
         current = self.cron.get_job(ctx.chat_id, job_id)
         if current is None:
-            return ToolResult(ok=False, summary=f"Schedule {job_id} was not found.", data={"allow_tool_followup": False})
+            return ToolResult(ok=False, summary=f"Schedule {job_id} was not found.", data={})
 
         when_param = params.get("when")
         prompt_param = params.get("prompt")
@@ -159,7 +157,6 @@ class AutomationTool:
                     summary=str(exc),
                     data={
                         "when": when_param,
-                        "allow_tool_followup": False,
                     },
                 )
             schedule = spec.raw
@@ -183,7 +180,7 @@ class AutomationTool:
             enabled=enabled,
         )
         if not updated:
-            return ToolResult(ok=False, summary=f"No schedule changes were applied to {job_id}.", data={"allow_tool_followup": False})
+            return ToolResult(ok=False, summary=f"No schedule changes were applied to {job_id}.", data={})
         job = self.cron.get_job(ctx.chat_id, job_id)
         assert job is not None
         return ToolResult(
@@ -191,7 +188,6 @@ class AutomationTool:
             summary=f"Updated schedule {job_id}.",
             data={
                 "job": self._serialize_job(job),
-                "allow_tool_followup": False,
                 "artifacts": {
                     "automation_job:latest": self._serialize_job(job),
                 },
@@ -202,11 +198,11 @@ class AutomationTool:
         try:
             job_id = int(params.get("job_id"))
         except (TypeError, ValueError):
-            return ToolResult(ok=False, summary="Removing a schedule requires a numeric job_id.", data={"allow_tool_followup": False})
+            return ToolResult(ok=False, summary="Removing a schedule requires a numeric job_id.", data={})
         deleted = self.cron.remove_job(ctx.chat_id, job_id)
         if not deleted:
-            return ToolResult(ok=False, summary=f"Schedule {job_id} was not found.", data={"allow_tool_followup": False})
-        return ToolResult(ok=True, summary=f"Removed schedule {job_id}.", data={"job_id": job_id, "allow_tool_followup": False})
+            return ToolResult(ok=False, summary=f"Schedule {job_id} was not found.", data={})
+        return ToolResult(ok=True, summary=f"Removed schedule {job_id}.", data={"job_id": job_id})
 
     def _serialize_job(self, job: CronJobRecord) -> dict[str, Any]:
         return {

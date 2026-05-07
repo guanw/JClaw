@@ -32,7 +32,6 @@ def test_analyze_paths_requires_grant_then_extracts_text_file(tmp_path) -> None:
     assert result.data["grounded"] is True
     assert result.data["supported_files"][0]["path"] == str(target.resolve())
     assert result.data["chunks"][0]["path"] == str(target.resolve())
-    assert result.data["allow_tool_followup"] is True
     assert result.data["artifacts"]["knowledge_context:latest"]["supported_files"][0]["path"] == str(target.resolve())
     db.close()
 

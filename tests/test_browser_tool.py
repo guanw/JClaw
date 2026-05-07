@@ -50,7 +50,6 @@ def test_browser_tool_creates_session_for_objective(tmp_path) -> None:
     assert result.ok is True
     assert result.data["session_id"].startswith("sess_")
     assert result.data["steps"][0]["action"] == "open_url"
-    assert result.data["allow_tool_followup"] is True
     assert result.data["artifacts"]["browser_page:latest"]["url"] == "https://example.com"
     assert "browser_extract:latest" in result.data["artifacts"]
 
@@ -253,7 +252,6 @@ def test_extract_reads_current_page_and_returns_structured_fields(tmp_path) -> N
     assert result.ok is True
     assert result.data["fields"]["contractors"] == ["Acme Remodeling", "Millburn Home Works"]
     assert result.data["evidence_refs"] == ["b1", "b2"]
-    assert result.data["allow_tool_followup"] is True
     assert result.data["artifacts"]["browser_extract:latest"]["fields"]["summary"] == "Two contractor names appear on the page."
     assert result.data["artifacts"]["browser_candidates:latest"]["count"] == 0
 
@@ -294,7 +292,6 @@ def test_read_page_emits_page_and_candidate_artifacts(tmp_path) -> None:
     tool = _stub_browser(BrowserTool(tmp_path))
     result = tool.invoke("read_page", {}, ToolContext(chat_id="chat-read-page"))
     assert result.ok is True
-    assert result.data["allow_tool_followup"] is True
     assert result.data["artifacts"]["browser_page:latest"]["url"] == "about:blank"
     assert "browser_candidates:latest" in result.data["artifacts"]
 
@@ -304,7 +301,6 @@ def test_list_sessions_emits_session_artifact(tmp_path) -> None:
     tool.invoke("open_url", {"url": "https://example.com", "keep_session": True}, ToolContext(chat_id="chat-sessions"))
     result = tool.invoke("list_sessions", {}, ToolContext(chat_id="chat-sessions"))
     assert result.ok is True
-    assert result.data["allow_tool_followup"] is True
     assert result.data["artifacts"]["browser_sessions:latest"]["count"] == 1
 
 
