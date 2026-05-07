@@ -179,13 +179,14 @@ def _rich_text(text: Any) -> list[dict[str, Any]]:
     return [{"type": "text", "text": {"content": value}}]
 
 
-def _normalize_create_property_value(name: str, value: Any) -> dict[str, Any]:
+def _normalize_write_property_value(name: str, value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(
             f"Property '{name}' must use an explicit Notion property payload shape, for example "
             "{'number': 3} or {'select': {'name': 'Draft'}}."
         )
     allowed_keys = {
+        "title",
         "rich_text",
         "number",
         "checkbox",
@@ -205,6 +206,10 @@ def _normalize_create_property_value(name: str, value: Any) -> dict[str, Any]:
         )
     kind = present[0]
     raw = value.get(kind)
+    if kind == "title":
+        if isinstance(raw, list):
+            return {"title": raw}
+        return {"title": _rich_text(raw)}
     if kind == "rich_text":
         if isinstance(raw, list):
             return {"rich_text": raw}
@@ -270,8 +275,34 @@ def _build_create_properties(
         clean_key = str(key).strip()
         if not clean_key or clean_key == title_key:
             continue
-        properties[clean_key] = _normalize_create_property_value(clean_key, value)
+        properties[clean_key] = _normalize_write_property_value(clean_key, value)
     return properties
+
+
+def _build_update_properties(page: dict[str, Any], raw_properties: Any) -> dict[str, Any]:
+    if not isinstance(raw_properties, dict) or not raw_properties:
+        raise ValueError("update_page requires a non-empty properties object.")
+    page_properties = page.get("properties", {})
+    if not isinstance(page_properties, dict):
+        page_properties = {}
+    title_property_name = next(
+        (
+            str(key).strip()
+            for key, value in page_properties.items()
+            if isinstance(value, dict) and value.get("type") == "title"
+        ),
+        "",
+    )
+    normalized: dict[str, Any] = {}
+    for key, value in raw_properties.items():
+        clean_key = str(key).strip()
+        if not clean_key:
+            continue
+        target_key = title_property_name if clean_key == "title" and title_property_name else clean_key
+        normalized[target_key] = _normalize_write_property_value(target_key, value)
+    if not normalized:
+        raise ValueError("update_page requires at least one valid property update.")
+    return normalized
 
 
 def _build_content_blocks(content: Any) -> list[dict[str, Any]]:
@@ -328,6 +359,16 @@ def _build_content_blocks(content: Any) -> list[dict[str, Any]]:
     return blocks
 
 
+def _build_markdown_content(content: Any) -> str:
+    if content in (None, ""):
+        return ""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return "\n".join(str(item) for item in content).strip()
+    return str(content).strip()
+
+
 class NotionTool:
     name = "notion"
 
@@ -350,9 +391,10 @@ class NotionTool:
     def invoke(self, action: str, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handlers = {
             "search_pages": self._search_pages,
-            "get_page": self._get_page,
-            "get_page_content": self._get_page_content,
+            "get_page_metadata": self._get_page_metadata,
+            "get_page": self._get_page_content,
             "create_page": self._create_page,
+            "update_page": self._update_page,
         }
         handler = handlers.get(action)
         if handler is None:
@@ -360,6 +402,8 @@ class NotionTool:
         return handler(params, ctx)
 
     def controller_output(self, action: str, result: ToolResult) -> dict[str, Any]:
+        if action == "get_page":
+            action = "get_page_content"
         data = result.data if isinstance(result.data, dict) else {}
         if action == "search_pages":
             payload: dict[str, Any] = {}
@@ -371,7 +415,7 @@ class NotionTool:
             if isinstance(results, list):
                 payload["results"] = results[:10]
             return payload
-        if action == "get_page":
+        if action == "get_page_metadata":
             payload: dict[str, Any] = {}
             for field in ("page_id", "title", "url", "last_edited_time", "parent"):
                 if field in data:
@@ -398,9 +442,20 @@ class NotionTool:
             if isinstance(properties, dict):
                 payload["properties"] = dict(list(properties.items())[:12])
             return payload
+        if action == "update_page":
+            payload = {}
+            for field in ("page_id", "title", "url", "last_edited_time", "parent"):
+                if field in data:
+                    payload[field] = data.get(field)
+            updated_properties = data.get("updated_properties")
+            if isinstance(updated_properties, dict):
+                payload["updated_properties"] = dict(list(updated_properties.items())[:12])
+            return payload
         return {}
 
     def format_result(self, action: str, result: ToolResult) -> str:
+        if action == "get_page":
+            action = "get_page_content"
         lines = [result.summary]
         if action == "search_pages":
             append_list_section(
@@ -413,7 +468,7 @@ class NotionTool:
                 ),
                 limit=10,
             )
-        elif action == "get_page":
+        elif action == "get_page_metadata":
             properties = result.data.get("properties")
             if isinstance(properties, dict) and properties:
                 lines.append("Properties:")
@@ -428,6 +483,12 @@ class NotionTool:
             properties = result.data.get("properties")
             if isinstance(properties, dict) and properties:
                 lines.append("Properties:")
+                for key, value in list(properties.items())[:12]:
+                    lines.append(f"- {key}: {value}")
+        elif action == "update_page":
+            properties = result.data.get("updated_properties")
+            if isinstance(properties, dict) and properties:
+                lines.append("Updated properties:")
                 for key, value in list(properties.items())[:12]:
                     lines.append(f"- {key}: {value}")
         return "\n".join(lines)
@@ -464,20 +525,20 @@ class NotionTool:
                 "parent_id": parent_id,
                 "result_count": result_count,
                 "results": normalized,
-                "allow_tool_followup": False,
+                "allow_tool_followup": True,
                 "artifacts": {
                     "notion_search_results:latest": artifact,
                 },
             },
         )
 
-    def _get_page(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    def _get_page_metadata(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         page_id = str(params.get("page_id", "")).strip()
         if not page_id:
-            return ToolResult(ok=False, summary="get_page requires a page_id.", data={})
+            return ToolResult(ok=False, summary="get_page_metadata requires a page_id.", data={})
         try:
             client = self._build_client(self.config)
-            payload = client.get_page(page_id)
+            payload = client.get_page_metadata(page_id)
         except (NotionDisabledError, NotionConfigError, NotionUnauthorizedError, NotionNotFoundError, NotionRateLimitedError, NotionError) as exc:
             return ToolResult(ok=False, summary=str(exc), data={"page_id": page_id})
 
@@ -507,8 +568,8 @@ class NotionTool:
         max_blocks = max(1, min(int(params.get("max_blocks", 20)), 100))
         try:
             client = self._build_client(self.config)
-            page = client.get_page(page_id)
-            payload = client.get_page_content(page_id, max_blocks=max_blocks)
+            page = client.get_page_metadata(page_id)
+            payload = client.get_page(page_id, max_blocks=max_blocks)
         except (NotionDisabledError, NotionConfigError, NotionUnauthorizedError, NotionNotFoundError, NotionRateLimitedError, NotionError) as exc:
             return ToolResult(ok=False, summary=str(exc), data={"page_id": page_id})
 
@@ -609,12 +670,96 @@ class NotionTool:
             },
         )
 
+    def _update_page(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        page_id = str(params.get("page_id", "")).strip()
+        if not page_id:
+            return ToolResult(ok=False, summary="update_page requires a page_id.", data={})
+        try:
+            client = self._build_client(self.config)
+            current_page = client.get_page_metadata(page_id)
+        except (NotionDisabledError, NotionConfigError, NotionUnauthorizedError, NotionNotFoundError, NotionRateLimitedError, NotionError) as exc:
+            return ToolResult(ok=False, summary=str(exc), data={"page_id": page_id})
+
+        current = normalize_notion_page(current_page)
+        writable = tuple(str(item).strip() for item in self.config.writable_parent_ids if str(item).strip())
+        parent_id = current.get("parent", {}).get("id", "")
+        if writable and parent_id not in writable:
+            return ToolResult(
+                ok=False,
+                summary=f"Notion writes are not allowed under parent '{parent_id}'.",
+                data={"page_id": page_id, "parent_id": parent_id},
+            )
+
+        raw_properties = params.get("properties")
+        has_properties = isinstance(raw_properties, dict) and bool(raw_properties)
+        has_content = "content" in params and str(params.get("content", "")).strip() != ""
+        if not has_properties and not has_content:
+            return ToolResult(
+                ok=False,
+                summary="update_page requires properties and/or content.",
+                data={"page_id": page_id},
+            )
+
+        update_payload: dict[str, Any] = {}
+        if has_properties:
+            try:
+                update_payload = _build_update_properties(current_page, raw_properties)
+            except ValueError as exc:
+                return ToolResult(ok=False, summary=str(exc), data={"page_id": page_id})
+
+        updated_page = current_page
+        if update_payload:
+            try:
+                updated_page = client.update_page_metadata(page_id, properties=update_payload)
+            except (NotionDisabledError, NotionConfigError, NotionUnauthorizedError, NotionNotFoundError, NotionRateLimitedError, NotionError) as exc:
+                return ToolResult(ok=False, summary=str(exc), data={"page_id": page_id})
+
+        content_preview = ""
+        if has_content:
+            markdown = _build_markdown_content(params.get("content"))
+            try:
+                markdown_result = client.update_page_markdown(
+                    page_id,
+                    markdown=markdown,
+                    allow_deleting_content=bool(params.get("allow_deleting_content", False)),
+                )
+            except (NotionDisabledError, NotionConfigError, NotionUnauthorizedError, NotionNotFoundError, NotionRateLimitedError, NotionError) as exc:
+                return ToolResult(ok=False, summary=str(exc), data={"page_id": page_id})
+            content_preview = str(markdown_result.get("markdown", "")).strip()
+
+        normalized = normalize_notion_page(updated_page)
+        updated_properties = _normalize_page_properties(updated_page) if update_payload else {}
+        artifact = {
+            **normalized,
+            "properties": updated_properties,
+        }
+        if content_preview:
+            artifact["content_preview"] = content_preview
+        return ToolResult(
+            ok=True,
+            summary=f"Updated Notion page '{normalized['title']}' ({normalized['page_id']}).",
+            data={
+                "page_id": normalized["page_id"],
+                "title": normalized["title"],
+                "url": normalized["url"],
+                "last_edited_time": normalized["last_edited_time"],
+                "parent": normalized["parent"],
+                "updated_properties": updated_properties,
+                "content_updated": has_content,
+                "content_preview": content_preview,
+                "allow_tool_followup": False,
+                "artifacts": {
+                    "notion_page:latest": artifact,
+                },
+            },
+        )
+
     def _action_specs(self) -> dict[str, ActionSpec]:
         return {
             "search_pages": ActionSpec(
                 tool=self.name,
                 action="search_pages",
-                description="Search Notion pages by query and return compact page matches.",
+                description="Search Notion pages by query and return compact page matches. Use this first when a request names a page approximately and you need a page_id before reading or updating it.",
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -627,10 +772,10 @@ class NotionTool:
                 reads=True,
                 produces_artifacts=("notion_search_results",),
             ),
-            "get_page": ActionSpec(
+            "get_page_metadata": ActionSpec(
                 tool=self.name,
-                action="get_page",
-                description="Read a Notion page's normalized metadata and properties by page id.",
+                action="get_page_metadata",
+                description="Read a Notion page's normalized metadata and properties by page id after you already know the target page.",
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -641,10 +786,10 @@ class NotionTool:
                 reads=True,
                 produces_artifacts=("notion_page",),
             ),
-            "get_page_content": ActionSpec(
+            "get_page": ActionSpec(
                 tool=self.name,
-                action="get_page_content",
-                description="Read a Notion page's content blocks in a compact, normalized format by page id.",
+                action="get_page",
+                description="Read a Notion page's content blocks in a compact, normalized format by page id after you already know the target page.",
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -671,6 +816,23 @@ class NotionTool:
                         "properties": {"type": "object"},
                     },
                     "required": ["title"],
+                },
+                writes=True,
+                produces_artifacts=("notion_page",),
+            ),
+            "update_page": ActionSpec(
+                tool=self.name,
+                action="update_page",
+                description="Update a Notion page's title, simple typed properties, and optionally replace the page body content by page id. If the request only names the page approximately, use search_pages first to find the page_id.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "page_id": {"type": "string"},
+                        "properties": {"type": "object"},
+                        "content": {},
+                        "allow_deleting_content": {"type": "boolean"},
+                    },
+                    "required": ["page_id"],
                 },
                 writes=True,
                 produces_artifacts=("notion_page",),

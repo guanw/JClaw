@@ -96,7 +96,7 @@ def test_notion_client_search_pages_posts_expected_payload() -> None:
     assert '"page_size":7' in str(seen["body"]).replace(" ", "")
 
 
-def test_notion_client_get_page_uses_expected_endpoint() -> None:
+def test_notion_client_get_page_metadata_uses_expected_endpoint() -> None:
     seen: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -107,7 +107,7 @@ def test_notion_client_get_page_uses_expected_endpoint() -> None:
     transport = httpx.MockTransport(handler)
     client = NotionClient("secret-token", http_client=httpx.Client(transport=transport))
 
-    payload = client.get_page("page-1")
+    payload = client.get_page_metadata("page-1")
 
     assert payload["id"] == "page-1"
     assert seen["method"] == "GET"
@@ -126,7 +126,7 @@ def test_notion_client_get_page_content_uses_block_children_endpoint() -> None:
     transport = httpx.MockTransport(handler)
     client = NotionClient("secret-token", http_client=httpx.Client(transport=transport))
 
-    payload = client.get_page_content("page-1", max_blocks=12)
+    payload = client.get_page("page-1", max_blocks=12)
 
     assert payload["results"] == []
     assert seen["method"] == "GET"
@@ -159,3 +159,53 @@ def test_notion_client_create_page_posts_expected_payload() -> None:
     assert '"page_id":"parent-1"' in body
     assert '"content":"Sprintnotes"' in body
     assert '"children":' in body
+
+
+def test_notion_client_update_page_metadata_patches_expected_payload() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["body"] = request.content.decode("utf-8")
+        return httpx.Response(200, json={"id": "page-1"})
+
+    transport = httpx.MockTransport(handler)
+    client = NotionClient("secret-token", http_client=httpx.Client(transport=transport))
+
+    payload = client.update_page_metadata(
+        "page-1",
+        properties={
+            "Name": {"title": [{"type": "text", "text": {"content": "Renamed page"}}]},
+            "Points": {"number": 5},
+        },
+    )
+
+    assert payload["id"] == "page-1"
+    assert seen["method"] == "PATCH"
+    assert seen["path"] == "/v1/pages/page-1"
+    body = str(seen["body"]).replace(" ", "")
+    assert '"content":"Renamedpage"' in body
+    assert '"number":5' in body
+
+
+def test_notion_client_update_page_markdown_patches_expected_payload() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["body"] = request.content.decode("utf-8")
+        return httpx.Response(200, json={"object": "page_markdown", "id": "page-1", "markdown": "haha"})
+
+    transport = httpx.MockTransport(handler)
+    client = NotionClient("secret-token", http_client=httpx.Client(transport=transport))
+
+    payload = client.update_page_markdown("page-1", markdown="haha")
+
+    assert payload["id"] == "page-1"
+    assert seen["method"] == "PATCH"
+    assert seen["path"] == "/v1/pages/page-1/markdown"
+    body = str(seen["body"]).replace(" ", "")
+    assert '"type":"replace_content"' in body
+    assert '"new_str":"haha"' in body

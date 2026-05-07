@@ -81,6 +81,9 @@ class NotionClient:
     def post(self, path: str, *, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.request("POST", path, json=payload)
 
+    def patch(self, path: str, *, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.request("PATCH", path, json=payload)
+
     def search_pages(
         self,
         query: str,
@@ -109,8 +112,42 @@ class NotionClient:
             payload["children"] = list(children)
         return self.post("/pages", payload=payload)
 
-    def get_page(self, page_id: str) -> dict[str, Any]:
+    def update_page_metadata(
+        self,
+        page_id: str,
+        *,
+        properties: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self.patch(f"/pages/{str(page_id).strip()}", payload={"properties": dict(properties)})
+
+    def update_page_markdown(
+        self,
+        page_id: str,
+        *,
+        markdown: str,
+        allow_deleting_content: bool = False,
+    ) -> dict[str, Any]:
+        return self.patch(
+            f"/pages/{str(page_id).strip()}/markdown",
+            payload={
+                "type": "replace_content",
+                "replace_content": {
+                    "new_str": str(markdown),
+                    "allow_deleting_content": bool(allow_deleting_content),
+                },
+            },
+        )
+
+    def get_page_metadata(self, page_id: str) -> dict[str, Any]:
         return self.get(f"/pages/{str(page_id).strip()}")
+
+    def update_page(
+        self,
+        page_id: str,
+        *,
+        properties: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self.update_page_metadata(page_id, properties=properties)
 
     def get_block_children(
         self,
@@ -127,7 +164,7 @@ class NotionClient:
             params["start_cursor"] = cursor
         return self.get(f"/blocks/{str(block_id).strip()}/children", params=params)
 
-    def get_page_content(
+    def get_page(
         self,
         page_id: str,
         *,
