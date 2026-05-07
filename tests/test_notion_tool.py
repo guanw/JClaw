@@ -230,7 +230,8 @@ def test_notion_get_page_returns_normalized_blocks() -> None:
     controller_output = tool.controller_output("get_page", result)
     assert controller_output["page_id"] == "page-1"
     assert controller_output["block_count"] == 4
-    assert controller_output["blocks"][0]["type"] == "heading_2"
+    assert controller_output["content_preview"] == result.data["content_preview"]
+    assert "blocks" not in controller_output
 
 
 def test_notion_create_page_shapes_parent_properties_and_children() -> None:
@@ -403,6 +404,40 @@ def test_notion_update_page_can_replace_content() -> None:
     assert result.data["content_preview"] == "haha"
     assert fake.markdown_calls[0]["page_id"] == "page-1"
     assert fake.markdown_calls[0]["markdown"] == "haha"
+
+
+def test_notion_update_page_rejects_structured_content_objects() -> None:
+    current_page = {
+        "id": "page-1",
+        "url": "https://notion.so/page-1",
+        "last_edited_time": "2026-05-06T00:00:00.000Z",
+        "parent": {"type": "page_id", "page_id": "parent-1"},
+        "properties": {
+            "Name": {"type": "title", "title": [{"plain_text": "Jude test"}]},
+        },
+    }
+    fake = FakeNotionClient(page=current_page)
+    tool = NotionTool(
+        NotionConfig(enabled=True, api_token="secret-token"),
+        build_client=lambda config: fake,
+    )
+
+    result = tool.invoke(
+        "update_page",
+        {
+            "page_id": "page-1",
+            "content": {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": "haha"}}]},
+            },
+        },
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert result.ok is False
+    assert "plain text or markdown" in result.summary.lower()
+    assert fake.markdown_calls == []
 
 
 def test_notion_update_page_enforces_writable_parent_ids() -> None:

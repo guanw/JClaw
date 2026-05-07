@@ -365,7 +365,15 @@ def _build_markdown_content(content: Any) -> str:
     if isinstance(content, str):
         return content.strip()
     if isinstance(content, list):
+        if any(isinstance(item, dict | list) for item in content):
+            raise ValueError(
+                "update_page content must be plain text or a list of plain text lines, not structured block objects."
+            )
         return "\n".join(str(item) for item in content).strip()
+    if isinstance(content, dict | tuple | set):
+        raise ValueError(
+            "update_page content must be plain text or markdown, not a structured object."
+        )
     return str(content).strip()
 
 
@@ -429,9 +437,6 @@ class NotionTool:
             for field in ("page_id", "title", "block_count", "truncated", "content_preview"):
                 if field in data:
                     payload[field] = data.get(field)
-            blocks = data.get("blocks")
-            if isinstance(blocks, list):
-                payload["blocks"] = blocks[:12]
             return payload
         if action == "create_page":
             payload = {}
@@ -712,7 +717,10 @@ class NotionTool:
 
         content_preview = ""
         if has_content:
-            markdown = _build_markdown_content(params.get("content"))
+            try:
+                markdown = _build_markdown_content(params.get("content"))
+            except ValueError as exc:
+                return ToolResult(ok=False, summary=str(exc), data={"page_id": page_id})
             try:
                 markdown_result = client.update_page_markdown(
                     page_id,
@@ -784,7 +792,7 @@ class NotionTool:
             "get_page": ActionSpec(
                 tool=self.name,
                 action="get_page",
-                description="Read a Notion page's content blocks in a compact, normalized format by page id after you already know the target page.",
+                description="Read a Notion page's body content by page id. The result includes a text content preview and content metadata; use it to understand existing page text before updating content.",
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -799,7 +807,7 @@ class NotionTool:
             "create_page": ActionSpec(
                 tool=self.name,
                 action="create_page",
-                description="Create a simple Notion page under a parent page or database with constrained content and properties.",
+                description="Create a simple Notion page under a parent page or database. `content` must be plain text or markdown-style text, not block objects.",
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -807,7 +815,12 @@ class NotionTool:
                         "parent_type": {"type": "string"},
                         "title": {"type": "string"},
                         "title_property": {"type": "string"},
-                        "content": {},
+                        "content": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}},
+                            ]
+                        },
                         "properties": {"type": "object"},
                     },
                     "required": ["title"],
@@ -818,13 +831,18 @@ class NotionTool:
             "update_page": ActionSpec(
                 tool=self.name,
                 action="update_page",
-                description="Update a Notion page's title, simple typed properties, and optionally replace the page body content by page id. If the request only names the page approximately, use search_pages first to find the page_id.",
+                description="Update a Notion page's title, simple typed properties, and optionally replace the page body content by page id. `content` must be plain text or markdown, not block objects. If the request only names the page approximately, use search_pages first to find the page_id.",
                 input_schema={
                     "type": "object",
                     "properties": {
                         "page_id": {"type": "string"},
                         "properties": {"type": "object"},
-                        "content": {},
+                        "content": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}},
+                            ]
+                        },
                         "allow_deleting_content": {"type": "boolean"},
                     },
                     "required": ["page_id"],
