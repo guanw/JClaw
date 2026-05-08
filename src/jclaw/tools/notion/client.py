@@ -149,6 +149,32 @@ class NotionClient:
     ) -> dict[str, Any]:
         return self.update_page_metadata(page_id, properties=properties)
 
+    def get_block(self, block_id: str) -> dict[str, Any]:
+        return self.get(f"/blocks/{str(block_id).strip()}")
+
+    def update_block(
+        self,
+        block_id: str,
+        *,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self.patch(f"/blocks/{str(block_id).strip()}", payload=payload)
+
+    def update_table_row(
+        self,
+        row_id: str,
+        *,
+        cells: list[list[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        return self.update_block(
+            row_id,
+            payload={
+                "table_row": {
+                    "cells": list(cells),
+                }
+            },
+        )
+
     def get_block_children(
         self,
         block_id: str,
@@ -188,11 +214,24 @@ class NotionClient:
             remaining = max_blocks - len(all_results)
             if remaining <= 0 or not has_more or not next_cursor:
                 break
+        self._populate_supported_children(all_results)
         return {
             "results": all_results[:max_blocks],
             "has_more": has_more and len(all_results) >= max_blocks,
             "next_cursor": next_cursor,
         }
+
+    def _populate_supported_children(self, blocks: list[dict[str, Any]]) -> None:
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if not bool(block.get("has_children")):
+                continue
+            if str(block.get("type", "")).strip() != "table":
+                continue
+            children_payload = self.get_block_children(str(block.get("id", "")).strip(), page_size=100)
+            children = [item for item in children_payload.get("results", []) if isinstance(item, dict)]
+            block["children"] = children
 
     def request(
         self,

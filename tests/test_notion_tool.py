@@ -5,18 +5,22 @@ from jclaw.tools.notion.tool import NotionTool
 
 
 class FakeNotionClient:
-    def __init__(self, results=None, page=None, content=None, created_page=None, markdown_update=None) -> None:  # noqa: ANN001
+    def __init__(self, results=None, page=None, content=None, created_page=None, markdown_update=None, blocks=None, updated_block=None) -> None:  # noqa: ANN001
         self.results = results or []
         self.page = page or {}
         self.content = content or {"results": [], "has_more": False}
         self.created_page = created_page or {}
         self.markdown_update = markdown_update or {"object": "page_markdown", "id": "", "markdown": ""}
+        self.blocks = blocks or {}
+        self.updated_block = updated_block or {}
         self.calls: list[tuple[str, int]] = []
         self.page_calls: list[str] = []
         self.content_calls: list[tuple[str, int]] = []
+        self.block_calls: list[str] = []
         self.create_calls: list[dict] = []
         self.update_calls: list[dict] = []
         self.markdown_calls: list[dict] = []
+        self.update_block_calls: list[dict] = []
 
     def search_pages(self, query: str, *, limit: int = 10) -> dict:
         self.calls.append((query, limit))
@@ -29,6 +33,10 @@ class FakeNotionClient:
     def get_page(self, page_id: str, *, max_blocks: int = 50) -> dict:
         self.content_calls.append((page_id, max_blocks))
         return dict(self.content)
+
+    def get_block(self, block_id: str) -> dict:
+        self.block_calls.append(block_id)
+        return dict(self.blocks.get(block_id, {}))
 
     def create_page(self, *, parent: dict, properties: dict, children: list[dict] | None = None) -> dict:
         self.create_calls.append(
@@ -56,6 +64,10 @@ class FakeNotionClient:
             }
         )
         return dict(self.markdown_update)
+
+    def update_table_row(self, row_id: str, *, cells: list[list[dict]]) -> dict:
+        self.update_block_calls.append({"row_id": row_id, "cells": list(cells)})
+        return dict(self.updated_block)
 
 
 def test_notion_search_pages_returns_compact_results() -> None:
@@ -232,6 +244,78 @@ def test_notion_get_page_returns_normalized_blocks() -> None:
     assert controller_output["block_count"] == 4
     assert controller_output["content_preview"] == result.data["content_preview"]
     assert "blocks" not in controller_output
+
+
+def test_notion_get_page_normalizes_nested_tables_for_controller() -> None:
+    page = {
+        "id": "page-1",
+        "url": "https://notion.so/page-1",
+        "last_edited_time": "2026-05-05T00:00:00.000Z",
+        "parent": {"type": "page_id", "page_id": "parent-1"},
+        "properties": {
+            "Name": {"type": "title", "title": [{"plain_text": "2026 面试"}]},
+        },
+    }
+    content = {
+        "results": [
+            {
+                "id": "table-1",
+                "type": "table",
+                "has_children": True,
+                "table": {
+                    "table_width": 5,
+                    "has_column_header": True,
+                    "has_row_header": False,
+                },
+                "children": [
+                    {
+                        "id": "row-header",
+                        "type": "table_row",
+                        "table_row": {
+                            "cells": [
+                                [{"plain_text": "Company"}],
+                                [{"plain_text": "Stage"}],
+                                [{"plain_text": "Time"}],
+                                [{"plain_text": "面经"}],
+                                [{"plain_text": "progress"}],
+                            ]
+                        },
+                    },
+                    {
+                        "id": "row-chariot",
+                        "type": "table_row",
+                        "table_row": {
+                            "cells": [
+                                [{"plain_text": "Chariot"}],
+                                [{"plain_text": "system design"}],
+                                [],
+                                [],
+                                [{"plain_text": "5/8 10:30 am"}],
+                            ]
+                        },
+                    },
+                ],
+            }
+        ],
+        "has_more": False,
+    }
+    fake = FakeNotionClient(page=page, content=content)
+    tool = NotionTool(
+        NotionConfig(enabled=True, api_token="secret-token"),
+        build_client=lambda config: fake,
+    )
+
+    result = tool.invoke("get_page", {"page_id": "page-1"}, ToolContext(chat_id="chat-1"))
+
+    assert result.ok is True
+    assert result.data["tables"][0]["columns"] == ["Company", "Stage", "Time", "面经", "progress"]
+    assert result.data["tables"][0]["rows"][0]["row_id"] == "row-chariot"
+    assert result.data["tables"][0]["rows"][0]["cells"][0] == "Chariot"
+    assert result.data["tables"][0]["rows"][0]["named_cells"]["Stage"] == "system design"
+    assert "Chariot | system design" in result.data["content_preview"]
+    controller_output = tool.controller_output("get_page", result)
+    assert controller_output["tables"][0]["rows"][0]["row_id"] == "row-chariot"
+    assert controller_output["tables"][0]["rows"][0]["cells"][4] == "5/8 10:30 am"
 
 
 def test_notion_create_page_shapes_parent_properties_and_children() -> None:
@@ -467,6 +551,88 @@ def test_notion_update_page_enforces_writable_parent_ids() -> None:
     assert fake.update_calls == []
 
 
+def test_notion_update_table_row_replaces_cells() -> None:
+    updated_block = {
+        "id": "row-chariot",
+        "type": "table_row",
+        "table_row": {
+            "cells": [
+                [{"plain_text": "Chariot"}],
+                [{"plain_text": "system design rescheduled"}],
+                [],
+                [],
+                [{"plain_text": "5/8 10:30 am"}],
+            ]
+        },
+    }
+    fake = FakeNotionClient(
+        blocks={
+            "row-chariot": {
+                "id": "row-chariot",
+                "type": "table_row",
+                "parent": {"type": "block_id", "block_id": "table-1"},
+            },
+            "table-1": {
+                "id": "table-1",
+                "type": "table",
+                "parent": {"type": "page_id", "page_id": "parent-1"},
+            },
+        },
+        updated_block=updated_block,
+    )
+    tool = NotionTool(
+        NotionConfig(enabled=True, api_token="secret-token", writable_parent_ids=("parent-1",)),
+        build_client=lambda config: fake,
+    )
+
+    result = tool.invoke(
+        "update_table_row",
+        {
+            "row_id": "row-chariot",
+            "cells": ["Chariot", "system design rescheduled", "", "", "5/8 10:30 am"],
+        },
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert result.ok is True
+    assert result.data["row_id"] == "row-chariot"
+    assert result.data["cells"][1] == "system design rescheduled"
+    assert fake.block_calls == ["row-chariot", "table-1"]
+    assert fake.update_block_calls[0]["row_id"] == "row-chariot"
+    assert fake.update_block_calls[0]["cells"][1][0]["text"]["content"] == "system design rescheduled"
+
+
+def test_notion_update_table_row_enforces_writable_parent_ids() -> None:
+    fake = FakeNotionClient(
+        blocks={
+            "row-chariot": {
+                "id": "row-chariot",
+                "type": "table_row",
+                "parent": {"type": "block_id", "block_id": "table-1"},
+            },
+            "table-1": {
+                "id": "table-1",
+                "type": "table",
+                "parent": {"type": "page_id", "page_id": "blocked-parent"},
+            },
+        }
+    )
+    tool = NotionTool(
+        NotionConfig(enabled=True, api_token="secret-token", writable_parent_ids=("allowed-parent",)),
+        build_client=lambda config: fake,
+    )
+
+    result = tool.invoke(
+        "update_table_row",
+        {"row_id": "row-chariot", "cells": ["Chariot", "system design rescheduled"]},
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert result.ok is False
+    assert "not allowed" in result.summary.lower()
+    assert fake.update_block_calls == []
+
+
 def test_notion_tool_describe_exposes_read_and_write_actions() -> None:
     tool = NotionTool(NotionConfig(enabled=True, api_token="secret-token"))
 
@@ -478,3 +644,4 @@ def test_notion_tool_describe_exposes_read_and_write_actions() -> None:
     assert description["actions"]["get_page"]["produces_artifacts"] == ["notion_page"]
     assert description["actions"]["create_page"]["produces_artifacts"] == ["notion_page"]
     assert description["actions"]["update_page"]["produces_artifacts"] == ["notion_page"]
+    assert description["actions"]["update_table_row"]["produces_artifacts"] == ["notion_table_row"]

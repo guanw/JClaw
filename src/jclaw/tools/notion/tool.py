@@ -134,6 +134,65 @@ def _block_text(block_data: dict[str, Any], field: str) -> str:
     return _plain_text(rich_text)
 
 
+def _normalize_table_row_cells(cells: Any) -> list[str]:
+    if not isinstance(cells, list):
+        return []
+    normalized: list[str] = []
+    for cell in cells:
+        normalized.append(_plain_text(cell))
+    return normalized
+
+
+def _normalize_table_row_block(
+    block: dict[str, Any],
+    *,
+    headers: list[str] | None = None,
+) -> dict[str, Any]:
+    row = block.get("table_row")
+    cells = _normalize_table_row_cells(row.get("cells")) if isinstance(row, dict) else []
+    normalized: dict[str, Any] = {
+        "row_id": str(block.get("id", "")).strip(),
+        "type": "table_row",
+        "cells": cells,
+    }
+    clean_headers = [str(item).strip() for item in headers or []]
+    if clean_headers:
+        named_cells: dict[str, str] = {}
+        for index, header in enumerate(clean_headers):
+            if not header:
+                continue
+            named_cells[header] = cells[index] if index < len(cells) else ""
+        normalized["named_cells"] = named_cells
+    return normalized
+
+
+def _normalize_table_block(block: dict[str, Any]) -> dict[str, Any]:
+    table = block.get("table")
+    table_data = table if isinstance(table, dict) else {}
+    raw_children = block.get("children")
+    child_rows = [item for item in raw_children if isinstance(item, dict) and item.get("type") == "table_row"] if isinstance(raw_children, list) else []
+    header_cells: list[str] = []
+    data_rows = child_rows
+    if child_rows and bool(table_data.get("has_column_header")):
+        header_row = child_rows[0].get("table_row")
+        header_cells = _normalize_table_row_cells(header_row.get("cells")) if isinstance(header_row, dict) else []
+        data_rows = child_rows[1:]
+    rows = [_normalize_table_row_block(item, headers=header_cells) for item in data_rows]
+    normalized: dict[str, Any] = {
+        "block_id": str(block.get("id", "")).strip(),
+        "type": "table",
+        "has_children": bool(block.get("has_children")),
+        "table_width": int(table_data.get("table_width", 0) or 0),
+        "has_column_header": bool(table_data.get("has_column_header")),
+        "has_row_header": bool(table_data.get("has_row_header")),
+        "row_count": len(rows),
+        "rows": rows,
+    }
+    if header_cells:
+        normalized["columns"] = header_cells
+    return normalized
+
+
 def _normalize_block(block: dict[str, Any]) -> dict[str, Any]:
     block_type = str(block.get("type", "")).strip()
     normalized: dict[str, Any] = {
@@ -157,6 +216,10 @@ def _normalize_block(block: dict[str, Any]) -> dict[str, Any]:
         else:
             normalized["text"] = ""
             normalized["checked"] = False
+    elif block_type == "table":
+        return _normalize_table_block(block)
+    elif block_type == "table_row":
+        return _normalize_table_row_block(block)
     else:
         normalized["unsupported"] = True
     return normalized
@@ -165,11 +228,43 @@ def _normalize_block(block: dict[str, Any]) -> dict[str, Any]:
 def _content_preview(blocks: list[dict[str, Any]], *, limit: int = 6) -> str:
     parts: list[str] = []
     for block in blocks[:limit]:
+        if block.get("type") == "table":
+            columns = block.get("columns")
+            if isinstance(columns, list) and columns:
+                parts.append(" | ".join(str(item) for item in columns))
+            rows = block.get("rows")
+            if isinstance(rows, list):
+                for row in rows[:3]:
+                    cells = row.get("cells")
+                    if isinstance(cells, list) and any(str(item).strip() for item in cells):
+                        parts.append(" | ".join(str(item) for item in cells))
+            continue
         text = str(block.get("text", "")).strip()
         if not text:
             continue
         parts.append(text)
     return "\n".join(parts)
+
+
+def _tables_for_controller(blocks: list[dict[str, Any]], *, table_limit: int = 3, row_limit: int = 12) -> list[dict[str, Any]]:
+    tables: list[dict[str, Any]] = []
+    for block in blocks:
+        if block.get("type") != "table":
+            continue
+        payload: dict[str, Any] = {
+            "table_id": str(block.get("block_id", "")).strip(),
+            "row_count": int(block.get("row_count", 0) or 0),
+        }
+        columns = block.get("columns")
+        if isinstance(columns, list) and columns:
+            payload["columns"] = list(columns)
+        rows = block.get("rows")
+        if isinstance(rows, list) and rows:
+            payload["rows"] = rows[:row_limit]
+        tables.append(payload)
+        if len(tables) >= table_limit:
+            break
+    return tables
 
 
 def _rich_text(text: Any) -> list[dict[str, Any]]:
@@ -377,6 +472,20 @@ def _build_markdown_content(content: Any) -> str:
     return str(content).strip()
 
 
+def _build_table_row_cells(cells: Any) -> list[list[dict[str, Any]]]:
+    if not isinstance(cells, list) or not cells:
+        raise ValueError("update_table_row requires a non-empty cells list.")
+    normalized: list[list[dict[str, Any]]] = []
+    for cell in cells:
+        if isinstance(cell, list):
+            if not all(isinstance(item, dict) for item in cell):
+                raise ValueError("update_table_row cells must contain plain strings or rich text arrays.")
+            normalized.append(list(cell))
+            continue
+        normalized.append(_rich_text(cell))
+    return normalized
+
+
 class NotionTool:
     name = "notion"
 
@@ -403,6 +512,7 @@ class NotionTool:
             "get_page": self._get_page_content,
             "create_page": self._create_page,
             "update_page": self._update_page,
+            "update_table_row": self._update_table_row,
         }
         handler = handlers.get(action)
         if handler is None:
@@ -437,6 +547,9 @@ class NotionTool:
             for field in ("page_id", "title", "block_count", "truncated", "content_preview"):
                 if field in data:
                     payload[field] = data.get(field)
+            tables = data.get("tables")
+            if isinstance(tables, list) and tables:
+                payload["tables"] = tables[:3]
             return payload
         if action == "create_page":
             payload = {}
@@ -496,6 +609,11 @@ class NotionTool:
                 lines.append("Updated properties:")
                 for key, value in list(properties.items())[:12]:
                     lines.append(f"- {key}: {value}")
+        elif action == "update_table_row":
+            cells = result.data.get("cells")
+            if isinstance(cells, list) and cells:
+                lines.append("Updated row:")
+                lines.append(" | ".join(str(item) for item in cells))
         return "\n".join(lines)
 
     def _search_pages(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -586,6 +704,7 @@ class NotionTool:
             "block_count": len(blocks),
             "truncated": truncated,
             "blocks": blocks,
+            "tables": _tables_for_controller(blocks, table_limit=10, row_limit=100),
             "content_preview": preview,
         }
         return ToolResult(
@@ -596,6 +715,7 @@ class NotionTool:
                 "block_count": len(blocks),
                 "truncated": truncated,
                 "blocks": blocks,
+                "tables": _tables_for_controller(blocks, table_limit=10, row_limit=100),
                 "content_preview": preview,
                 "artifacts": {
                     "notion_page:latest": artifact,
@@ -757,6 +877,57 @@ class NotionTool:
             },
         )
 
+    def _update_table_row(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        row_id = str(params.get("row_id", "")).strip()
+        if not row_id:
+            return ToolResult(ok=False, summary="update_table_row requires a row_id.", data={})
+        try:
+            cells = _build_table_row_cells(params.get("cells"))
+        except ValueError as exc:
+            return ToolResult(ok=False, summary=str(exc), data={"row_id": row_id})
+        try:
+            client = self._build_client(self.config)
+            row_block = client.get_block(row_id)
+        except (NotionDisabledError, NotionConfigError, NotionUnauthorizedError, NotionNotFoundError, NotionRateLimitedError, NotionError) as exc:
+            return ToolResult(ok=False, summary=str(exc), data={"row_id": row_id})
+
+        writable = tuple(str(item).strip() for item in self.config.writable_parent_ids if str(item).strip())
+        parent = row_block.get("parent") if isinstance(row_block, dict) else {}
+        parent_page_id = ""
+        if isinstance(parent, dict):
+            if str(parent.get("type", "")).strip() == "page_id":
+                parent_page_id = str(parent.get("page_id", "")).strip()
+            elif str(parent.get("type", "")).strip() == "block_id":
+                try:
+                    parent_block = client.get_block(str(parent.get("block_id", "")).strip())
+                except (NotionDisabledError, NotionConfigError, NotionUnauthorizedError, NotionNotFoundError, NotionRateLimitedError, NotionError) as exc:
+                    return ToolResult(ok=False, summary=str(exc), data={"row_id": row_id})
+                parent_parent = parent_block.get("parent") if isinstance(parent_block, dict) else {}
+                if isinstance(parent_parent, dict) and str(parent_parent.get("type", "")).strip() == "page_id":
+                    parent_page_id = str(parent_parent.get("page_id", "")).strip()
+        if writable and parent_page_id not in writable:
+            return ToolResult(
+                ok=False,
+                summary=f"Notion writes are not allowed under parent '{parent_page_id}'.",
+                data={"row_id": row_id, "parent_id": parent_page_id},
+            )
+        try:
+            updated = client.update_table_row(row_id, cells=cells)
+        except (NotionDisabledError, NotionConfigError, NotionUnauthorizedError, NotionNotFoundError, NotionRateLimitedError, NotionError) as exc:
+            return ToolResult(ok=False, summary=str(exc), data={"row_id": row_id})
+        normalized = _normalize_table_row_block(updated)
+        return ToolResult(
+            ok=True,
+            summary=f"Updated Notion table row '{row_id}'.",
+            data={
+                "row_id": normalized["row_id"],
+                "cells": normalized["cells"],
+                "artifacts": {
+                    "notion_table_row:latest": normalized,
+                },
+            },
+        )
+
     def _action_specs(self) -> dict[str, ActionSpec]:
         return {
             "search_pages": ActionSpec(
@@ -849,5 +1020,23 @@ class NotionTool:
                 },
                 writes=True,
                 produces_artifacts=("notion_page",),
+            ),
+            "update_table_row": ActionSpec(
+                tool=self.name,
+                action="update_table_row",
+                description="Update a specific Notion simple-table row by row id. `cells` should be the full row in plain-cell order; use get_page first to inspect table rows and row ids.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "row_id": {"type": "string"},
+                        "cells": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["row_id", "cells"],
+                },
+                writes=True,
+                produces_artifacts=("notion_table_row",),
             ),
         }

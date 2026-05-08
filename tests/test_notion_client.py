@@ -134,6 +134,57 @@ def test_notion_client_get_page_content_uses_block_children_endpoint() -> None:
     assert "page_size=12" in str(seen["query"])
 
 
+def test_notion_client_get_page_populates_table_children() -> None:
+    seen_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        if request.url.path == "/v1/blocks/page-1/children":
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "id": "table-1",
+                            "type": "table",
+                            "has_children": True,
+                            "table": {
+                                "table_width": 2,
+                                "has_column_header": True,
+                                "has_row_header": False,
+                            },
+                        }
+                    ],
+                    "has_more": False,
+                    "next_cursor": None,
+                },
+            )
+        if request.url.path == "/v1/blocks/table-1/children":
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "id": "row-1",
+                            "type": "table_row",
+                            "table_row": {"cells": [[{"plain_text": "Company"}], [{"plain_text": "Stage"}]]},
+                        }
+                    ],
+                    "has_more": False,
+                    "next_cursor": None,
+                },
+            )
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+    client = NotionClient("secret-token", http_client=httpx.Client(transport=transport))
+
+    payload = client.get_page("page-1", max_blocks=12)
+
+    assert seen_paths == ["/v1/blocks/page-1/children", "/v1/blocks/table-1/children"]
+    assert payload["results"][0]["children"][0]["id"] == "row-1"
+
+
 def test_notion_client_create_page_posts_expected_payload() -> None:
     seen: dict[str, object] = {}
 
@@ -209,3 +260,31 @@ def test_notion_client_update_page_markdown_patches_expected_payload() -> None:
     body = str(seen["body"]).replace(" ", "")
     assert '"type":"replace_content"' in body
     assert '"new_str":"haha"' in body
+
+
+def test_notion_client_update_table_row_patches_expected_payload() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["body"] = request.content.decode("utf-8")
+        return httpx.Response(200, json={"id": "row-1", "type": "table_row", "table_row": {"cells": []}})
+
+    transport = httpx.MockTransport(handler)
+    client = NotionClient("secret-token", http_client=httpx.Client(transport=transport))
+
+    payload = client.update_table_row(
+        "row-1",
+        cells=[
+            [{"type": "text", "text": {"content": "Chariot"}}],
+            [{"type": "text", "text": {"content": "system design rescheduled"}}],
+        ],
+    )
+
+    assert payload["id"] == "row-1"
+    assert seen["method"] == "PATCH"
+    assert seen["path"] == "/v1/blocks/row-1"
+    body = str(seen["body"]).replace(" ", "")
+    assert '"table_row":{"cells":' in body
+    assert '"content":"systemdesignrescheduled"' in body
