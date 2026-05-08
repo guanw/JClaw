@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import threading
 import time
 
+from jclaw.ai.tool_loop import RunInterruptedError
 from jclaw.channel.base import IncomingMessage
 from jclaw.channel.telegram import TelegramPollingConflictError
 from jclaw.core.db import Database
@@ -216,3 +218,52 @@ def test_handle_message_sends_and_updates_trace_message_when_enabled() -> None:
         "placeholder-2",
         "```text\nTrace [completed]\n1. Received a new user turn.\n```",
     )
+
+
+def test_dispatch_message_interrupts_active_chat_and_runs_latest_pending_message() -> None:
+    daemon = object.__new__(JClawDaemon)
+    daemon.config = SimpleNamespace(telegram=SimpleNamespace(allowed_chat_ids=()))
+    daemon.channel = FakeChannel([])
+    daemon.db = FakeDB()
+    daemon.THINKING_STATUS_INTERVAL_SECONDS = 0.01
+    daemon._chat_workers = {}
+    daemon._chat_workers_lock = threading.Lock()
+
+    class InterruptibleAgent:
+        def __init__(self) -> None:
+            self.interrupted = threading.Event()
+            self.started = threading.Event()
+            self.calls: list[str] = []
+
+        def request_interrupt(self, chat_id: str) -> bool:
+            _ = chat_id
+            self.interrupted.set()
+            return True
+
+        def handle_text(self, chat_id: str, text: str, user_name=None) -> str:  # noqa: ANN001
+            _ = chat_id, user_name
+            self.calls.append(text)
+            if text == "first":
+                self.started.set()
+                for _ in range(50):
+                    if self.interrupted.wait(0.01):
+                        raise RunInterruptedError("superseded")
+                return "first-reply"
+            return "second-reply"
+
+    daemon.agent = InterruptibleAgent()
+
+    daemon._dispatch_message("chat-1", "1", "Jude", "first")
+    assert daemon.agent.started.wait(timeout=1.0)
+    daemon._dispatch_message("chat-1", "2", "Jude", "second")
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        with daemon._chat_workers_lock:
+            if "chat-1" not in daemon._chat_workers:
+                break
+        time.sleep(0.01)
+
+    assert daemon.agent.calls == ["first", "second"]
+    assert ("chat-1", "placeholder-1", "Interrupted by a newer message.") in daemon.channel.edited_messages
+    assert ("chat-1", "placeholder-2", "second-reply") in daemon.channel.edited_messages

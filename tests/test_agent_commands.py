@@ -1,8 +1,11 @@
 import json
 from datetime import datetime
 from pathlib import Path
+import threading
+import time
 
 from jclaw.ai.agent import AssistantAgent
+from jclaw.ai.tool_loop import RunInterruptedError
 from jclaw.core.config import Config, DaemonConfig, MemoryConfig, ProviderConfig, TelegramConfig
 from jclaw.core.defaults import (
     AGENT_CONTINUE_TOOL_STEPS,
@@ -296,6 +299,38 @@ class FakeLongTool:
     def invoke(self, action: str, params: dict, ctx: ToolContext) -> ToolResult:
         self.invocations.append((action, dict(params)))
         return ToolResult(ok=True, summary=f"Completed {action}.", data={"phase": action})
+
+    def format_result(self, action: str, result: ToolResult) -> str:
+        return result.summary
+
+
+class BlockingInterruptTool:
+    name = "interruptible"
+
+    def __init__(self) -> None:
+        self.invocations: list[tuple[str, dict]] = []
+        self.step_started = threading.Event()
+        self.resume_step = threading.Event()
+
+    def describe(self) -> dict:
+        return {
+            "name": "interruptible",
+            "description": "Fake tool used to verify safe-boundary interruption.",
+            "actions": {
+                "step_one": {"description": "Blocking step one."},
+                "step_two": {"description": "Step two that should never run."},
+            },
+        }
+
+    def invoke(self, action: str, params: dict, ctx: ToolContext) -> ToolResult:
+        self.invocations.append((action, dict(params)))
+        if action == "step_one":
+            self.step_started.set()
+            self.resume_step.wait(timeout=1.0)
+            return ToolResult(ok=True, summary="Completed step_one.", data={"phase": "step_one"})
+        if action == "step_two":
+            return ToolResult(ok=True, summary="Completed step_two.", data={"phase": "step_two"})
+        raise AssertionError(f"unexpected action: {action}")
 
     def format_result(self, action: str, result: ToolResult) -> str:
         return result.summary
@@ -2111,6 +2146,71 @@ def test_workspace_tool_loop_continue_adds_more_budget_after_exhaustion(tmp_path
         "step_four",
         "step_five",
     ]
+    db.close()
+
+
+def test_interrupt_requested_stops_tool_loop_at_safe_boundary_and_records_context(tmp_path) -> None:
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"interruptible","action":"step_one","params":{},"reason":"Start work."}',
+                '{"type":"tool_call","tool":"interruptible","action":"step_two","params":{},"reason":"Continue work."}',
+            ]
+        ),
+    )
+    tool = BlockingInterruptTool()
+    agent.tools._tools["interruptible"] = tool  # noqa: SLF001
+
+    outcome: dict[str, object] = {}
+
+    def _run() -> None:
+        try:
+            agent.handle_text("chat-1", "do interruptible work")
+        except Exception as exc:  # noqa: BLE001
+            outcome["exception"] = exc
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    assert tool.step_started.wait(timeout=1.0)
+    assert agent.request_interrupt("chat-1") is True
+    tool.resume_step.set()
+    thread.join(timeout=1.0)
+
+    assert isinstance(outcome.get("exception"), RunInterruptedError)
+    assert [action for action, _ in tool.invocations] == ["step_one"]
+    interrupted = agent._current_interrupted_context("chat-1")  # noqa: SLF001
+    assert interrupted is not None
+    assert interrupted["request"] == "do interruptible work"
+    assert interrupted["latest_action"] == "step_one"
+    assert interrupted["step_count"] == 1
+    db.close()
+
+
+def test_superseded_paused_continuation_becomes_interrupted_context_for_next_turn(tmp_path) -> None:
+    llm = RecordingSequenceLLM(
+        [
+            '{"type":"tool_call","tool":"longtool","action":"step_one","params":{},"reason":"General step one."}',
+            '{"type":"tool_call","tool":"longtool","action":"step_two","params":{},"reason":"General step two."}',
+            '{"type":"tool_call","tool":"longtool","action":"step_three","params":{},"reason":"General step three."}',
+            '{"type":"tool_call","tool":"longtool","action":"step_four","params":{},"reason":"General step four."}',
+            '{"type":"tool_call","tool":"longtool","action":"step_five","params":{},"reason":"General step five."}',
+            '{"type":"answer","tool":"","action":"","params":{},"answer":"second-turn-answer","reason":"Use interrupted context and reply directly."}',
+        ]
+    )
+    agent, db = _build_agent_for_test(tmp_path, llm)
+    tool = FakeLongTool()
+    agent.tools._tools["longtool"] = tool  # noqa: SLF001
+
+    first_reply = agent.handle_text("chat-1", "do a long general task")
+    second_reply = agent.handle_text("chat-1", "ignore that and answer directly")
+
+    assert "Reply `continue`" in first_reply
+    assert second_reply == "second-turn-answer"
+    flattened = "\n".join(message["content"] for message in llm.calls[-1])
+    assert '"interrupted_run_context"' in flattened
+    assert "do a long general task" in flattened
+    assert agent.handle_text("chat-1", "continue") == "There is no paused tool run waiting for continuation."
     db.close()
 
 

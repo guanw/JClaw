@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
+import threading
+import uuid
 
 from jclaw.ai.client import OpenAICompatibleClient
 from jclaw.ai.commands import AgentCommandsMixin
 from jclaw.ai.controller import AgentControllerMixin
 from jclaw.ai.prompts import load_system_prompt
 from jclaw.ai.replying import AgentReplyingMixin
-from jclaw.ai.tool_loop import AgentToolLoopMixin, PendingToolLoopContinuation
+from jclaw.ai.tool_loop import AgentToolLoopMixin, PendingToolLoopContinuation, RunInterruptedError
 from jclaw.ai.tracing import AgentTracingMixin
 from jclaw.core.config import Config
 from jclaw.core.db import Database, MemoryRecord
@@ -44,6 +47,11 @@ class AssistantAgent(
         self._pending_tool_loop_continuations: dict[str, PendingToolLoopContinuation] = {}
         self._active_trace_ids: dict[str, str] = {}
         self._active_trace_statuses: dict[str, str] = {}
+        self._run_state_lock = threading.Lock()
+        self._active_run_ids: dict[str, str] = {}
+        self._interrupt_requested_run_ids: dict[str, str] = {}
+        self._pending_interrupted_contexts: dict[str, dict[str, object]] = {}
+        self._active_interrupted_contexts: dict[str, dict[str, object]] = {}
         self.tools = ToolRegistry()
         self.tools.register(MemoryTool(db, search_limit=config.memory.max_memory_items))
         self.tools.register(PermissionsTool(db))
@@ -117,6 +125,9 @@ class AssistantAgent(
             self.messages.store(chat_id, "assistant", command_reply)
             return command_reply
 
+        run_id = self._begin_run(chat_id)
+        if text.strip().lower() != "continue":
+            self._supersede_pending_tool_loop_continuation(chat_id)
         trace_id = self._start_execution_trace(chat_id, text)
         reply = ""
         try:
@@ -137,6 +148,22 @@ class AssistantAgent(
 
             messages = self._build_messages(chat_id, user_text=text, user_name=user_name)
             reply = self.llm.chat(messages)
+            if self._is_interrupt_requested(chat_id):
+                self._record_interrupted_run_context(
+                    chat_id,
+                    self._build_interrupted_run_context(
+                        request=text,
+                        summary="Interrupted because a newer user message superseded this run.",
+                    ),
+                )
+                self._append_execution_trace_event(
+                    chat_id,
+                    "turn_interrupted",
+                    "Interrupted because a newer user message superseded this run.",
+                    {"mode": "direct_llm"},
+                )
+                self._set_execution_trace_status(chat_id, "interrupted")
+                raise RunInterruptedError("Interrupted because a newer user message superseded this run.")
             self._append_execution_trace_event(
                 chat_id,
                 "turn_answered",
@@ -146,6 +173,8 @@ class AssistantAgent(
             self._set_execution_trace_status(chat_id, "answered")
             self.messages.store(chat_id, "assistant", reply)
             return reply
+        except RunInterruptedError:
+            raise
         except Exception as exc:  # noqa: BLE001
             self._append_execution_trace_event(
                 chat_id,
@@ -156,6 +185,7 @@ class AssistantAgent(
             self._set_execution_trace_status(chat_id, "failed")
             raise
         finally:
+            self._end_run(chat_id, run_id)
             if trace_id:
                 self._finish_execution_trace(chat_id, final_reply=reply)
 
@@ -182,6 +212,17 @@ class AssistantAgent(
         history = self.messages.recent(chat_id, self.config.memory.max_context_messages * 2)
         system = self._render_system_prompt(memories)
         messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+        interrupted_context = self._current_interrupted_context(chat_id)
+        if interrupted_context:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Interrupted in-flight context from the immediately previous superseded user turn:\n"
+                        f"{json.dumps(interrupted_context, ensure_ascii=True)}"
+                    ),
+                }
+            )
         for item in history:
             messages.append({"role": item.role, "content": item.content})
         if not persist_user_message:
@@ -194,3 +235,69 @@ class AssistantAgent(
             return self.system_prompt
         memory_lines = "\n".join(f"- {item.key}: {item.value}" for item in memories)
         return f"{self.system_prompt}\n\nRelevant memory:\n{memory_lines}"
+
+    def request_interrupt(self, chat_id: str) -> bool:
+        with self._run_state_lock:
+            run_id = self._active_run_ids.get(chat_id, "")
+            if not run_id:
+                return False
+            self._interrupt_requested_run_ids[chat_id] = run_id
+            return True
+
+    def _begin_run(self, chat_id: str) -> str:
+        run_id = f"run_{uuid.uuid4().hex[:12]}"
+        with self._run_state_lock:
+            self._active_run_ids[chat_id] = run_id
+            self._interrupt_requested_run_ids.pop(chat_id, None)
+            pending_context = self._pending_interrupted_contexts.pop(chat_id, None)
+            if pending_context is not None:
+                self._active_interrupted_contexts[chat_id] = pending_context
+            else:
+                self._active_interrupted_contexts.pop(chat_id, None)
+        return run_id
+
+    def _end_run(self, chat_id: str, run_id: str) -> None:
+        with self._run_state_lock:
+            if self._active_run_ids.get(chat_id) == run_id:
+                self._active_run_ids.pop(chat_id, None)
+                self._interrupt_requested_run_ids.pop(chat_id, None)
+            self._active_interrupted_contexts.pop(chat_id, None)
+
+    def _is_interrupt_requested(self, chat_id: str) -> bool:
+        with self._run_state_lock:
+            active_run_id = self._active_run_ids.get(chat_id, "")
+            requested_run_id = self._interrupt_requested_run_ids.get(chat_id, "")
+            return bool(active_run_id) and active_run_id == requested_run_id
+
+    def _record_interrupted_run_context(self, chat_id: str, context: dict[str, object]) -> None:
+        with self._run_state_lock:
+            self._pending_interrupted_contexts[chat_id] = dict(context)
+
+    def _current_interrupted_context(self, chat_id: str) -> dict[str, object] | None:
+        with self._run_state_lock:
+            active_context = self._active_interrupted_contexts.get(chat_id)
+            if active_context is not None:
+                return dict(active_context)
+            pending_context = self._pending_interrupted_contexts.get(chat_id)
+            return dict(pending_context) if pending_context is not None else None
+
+    def _build_interrupted_run_context(
+        self,
+        *,
+        request: str,
+        summary: str,
+        step_count: int = 0,
+        latest_tool: str = "",
+        latest_action: str = "",
+        latest_observation: dict[str, object] | None = None,
+        artifact_types: list[str] | None = None,
+    ) -> dict[str, object]:
+        return {
+            "request": request,
+            "step_count": int(step_count),
+            "summary": summary,
+            "latest_tool": latest_tool,
+            "latest_action": latest_action,
+            "latest_observation": dict(latest_observation or {}),
+            "artifact_types": list(artifact_types or []),
+        }

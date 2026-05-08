@@ -12,6 +12,10 @@ from jclaw.tools.base import Decision, DecisionType, Observation, RuntimeState, 
 LOGGER = logging.getLogger(__name__)
 
 
+class RunInterruptedError(RuntimeError):
+    """Raised when a newer user turn supersedes the current run."""
+
+
 @dataclass(slots=True)
 class PendingToolLoopContinuation:
     request: str
@@ -28,7 +32,6 @@ class PendingToolLoopContinuation:
 
 class AgentToolLoopMixin:
     def _handle_tool_request(self, chat_id: str, text: str, *, user_name: str) -> str | None:
-        self._pending_tool_loop_continuations.pop(chat_id, None)
         return self._run_tool_loop(chat_id, text, user_name=user_name)
 
     def _handle_tool_loop_continuation(self, chat_id: str, text: str, *, user_name: str) -> str | None:
@@ -134,6 +137,13 @@ class AgentToolLoopMixin:
         paused = False
         try:
             while len(steps) < step_budget:
+                self._interrupt_if_requested(
+                    chat_id,
+                    text,
+                    runtime=runtime,
+                    steps=steps,
+                    decision=decision,
+                )
                 step_budget = max(step_budget, self._tool_loop_step_budget(decision.tool))
                 signature = json.dumps(
                     {
@@ -245,6 +255,13 @@ class AgentToolLoopMixin:
                         steps=steps,
                     )
 
+                self._interrupt_if_requested(
+                    chat_id,
+                    text,
+                    runtime=runtime,
+                    steps=steps,
+                    decision=decision,
+                )
                 next_decision = self._decide_next_tool_step(
                     chat_id,
                     text,
@@ -354,6 +371,62 @@ class AgentToolLoopMixin:
                         )
                     except Exception:  # noqa: BLE001
                         LOGGER.exception("failed to run tool loop cleanup for %s", tool_name)
+
+    def _interrupt_if_requested(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        runtime: RuntimeState,
+        steps: list[dict[str, Any]],
+        decision: Decision,
+    ) -> None:
+        if not self._is_interrupt_requested(chat_id):
+            return
+        latest_tool = steps[-1]["tool"] if steps else decision.tool
+        latest_action = steps[-1]["action"] if steps else decision.action
+        self._append_execution_trace_event(
+            chat_id,
+            "turn_interrupted",
+            "Interrupted because a newer user message superseded this run.",
+            {
+                "latest_tool": latest_tool,
+                "latest_action": latest_action,
+                "step_count": len(steps),
+            },
+        )
+        self._set_execution_trace_status(chat_id, "interrupted")
+        self._record_interrupted_run_context(
+            chat_id,
+            self._build_interrupted_run_context(
+                request=text,
+                step_count=runtime.step_count,
+                summary="Interrupted because a newer user message superseded this run.",
+                latest_tool=latest_tool,
+                latest_action=latest_action,
+                latest_observation=runtime.last_observation.to_dict() if runtime.last_observation else {},
+                artifact_types=sorted(runtime.artifacts_by_type.keys()),
+            ),
+        )
+        raise RunInterruptedError("Interrupted because a newer user message superseded this run.")
+
+    def _supersede_pending_tool_loop_continuation(self, chat_id: str) -> None:
+        pending = self._pending_tool_loop_continuations.pop(chat_id, None)
+        if pending is None:
+            return
+        self._record_interrupted_run_context(
+            chat_id,
+            self._build_interrupted_run_context(
+                request=pending.request,
+                step_count=pending.runtime.step_count,
+                summary="Interrupted a paused tool run because a newer user message arrived.",
+                latest_tool=pending.decision.tool,
+                latest_action=pending.decision.action,
+                latest_observation=pending.runtime.last_observation.to_dict() if pending.runtime.last_observation else {},
+                artifact_types=sorted(pending.runtime.artifacts_by_type.keys()),
+            ),
+        )
+        self._mark_latest_paused_trace_interrupted(chat_id)
 
     def _apply_tool_loop_state(self, execution: ToolExecutionState, tool_name: str, result: ToolResult) -> None:
         loop_state = result.loop_state

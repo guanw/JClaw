@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import logging
+from dataclasses import dataclass
 import threading
 import time
 
 from jclaw.ai.agent import AssistantAgent
 from jclaw.ai.client import OpenAICompatibleClient
+from jclaw.ai.tool_loop import RunInterruptedError
 from jclaw.channel.telegram import TelegramBotChannel, TelegramPollingConflictError
 from jclaw.core.config import Config
 from jclaw.core.db import Database
@@ -14,6 +16,20 @@ from jclaw.core.scheduler import next_run_at, parse_schedule, to_utc_iso
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class QueuedChatMessage:
+    chat_id: str
+    message_id: str
+    sender_name: str
+    text: str
+
+
+@dataclass(slots=True)
+class ChatWorkerState:
+    thread: threading.Thread
+    pending_message: QueuedChatMessage | None = None
 
 
 class JClawDaemon:
@@ -34,6 +50,8 @@ class JClawDaemon:
         self.channel = TelegramBotChannel(config.telegram)
         self.agent = AssistantAgent(config, self.db, self.llm)
         self._running = True
+        self._chat_workers: dict[str, ChatWorkerState] = {}
+        self._chat_workers_lock = threading.Lock()
 
     def close(self) -> None:
         self.channel.close()
@@ -51,12 +69,7 @@ class JClawDaemon:
                     next_offset = offset
                     for item in messages:
                         next_offset = max(next_offset, item.update_id + 1)
-                        try:
-                            self._handle_message(item.chat_id, item.message_id, item.sender_name, item.text)
-                        except KeyboardInterrupt:
-                            raise
-                        except Exception:  # noqa: BLE001
-                            LOGGER.exception("message handling failed for update %s", item.update_id)
+                        self._dispatch_message(item.chat_id, item.message_id, item.sender_name, item.text)
                     if next_offset != offset:
                         self.db.set_telegram_offset(next_offset)
                     if not messages:
@@ -105,6 +118,16 @@ class JClawDaemon:
             indicator_thread.start()
         try:
             reply = self.agent.handle_text(chat_id, text, user_name=sender_name)
+        except RunInterruptedError:
+            if placeholder_id:
+                self.channel.edit_message(chat_id, placeholder_id, "Interrupted by a newer message.")
+            elif trace_placeholder_id:
+                self.channel.send_message(chat_id, "Interrupted by a newer message.", reply_to_message_id=message_id)
+            if trace_placeholder_id:
+                trace_text = self._render_trace_text(chat_id, latest=True)
+                if trace_text:
+                    self.channel.edit_message(chat_id, trace_placeholder_id, trace_text)
+            return
         finally:
             stop_indicator.set()
             if indicator_thread is not None:
@@ -117,6 +140,54 @@ class JClawDaemon:
             trace_text = self._render_trace_text(chat_id, latest=True)
             if trace_text:
                 self.channel.edit_message(chat_id, trace_placeholder_id, trace_text)
+
+    def _dispatch_message(self, chat_id: str, message_id: str, sender_name: str, text: str) -> None:
+        self._ensure_chat_worker_state()
+        queued = QueuedChatMessage(chat_id=chat_id, message_id=message_id, sender_name=sender_name, text=text)
+        with self._chat_workers_lock:
+            worker = self._chat_workers.get(chat_id)
+            if worker is not None and worker.thread.is_alive():
+                worker.pending_message = queued
+                self.agent.request_interrupt(chat_id)
+                return
+            thread = threading.Thread(
+                target=self._run_chat_worker,
+                args=(queued,),
+                daemon=True,
+            )
+            self._chat_workers[chat_id] = ChatWorkerState(thread=thread)
+            thread.start()
+
+    def _run_chat_worker(self, initial_message: QueuedChatMessage) -> None:
+        self._ensure_chat_worker_state()
+        current: QueuedChatMessage | None = initial_message
+        while current is not None:
+            try:
+                self._handle_message(
+                    current.chat_id,
+                    current.message_id,
+                    current.sender_name,
+                    current.text,
+                )
+            except KeyboardInterrupt:
+                raise
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("message handling failed for chat %s", current.chat_id)
+            with self._chat_workers_lock:
+                state = self._chat_workers.get(current.chat_id)
+                if state is None:
+                    current = None
+                    continue
+                current = state.pending_message
+                state.pending_message = None
+                if current is None:
+                    self._chat_workers.pop(initial_message.chat_id, None)
+
+    def _ensure_chat_worker_state(self) -> None:
+        if not hasattr(self, "_chat_workers"):
+            self._chat_workers = {}
+        if not hasattr(self, "_chat_workers_lock"):
+            self._chat_workers_lock = threading.Lock()
 
     def _thinking_status(self, message_id: str, text: str, *, step: int) -> str:
         seed = f"{message_id}:{text}"

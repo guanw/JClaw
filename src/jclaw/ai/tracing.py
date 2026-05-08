@@ -51,6 +51,16 @@ class AgentTracingMixin:
             return
         self.db.finish_execution_trace_session(trace_id, status=status, final_reply=final_reply)
 
+    def _mark_latest_paused_trace_interrupted(self, chat_id: str) -> None:
+        session = self.db.get_latest_execution_trace_session(chat_id, status="paused")
+        if session is None:
+            return
+        self.db.finish_execution_trace_session(
+            session.trace_id,
+            status="interrupted",
+            final_reply=session.final_reply,
+        )
+
     def render_running_trace(self, chat_id: str) -> str:
         session = self.db.get_latest_execution_trace_session(chat_id, status="running")
         if session is None:

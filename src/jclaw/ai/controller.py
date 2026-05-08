@@ -26,7 +26,7 @@ class AgentControllerMixin:
         if not available_tools:
             return None
 
-        controller_state = self._controller_state_for_prompt(steps, runtime)
+        controller_state = self._controller_state_for_prompt(steps, runtime, chat_id=chat_id)
         recent_history = [
             {"role": item.role, "content": item.content}
             for item in self.messages.recent(chat_id, 4)
@@ -105,6 +105,8 @@ class AgentControllerMixin:
         self,
         steps: list[dict[str, Any]],
         runtime: RuntimeState,
+        *,
+        chat_id: str = "",
     ) -> dict[str, Any]:
         now = self._controller_now()
         artifact_preview_limits = self._artifact_preview_limits()
@@ -142,6 +144,7 @@ class AgentControllerMixin:
             },
             "latest_observation": runtime.last_observation.to_dict() if runtime.last_observation else {},
             "observations": observations,
+            "interrupted_run_context": self._current_interrupted_context(chat_id) if chat_id else {},
         }
 
     def _preview_runtime_value(
