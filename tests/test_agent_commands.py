@@ -2406,6 +2406,46 @@ def test_controller_attempts_schema_repair_for_structured_but_invalid_response(t
     db.close()
 
 
+def test_controller_repairs_tool_action_not_in_catalog(tmp_path) -> None:
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"notion","action":"get_page_properties","params":{"page_id":"page-1"},"reason":"Inspect the page properties first."}',
+                '{"type":"tool_call","tool":"notion","action":"get_page_metadata","params":{"page_id":"page-1"},"reason":"Inspect the page metadata first."}',
+                '{"type":"complete","tool":"","action":"","params":{},"reason":"The latest tool result is enough to return."}',
+                "Final tool-based reply.",
+            ]
+        ),
+    )
+    notion = FakeTool()
+    notion.name = "notion"
+    notion.describe = lambda: {  # noqa: ARG005
+        "name": "notion",
+        "description": "Fake notion tool.",
+        "actions": {
+            "get_page_metadata": {"description": "Read page metadata."},
+        },
+    }
+    notion.invoke = lambda action, params, ctx: ToolResult(  # noqa: ARG005
+        ok=True,
+        summary="Loaded page metadata.",
+        data={"page_id": params.get("page_id"), "title": "2026 interview"},
+    )
+    notion.format_result = lambda action, result: result.summary  # noqa: ARG005
+    agent.tools._tools["notion"] = notion  # noqa: SLF001
+    db.set_trace_mode("chat-1", "summary")
+
+    reply = agent.handle_text("chat-1", "find the notion page metadata")
+
+    latest = db.get_latest_execution_trace_session("chat-1")
+    assert latest is not None
+    summaries = [event.summary for event in db.list_execution_trace_events(latest.trace_id)]
+    assert "Controller selected a tool action that is not in the exposed tool catalog; attempting one repair pass." in summaries
+    assert reply == "Final tool-based reply."
+    db.close()
+
+
 def test_compose_tool_reply_uses_latest_tool_result_not_stale_history(tmp_path) -> None:
     agent, db = _build_agent_for_test(tmp_path, FreshToolReplyLLM())
     agent.tools._tools["fake"] = FakeTool()  # noqa: SLF001

@@ -77,6 +77,7 @@ class AgentControllerMixin:
             chat_id=chat_id,
             text=text,
             controller_state=controller_state,
+            available_tools=available_tools,
         )
         if decision is None:
             return None
@@ -245,6 +246,7 @@ class AgentControllerMixin:
         *,
         text: str,
         controller_state: dict[str, Any],
+        available_tools: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
         if not str(raw).strip():
             return None
@@ -261,6 +263,7 @@ class AgentControllerMixin:
                             "If it requests clarification or says progress is blocked, use type=blocked.\n"
                             "If it says the operation is finished and the latest tool result should be returned, use type=complete.\n"
                             "Otherwise use type=tool_call.\n"
+                            "If type=tool_call, the tool and action must exactly match an entry in the provided tool catalog.\n"
                             "Return strict JSON only."
                         ),
                     },
@@ -270,6 +273,7 @@ class AgentControllerMixin:
                             {
                                 "request": text,
                                 "controller_state": controller_state,
+                                "tool_catalog": available_tools,
                                 "raw_controller_response": raw,
                             },
                             ensure_ascii=True,
@@ -289,6 +293,7 @@ class AgentControllerMixin:
         chat_id: str,
         text: str,
         controller_state: dict[str, Any],
+        available_tools: list[dict[str, Any]],
     ) -> Decision | None:
         parsed = self._parse_json_object(raw)
         if parsed is None:
@@ -302,6 +307,7 @@ class AgentControllerMixin:
                 raw,
                 text=text,
                 controller_state=controller_state,
+                available_tools=available_tools,
             )
             if repaired is None:
                 self._append_execution_trace_event(
@@ -315,7 +321,7 @@ class AgentControllerMixin:
 
         normalized = self._normalize_controller_response(parsed)
         try:
-            return Decision.from_dict(normalized)
+            decision = Decision.from_dict(normalized)
         except ValueError:
             self._append_execution_trace_event(
                 chat_id,
@@ -327,6 +333,7 @@ class AgentControllerMixin:
                 json.dumps(normalized, ensure_ascii=True),
                 text=text,
                 controller_state=controller_state,
+                available_tools=available_tools,
             )
             if repaired is None:
                 self._append_execution_trace_event(
@@ -338,7 +345,7 @@ class AgentControllerMixin:
                 return None
             normalized = self._normalize_controller_response(repaired)
             try:
-                return Decision.from_dict(normalized)
+                decision = Decision.from_dict(normalized)
             except ValueError:
                 self._append_execution_trace_event(
                     chat_id,
@@ -347,6 +354,63 @@ class AgentControllerMixin:
                     {"parsed_controller_response": normalized},
                 )
                 return None
+
+        if not self._decision_matches_tool_catalog(decision, available_tools):
+            self._append_execution_trace_event(
+                chat_id,
+                "controller_unusable",
+                "Controller selected a tool action that is not in the exposed tool catalog; attempting one repair pass.",
+                {"parsed_controller_response": decision.to_dict()},
+            )
+            repaired = self._repair_controller_response(
+                json.dumps(decision.to_dict(), ensure_ascii=True),
+                text=text,
+                controller_state=controller_state,
+                available_tools=available_tools,
+            )
+            if repaired is None:
+                self._append_execution_trace_event(
+                    chat_id,
+                    "controller_unusable",
+                    "Controller still did not return a usable catalog-valid tool decision after repair.",
+                    {"parsed_controller_response": decision.to_dict()},
+                )
+                return None
+            normalized = self._normalize_controller_response(repaired)
+            try:
+                decision = Decision.from_dict(normalized)
+            except ValueError:
+                self._append_execution_trace_event(
+                    chat_id,
+                    "controller_unusable",
+                    "Controller returned a repaired response, but it still did not match the required decision schema.",
+                    {"parsed_controller_response": normalized},
+                )
+                return None
+            if not self._decision_matches_tool_catalog(decision, available_tools):
+                self._append_execution_trace_event(
+                    chat_id,
+                    "controller_unusable",
+                    "Controller returned a repaired tool decision, but it still used a tool action outside the exposed catalog.",
+                    {"parsed_controller_response": decision.to_dict()},
+                )
+                return None
+
+        return decision
+
+    def _decision_matches_tool_catalog(
+        self,
+        decision: Decision,
+        available_tools: list[dict[str, Any]],
+    ) -> bool:
+        if decision.type is not DecisionType.TOOL_CALL:
+            return True
+        for tool in available_tools:
+            if str(tool.get("name", "")).strip() != decision.tool:
+                continue
+            actions = tool.get("actions")
+            return isinstance(actions, dict) and decision.action in actions
+        return False
 
     def _normalize_controller_response(self, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(payload)
