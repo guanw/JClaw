@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from jclaw.ai.retrospective import RetrospectiveCritique, RetrospectiveNextAction
 from jclaw.tools.base import (
     ActionSpec,
     Decision,
@@ -191,3 +192,65 @@ def test_runtime_state_append_updates_indexes() -> None:
     assert state.artifacts_by_type["message_ref"]["message_id"] == "msg-1"
     assert state.artifacts_by_id["message_ref:s2"]["thread_id"] == "thread-1"
     assert state.pending_confirmation is False
+
+
+def test_retrospective_critique_round_trips_generic_contract() -> None:
+    critique = RetrospectiveCritique.from_dict(
+        {
+            "ready_to_complete": False,
+            "issues": ["Verification was skipped.", "The final answer does not mention the failed check."],
+            "missing_verification": True,
+            "recommended_next_action": "tool_call",
+            "rationale": "Run another step to verify the latest change before stopping.",
+        }
+    )
+
+    assert critique.ready_to_complete is False
+    assert critique.issues == [
+        "Verification was skipped.",
+        "The final answer does not mention the failed check.",
+    ]
+    assert critique.missing_verification is True
+    assert critique.recommended_next_action is RetrospectiveNextAction.TOOL_CALL
+    assert critique.rationale == "Run another step to verify the latest change before stopping."
+    assert critique.to_dict() == {
+        "ready_to_complete": False,
+        "issues": [
+            "Verification was skipped.",
+            "The final answer does not mention the failed check.",
+        ],
+        "missing_verification": True,
+        "recommended_next_action": "tool_call",
+        "rationale": "Run another step to verify the latest change before stopping.",
+    }
+
+
+def test_retrospective_critique_rejects_invalid_payloads() -> None:
+    with pytest.raises(ValueError, match="ready_to_complete"):
+        RetrospectiveCritique.from_dict({"ready_to_complete": "yes", "recommended_next_action": "answer"})
+
+    with pytest.raises(ValueError, match="issues must be a list"):
+        RetrospectiveCritique.from_dict(
+            {
+                "ready_to_complete": True,
+                "issues": "none",
+                "recommended_next_action": "answer",
+            }
+        )
+
+    with pytest.raises(ValueError, match="missing_verification"):
+        RetrospectiveCritique.from_dict(
+            {
+                "ready_to_complete": True,
+                "missing_verification": "no",
+                "recommended_next_action": "answer",
+            }
+        )
+
+    with pytest.raises(ValueError, match="recommended_next_action"):
+        RetrospectiveCritique.from_dict(
+            {
+                "ready_to_complete": True,
+                "recommended_next_action": "complete",
+            }
+        )
