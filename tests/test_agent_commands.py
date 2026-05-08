@@ -2332,6 +2332,80 @@ def test_trace_records_controller_failure_before_direct_reply_fallback(tmp_path)
     db.close()
 
 
+def test_controller_accepts_structured_tool_call_without_explicit_type(tmp_path) -> None:
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                '{"tool":"notion","action":"search_pages","params":{"query":"2026 interview"},"answer":"","reason":"Find the page first."}',
+                '{"type":"complete","tool":"","action":"","params":{},"reason":"The latest tool result is enough to return."}',
+                "Final tool-based reply.",
+            ]
+        ),
+    )
+    notion = FakeTool()
+    notion.name = "notion"
+    notion.describe = lambda: {  # noqa: ARG005
+        "name": "notion",
+        "description": "Fake notion tool.",
+        "actions": {
+            "search_pages": {"description": "Search pages."},
+        },
+    }
+    notion.invoke = lambda action, params, ctx: ToolResult(  # noqa: ARG005
+        ok=True,
+        summary="Found 1 Notion page.",
+        data={"result_count": 1, "matches": [{"page_id": "page-1", "title": "2026 interview"}]},
+    )
+    notion.format_result = lambda action, result: result.summary  # noqa: ARG005
+    agent.tools._tools["notion"] = notion  # noqa: SLF001
+
+    reply = agent.handle_text("chat-1", "find the notion page and update it")
+
+    assert reply == "Final tool-based reply."
+    db.close()
+
+
+def test_controller_attempts_schema_repair_for_structured_but_invalid_response(tmp_path) -> None:
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                '{"type":"answer","tool":"notion","action":"search_pages","params":{"query":"2026 interview"},"answer":"","reason":"Find the page first."}',
+                '{"type":"tool_call","tool":"notion","action":"search_pages","params":{"query":"2026 interview"},"answer":"","reason":"Find the page first."}',
+                '{"type":"complete","tool":"","action":"","params":{},"reason":"The latest tool result is enough to return."}',
+                "Final tool-based reply.",
+            ]
+        ),
+    )
+    notion = FakeTool()
+    notion.name = "notion"
+    notion.describe = lambda: {  # noqa: ARG005
+        "name": "notion",
+        "description": "Fake notion tool.",
+        "actions": {
+            "search_pages": {"description": "Search pages."},
+        },
+    }
+    notion.invoke = lambda action, params, ctx: ToolResult(  # noqa: ARG005
+        ok=True,
+        summary="Found 1 Notion page.",
+        data={"result_count": 1},
+    )
+    notion.format_result = lambda action, result: result.summary  # noqa: ARG005
+    agent.tools._tools["notion"] = notion  # noqa: SLF001
+    db.set_trace_mode("chat-1", "summary")
+
+    reply = agent.handle_text("chat-1", "find the notion page and update it")
+
+    latest = db.get_latest_execution_trace_session("chat-1")
+    assert latest is not None
+    summaries = [event.summary for event in db.list_execution_trace_events(latest.trace_id)]
+    assert "Controller returned a structured response, but it did not match the required decision schema; attempting one repair pass." in summaries
+    assert reply == "Final tool-based reply."
+    db.close()
+
+
 def test_compose_tool_reply_uses_latest_tool_result_not_stale_history(tmp_path) -> None:
     agent, db = _build_agent_for_test(tmp_path, FreshToolReplyLLM())
     agent.tools._tools["fake"] = FakeTool()  # noqa: SLF001

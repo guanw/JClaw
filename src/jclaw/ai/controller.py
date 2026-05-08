@@ -72,36 +72,13 @@ class AgentControllerMixin:
             LOGGER.info("tool continuation raw response: %s", raw)
         else:
             LOGGER.info("tool initial controller raw response: %s", raw)
-        parsed = self._parse_json_object(raw)
-        if not parsed:
-            self._append_execution_trace_event(
-                chat_id,
-                "controller_unusable",
-                "Controller returned an unparseable tool decision; attempting one repair pass.",
-                {"raw_controller_response": str(raw)[:1000]},
-            )
-            parsed = self._repair_controller_response(
-                raw,
-                text=text,
-                controller_state=controller_state,
-            )
-            if not parsed:
-                self._append_execution_trace_event(
-                    chat_id,
-                    "controller_unusable",
-                    "Controller still did not return a usable structured tool decision after repair.",
-                    {"raw_controller_response": str(raw)[:1000]},
-                )
-                return None
-        try:
-            decision = Decision.from_dict(parsed)
-        except ValueError:
-            self._append_execution_trace_event(
-                chat_id,
-                "controller_unusable",
-                "Controller returned a structured response, but it did not match the required decision schema.",
-                {"parsed_controller_response": parsed},
-            )
+        decision = self._coerce_controller_decision(
+            raw,
+            chat_id=chat_id,
+            text=text,
+            controller_state=controller_state,
+        )
+        if decision is None:
             return None
         if controller_state["observations"]:
             LOGGER.info(
@@ -304,6 +281,111 @@ class AgentControllerMixin:
             return None
         LOGGER.info("tool controller repair raw response: %s", repaired)
         return self._parse_json_object(repaired)
+
+    def _coerce_controller_decision(
+        self,
+        raw: str,
+        *,
+        chat_id: str,
+        text: str,
+        controller_state: dict[str, Any],
+    ) -> Decision | None:
+        parsed = self._parse_json_object(raw)
+        if parsed is None:
+            self._append_execution_trace_event(
+                chat_id,
+                "controller_unusable",
+                "Controller returned an unparseable tool decision; attempting one repair pass.",
+                {"raw_controller_response": str(raw)[:1000]},
+            )
+            repaired = self._repair_controller_response(
+                raw,
+                text=text,
+                controller_state=controller_state,
+            )
+            if repaired is None:
+                self._append_execution_trace_event(
+                    chat_id,
+                    "controller_unusable",
+                    "Controller still did not return a usable structured tool decision after repair.",
+                    {"raw_controller_response": str(raw)[:1000]},
+                )
+                return None
+            parsed = repaired
+
+        normalized = self._normalize_controller_response(parsed)
+        try:
+            return Decision.from_dict(normalized)
+        except ValueError:
+            self._append_execution_trace_event(
+                chat_id,
+                "controller_unusable",
+                "Controller returned a structured response, but it did not match the required decision schema; attempting one repair pass.",
+                {"parsed_controller_response": normalized},
+            )
+            repaired = self._repair_controller_response(
+                json.dumps(normalized, ensure_ascii=True),
+                text=text,
+                controller_state=controller_state,
+            )
+            if repaired is None:
+                self._append_execution_trace_event(
+                    chat_id,
+                    "controller_unusable",
+                    "Controller still did not return a usable structured decision after schema repair.",
+                    {"parsed_controller_response": normalized},
+                )
+                return None
+            normalized = self._normalize_controller_response(repaired)
+            try:
+                return Decision.from_dict(normalized)
+            except ValueError:
+                self._append_execution_trace_event(
+                    chat_id,
+                    "controller_unusable",
+                    "Controller returned a structured response, but it still did not match the required decision schema after repair.",
+                    {"parsed_controller_response": normalized},
+                )
+                return None
+
+    def _normalize_controller_response(self, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload)
+        decision_type = str(normalized.get("type", "")).strip().lower()
+        tool = str(normalized.get("tool", "")).strip()
+        action = str(normalized.get("action", "")).strip()
+        answer = str(normalized.get("answer", "")).strip()
+        reason = str(normalized.get("reason", "")).strip()
+        params = normalized.get("params", {})
+
+        if not isinstance(params, dict):
+            params = {}
+        normalized["params"] = params
+
+        if not decision_type:
+            if tool and action:
+                decision_type = DecisionType.TOOL_CALL.value
+            elif answer:
+                decision_type = DecisionType.ANSWER.value
+            elif reason:
+                decision_type = DecisionType.BLOCKED.value
+            if decision_type:
+                normalized["type"] = decision_type
+
+        if str(normalized.get("type", "")).strip().lower() == DecisionType.TOOL_CALL.value:
+            normalized.setdefault("answer", "")
+        elif str(normalized.get("type", "")).strip().lower() == DecisionType.ANSWER.value:
+            normalized["tool"] = ""
+            normalized["action"] = ""
+            normalized["params"] = {}
+        elif str(normalized.get("type", "")).strip().lower() in {
+            DecisionType.BLOCKED.value,
+            DecisionType.COMPLETE.value,
+        }:
+            normalized["tool"] = ""
+            normalized["action"] = ""
+            normalized["params"] = {}
+
+        return normalized
 
     def _parse_json_object(self, text: str) -> dict[str, Any] | None:
         cleaned = text.strip()

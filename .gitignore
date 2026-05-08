@@ -10,3 +10,4 @@ build/
 **/.DS_Store
 plan/**
 client_secret_**.json
+.vscode/
