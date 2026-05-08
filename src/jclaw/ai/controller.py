@@ -74,16 +74,34 @@ class AgentControllerMixin:
             LOGGER.info("tool initial controller raw response: %s", raw)
         parsed = self._parse_json_object(raw)
         if not parsed:
+            self._append_execution_trace_event(
+                chat_id,
+                "controller_unusable",
+                "Controller returned an unparseable tool decision; attempting one repair pass.",
+                {"raw_controller_response": str(raw)[:1000]},
+            )
             parsed = self._repair_controller_response(
                 raw,
                 text=text,
                 controller_state=controller_state,
             )
             if not parsed:
+                self._append_execution_trace_event(
+                    chat_id,
+                    "controller_unusable",
+                    "Controller still did not return a usable structured tool decision after repair.",
+                    {"raw_controller_response": str(raw)[:1000]},
+                )
                 return None
         try:
             decision = Decision.from_dict(parsed)
         except ValueError:
+            self._append_execution_trace_event(
+                chat_id,
+                "controller_unusable",
+                "Controller returned a structured response, but it did not match the required decision schema.",
+                {"parsed_controller_response": parsed},
+            )
             return None
         if controller_state["observations"]:
             LOGGER.info(

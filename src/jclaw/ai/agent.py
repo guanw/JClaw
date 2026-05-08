@@ -146,6 +146,12 @@ class AssistantAgent(
                 reply = tool_reply
                 return tool_reply
 
+            self._append_execution_trace_event(
+                chat_id,
+                "tool_path_skipped",
+                "Tool selection did not produce a usable next step; falling back to a direct reply.",
+                {"mode": "tool_request_returned_none"},
+            )
             messages = self._build_messages(chat_id, user_text=text, user_name=user_name)
             reply = self.llm.chat(messages)
             if self._is_interrupt_requested(chat_id):

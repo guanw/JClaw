@@ -2306,6 +2306,32 @@ def test_execution_trace_records_controller_tool_and_completion_events(tmp_path)
     db.close()
 
 
+def test_trace_records_controller_failure_before_direct_reply_fallback(tmp_path) -> None:
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                "I will search Notion for that page next.",
+                "Still not valid JSON.",
+                "Direct fallback reply.",
+            ]
+        ),
+    )
+    db.set_trace_mode("chat-1", "summary")
+
+    reply = agent.handle_text("chat-1", "find the notion page and update it")
+
+    latest = db.get_latest_execution_trace_session("chat-1")
+    assert latest is not None
+    events = db.list_execution_trace_events(latest.trace_id)
+    summaries = [event.summary for event in events]
+    assert "Controller returned an unparseable tool decision; attempting one repair pass." in summaries
+    assert "Controller still did not return a usable structured tool decision after repair." in summaries
+    assert "Tool selection did not produce a usable next step; falling back to a direct reply." in summaries
+    assert reply == "Direct fallback reply."
+    db.close()
+
+
 def test_compose_tool_reply_uses_latest_tool_result_not_stale_history(tmp_path) -> None:
     agent, db = _build_agent_for_test(tmp_path, FreshToolReplyLLM())
     agent.tools._tools["fake"] = FakeTool()  # noqa: SLF001
