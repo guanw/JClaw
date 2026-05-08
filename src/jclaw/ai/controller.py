@@ -40,6 +40,8 @@ class AgentControllerMixin:
             "Use complete when the operational task is finished and the latest tool result should be returned to the user.\n"
             "The runtime state includes normalized observations and the current artifact frontier. Treat the latest observation as authoritative.\n"
             "The runtime state also includes the authoritative current local date, time, and timezone. Use that instead of guessing today's date or year.\n"
+            "If interrupted run context is present and it is relevant to the new request, reuse it rather than restarting from scratch.\n"
+            "When interrupted context includes resolved targets or recent observations, prefer reusing them when coherent with the new request.\n"
             "When a tool offers both a whole-resource read and a focused range read, prefer the focused range read whenever the user asks for explicit line numbers, a line range, or another clearly bounded subsection.\n"
             "Keep params minimal and choose only one next decision.\n"
             "Return strict JSON only.\n"

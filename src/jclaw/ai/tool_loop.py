@@ -385,28 +385,20 @@ class AgentToolLoopMixin:
             return
         latest_tool = steps[-1]["tool"] if steps else decision.tool
         latest_action = steps[-1]["action"] if steps else decision.action
-        self._append_execution_trace_event(
+        self._mark_run_interrupted(
             chat_id,
-            "turn_interrupted",
-            "Interrupted because a newer user message superseded this run.",
-            {
+            request=text,
+            step_count=runtime.step_count,
+            summary="Interrupted because a newer user message superseded this run.",
+            latest_tool=latest_tool,
+            latest_action=latest_action,
+            latest_observation=runtime.last_observation.to_dict() if runtime.last_observation else {},
+            artifact_types=sorted(runtime.artifacts_by_type.keys()),
+            trace_payload={
                 "latest_tool": latest_tool,
                 "latest_action": latest_action,
                 "step_count": len(steps),
             },
-        )
-        self._set_execution_trace_status(chat_id, "interrupted")
-        self._record_interrupted_run_context(
-            chat_id,
-            self._build_interrupted_run_context(
-                request=text,
-                step_count=runtime.step_count,
-                summary="Interrupted because a newer user message superseded this run.",
-                latest_tool=latest_tool,
-                latest_action=latest_action,
-                latest_observation=runtime.last_observation.to_dict() if runtime.last_observation else {},
-                artifact_types=sorted(runtime.artifacts_by_type.keys()),
-            ),
         )
         raise RunInterruptedError("Interrupted because a newer user message superseded this run.")
 

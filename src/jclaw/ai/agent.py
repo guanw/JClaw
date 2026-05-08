@@ -149,20 +149,12 @@ class AssistantAgent(
             messages = self._build_messages(chat_id, user_text=text, user_name=user_name)
             reply = self.llm.chat(messages)
             if self._is_interrupt_requested(chat_id):
-                self._record_interrupted_run_context(
+                self._mark_run_interrupted(
                     chat_id,
-                    self._build_interrupted_run_context(
-                        request=text,
-                        summary="Interrupted because a newer user message superseded this run.",
-                    ),
+                    request=text,
+                    summary="Interrupted because a newer user message superseded this run.",
+                    trace_payload={"mode": "direct_llm"},
                 )
-                self._append_execution_trace_event(
-                    chat_id,
-                    "turn_interrupted",
-                    "Interrupted because a newer user message superseded this run.",
-                    {"mode": "direct_llm"},
-                )
-                self._set_execution_trace_status(chat_id, "interrupted")
                 raise RunInterruptedError("Interrupted because a newer user message superseded this run.")
             self._append_execution_trace_event(
                 chat_id,
@@ -219,7 +211,9 @@ class AssistantAgent(
                     "role": "system",
                     "content": (
                         "Interrupted in-flight context from the immediately previous superseded user turn:\n"
-                        f"{json.dumps(interrupted_context, ensure_ascii=True)}"
+                        f"{json.dumps(interrupted_context, ensure_ascii=True)}\n"
+                        "Use this only if it is relevant to the new request. If the new request appears to refine or revise the interrupted one, "
+                        "prefer reusing the interrupted context rather than treating it as an unrelated task."
                     ),
                 }
             )
@@ -300,4 +294,38 @@ class AssistantAgent(
             "latest_action": latest_action,
             "latest_observation": dict(latest_observation or {}),
             "artifact_types": list(artifact_types or []),
+            "latest_observation_summary": str((latest_observation or {}).get("summary", "")),
         }
+
+    def _mark_run_interrupted(
+        self,
+        chat_id: str,
+        *,
+        request: str,
+        summary: str,
+        step_count: int = 0,
+        latest_tool: str = "",
+        latest_action: str = "",
+        latest_observation: dict[str, object] | None = None,
+        artifact_types: list[str] | None = None,
+        trace_payload: dict[str, object] | None = None,
+    ) -> None:
+        self._append_execution_trace_event(
+            chat_id,
+            "turn_interrupted",
+            summary,
+            dict(trace_payload or {}),
+        )
+        self._set_execution_trace_status(chat_id, "interrupted")
+        self._record_interrupted_run_context(
+            chat_id,
+            self._build_interrupted_run_context(
+                request=request,
+                step_count=step_count,
+                summary=summary,
+                latest_tool=latest_tool,
+                latest_action=latest_action,
+                latest_observation=latest_observation,
+                artifact_types=artifact_types,
+            ),
+        )

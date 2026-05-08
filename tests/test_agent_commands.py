@@ -2214,6 +2214,62 @@ def test_superseded_paused_continuation_becomes_interrupted_context_for_next_tur
     db.close()
 
 
+def test_interrupted_followup_context_is_exposed_in_messages_without_hardcoded_relation(tmp_path) -> None:
+    agent, db = _build_agent_for_test(tmp_path, DummyLLM())
+    agent._record_interrupted_run_context(  # noqa: SLF001
+        "chat-1",
+        agent._build_interrupted_run_context(  # noqa: SLF001
+            request='update notion page jude test content to be "first version"',
+            step_count=1,
+            summary="Interrupted after resolving the target page.",
+            latest_tool="notion",
+            latest_action="search_pages",
+            latest_observation={"summary": "Found 1 Notion page for jude test."},
+            artifact_types=["notion_search_results"],
+        ),
+    )
+    agent._begin_run("chat-1")  # noqa: SLF001
+
+    messages = agent._build_messages(  # noqa: SLF001
+        "chat-1",
+        user_text='actually make it "second version"',
+        user_name="Jude",
+    )
+
+    flattened = "\n".join(message["content"] for message in messages)
+    assert '"request": "update notion page jude test content to be \\"first version\\""' in flattened
+    assert '"latest_action": "search_pages"' in flattened
+    assert "If the new request appears to refine or revise the interrupted one" in flattened
+    db.close()
+
+
+def test_controller_state_exposes_generic_interrupted_context(tmp_path) -> None:
+    agent, db = _build_agent_for_test(tmp_path, DummyLLM())
+    agent._record_interrupted_run_context(  # noqa: SLF001
+        "chat-1",
+        agent._build_interrupted_run_context(  # noqa: SLF001
+            request="find the browser tool comment and update it",
+            step_count=2,
+            summary="Interrupted after reading the target snippet.",
+            latest_tool="workspace",
+            latest_action="read_snippet",
+            latest_observation={"summary": "Read lines 128-138 from /repo/browser/tool.py."},
+            artifact_types=["workspace_read"],
+        ),
+    )
+    agent._begin_run("chat-1")  # noqa: SLF001
+
+    state = agent._controller_state_for_prompt(  # noqa: SLF001
+        [],
+        RuntimeState(request='actually just tell me if the comment already exists'),
+        chat_id="chat-1",
+    )
+
+    assert state["interrupted_run_context"]["latest_action"] == "read_snippet"
+    assert state["interrupted_run_context"]["request"] == "find the browser tool comment and update it"
+    db.close()
+
+
 def test_execution_trace_records_controller_tool_and_completion_events(tmp_path) -> None:
     agent, db = _build_agent_for_test(
         tmp_path,
