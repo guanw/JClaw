@@ -32,7 +32,7 @@ from jclaw.core.defaults import (
     WORKSPACE_SHELL_TIMEOUT_SECONDS,
 )
 from jclaw.core.db import Database
-from jclaw.tools.base import Observation, RuntimeState, ToolContext, ToolExecutionState, ToolLoopFinalizer, ToolLoopState, ToolResult
+from jclaw.tools.base import DecisionType, Observation, RuntimeState, ToolContext, ToolExecutionState, ToolLoopFinalizer, ToolLoopState, ToolResult
 from jclaw.tools.email.tool import EmailTool
 
 
@@ -2443,6 +2443,58 @@ def test_controller_repairs_tool_action_not_in_catalog(tmp_path) -> None:
     summaries = [event.summary for event in db.list_execution_trace_events(latest.trace_id)]
     assert "Controller selected a tool action that is not in the exposed tool catalog; attempting one repair pass." in summaries
     assert reply == "Final tool-based reply."
+    db.close()
+
+
+def test_retrospective_gate_skips_trivial_completion(tmp_path) -> None:  # noqa: ANN001
+    agent, db = _build_agent_for_test(tmp_path, DummyLLM())
+    runtime = RuntimeState(request="what tools do you have")
+
+    should_run = agent._should_run_retrospective_critique(  # noqa: SLF001
+        decision_type=DecisionType.ANSWER,
+        runtime=runtime,
+        steps=[],
+    )
+
+    assert should_run is False
+    db.close()
+
+
+def test_retrospective_gate_runs_for_multi_step_runtime(tmp_path) -> None:  # noqa: ANN001
+    agent, db = _build_agent_for_test(tmp_path, DummyLLM())
+    runtime = RuntimeState(request="update a notion page")
+    runtime.append(Observation(ok=True, summary="Found a page."))
+    runtime.append(Observation(ok=True, summary="Loaded page content."))
+
+    should_run = agent._should_run_retrospective_critique(  # noqa: SLF001
+        decision_type=DecisionType.COMPLETE,
+        runtime=runtime,
+        steps=[{"tool": "notion"}, {"tool": "notion"}],
+    )
+
+    assert should_run is True
+    db.close()
+
+
+def test_retrospective_gate_runs_for_failed_or_confirmation_observations(tmp_path) -> None:  # noqa: ANN001
+    agent, db = _build_agent_for_test(tmp_path, DummyLLM())
+
+    failed_runtime = RuntimeState(request="do a risky update")
+    failed_runtime.append(Observation(ok=False, summary="Latest check failed."))
+    assert agent._should_run_retrospective_critique(  # noqa: SLF001
+        decision_type=DecisionType.ANSWER,
+        runtime=failed_runtime,
+        steps=[{"tool": "workspace"}],
+    )
+
+    confirm_runtime = RuntimeState(request="draft an email")
+    confirm_runtime.append(Observation(ok=True, summary="Draft is ready.", needs_confirmation=True))
+    assert agent._should_run_retrospective_critique(  # noqa: SLF001
+        decision_type=DecisionType.ANSWER,
+        runtime=confirm_runtime,
+        steps=[{"tool": "email"}],
+    )
+
     db.close()
 
 

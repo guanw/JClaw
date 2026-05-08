@@ -16,7 +16,7 @@ from jclaw.ai.tracing import AgentTracingMixin
 from jclaw.core.config import Config
 from jclaw.core.db import Database, MemoryRecord
 from jclaw.tools.automation.tool import AutomationTool
-from jclaw.tools.base import ToolExecutionState
+from jclaw.tools.base import DecisionType, RuntimeState, ToolExecutionState
 from jclaw.tools.browser.tool import BrowserTool
 from jclaw.tools.email.tool import EmailTool
 from jclaw.tools.knowledge.tool import KnowledgeTool
@@ -235,6 +235,34 @@ class AssistantAgent(
             return self.system_prompt
         memory_lines = "\n".join(f"- {item.key}: {item.value}" for item in memories)
         return f"{self.system_prompt}\n\nRelevant memory:\n{memory_lines}"
+
+    def _should_run_retrospective_critique(
+        self,
+        *,
+        decision_type: DecisionType,
+        runtime: RuntimeState,
+        steps: list[dict[str, object]] | None = None,
+    ) -> bool:
+        if decision_type not in {DecisionType.ANSWER, DecisionType.COMPLETE}:
+            return False
+        if runtime.step_count >= 5:
+            return True
+        if len(runtime.observations) >= 2:
+            return True
+        if any(not observation.ok for observation in runtime.observations):
+            return True
+        if any(observation.needs_confirmation for observation in runtime.observations):
+            return True
+        if len(runtime.artifacts_by_type) >= 2:
+            return True
+        if isinstance(steps, list) and len(steps) >= 2:
+            return True
+        if isinstance(steps, list):
+            for step in steps:
+                tool_name = str(step.get("tool", "")).strip()
+                if tool_name in {"workspace", "notion", "browser", "email", "automation"}:
+                    return True
+        return False
 
     def request_interrupt(self, chat_id: str) -> bool:
         with self._run_state_lock:
