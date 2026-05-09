@@ -47,6 +47,7 @@ from jclaw.core.defaults import (
     WORKSPACE_MAX_STEPS,
     WORKSPACE_SHELL_TIMEOUT_SECONDS,
 )
+from jclaw.core.environment import environment_catalog_path
 
 
 def repo_root() -> Path:
@@ -148,6 +149,7 @@ class TelegramConfig:
 class DaemonConfig:
     state_dir: Path = field(default_factory=default_state_dir)
     db_path: Path = field(default_factory=lambda: default_state_dir() / "jclaw.db")
+    environment_path: Path = field(default_factory=lambda: environment_catalog_path(default_state_dir()))
     stdout_log: Path = field(default_factory=lambda: default_log_dir() / "stdout.log")
     stderr_log: Path = field(default_factory=lambda: default_log_dir() / "stderr.log")
     launchd_label: str = DAEMON_LAUNCHD_LABEL
@@ -244,6 +246,7 @@ class Config:
     def ensure_runtime_dirs(self) -> None:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self.daemon.state_dir.mkdir(parents=True, exist_ok=True)
+        self.daemon.environment_path.parent.mkdir(parents=True, exist_ok=True)
         self.daemon.stdout_log.parent.mkdir(parents=True, exist_ok=True)
 
 
@@ -272,6 +275,7 @@ allowed_chat_ids = []
 [daemon]
 state_dir = "{state_dir}"
 db_path = "{state_dir / "jclaw.db"}"
+environment_path = "{environment_catalog_path(state_dir)}"
 stdout_log = "{default_log_dir() / "stdout.log"}"
 stderr_log = "{default_log_dir() / "stderr.log"}"
 launchd_label = "{DAEMON_LAUNCHD_LABEL}"
@@ -362,6 +366,7 @@ def load_config(path: str | Path | None = None) -> Config:
     daemon = DaemonConfig(
         state_dir=_expand_path(daemon_data.get("state_dir"), default_state_dir()),
         db_path=_expand_path(daemon_data.get("db_path"), default_state_dir() / "jclaw.db"),
+        environment_path=_expand_path(daemon_data.get("environment_path"), environment_catalog_path(default_state_dir())),
         stdout_log=_expand_path(daemon_data.get("stdout_log"), default_log_dir() / "stdout.log"),
         stderr_log=_expand_path(daemon_data.get("stderr_log"), default_log_dir() / "stderr.log"),
         launchd_label=str(daemon_data.get("launchd_label", DAEMON_LAUNCHD_LABEL)),

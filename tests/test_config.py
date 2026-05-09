@@ -1,6 +1,5 @@
-from pathlib import Path
-
 from jclaw.core.config import load_config
+from jclaw.core.environment import environment_catalog_path
 
 
 def test_load_config_allows_email_disabled_without_oauth_client(tmp_path) -> None:
@@ -110,3 +109,12 @@ writable_parent_ids = ["page-123", "db-456"]
     assert config.notion.api_token == "secret-token"
     assert config.notion.default_parent_id == "page-123"
     assert config.notion.writable_parent_ids == ("page-123", "db-456")
+
+
+def test_load_config_uses_default_environment_catalog_path(tmp_path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("", encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.daemon.environment_path == environment_catalog_path(config.daemon.state_dir)
