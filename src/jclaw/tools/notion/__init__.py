@@ -16,6 +16,6 @@ __all__ = [
     "NotionError",
     "NotionNotFoundError",
     "NotionRateLimitedError",
-    "NotionUnauthorizedError",
     "NotionTool",
+    "NotionUnauthorizedError",
 ]

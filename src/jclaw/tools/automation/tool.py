@@ -5,7 +5,14 @@ from typing import Any
 
 from jclaw.core.db import CronJobRecord, Database
 from jclaw.core.scheduler import next_run_at, parse_schedule_input, to_utc_iso
-from jclaw.tools.base import ActionSpec, RuntimeState, ToolContext, ToolResult, append_list_section, build_tool_description
+from jclaw.tools.base import (
+    ActionSpec,
+    RuntimeState,
+    ToolContext,
+    ToolResult,
+    append_list_section,
+    build_tool_description,
+)
 
 
 class AutomationTool:

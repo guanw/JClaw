@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import shlex
 import subprocess
+from pathlib import Path
 
 from jclaw.core.defaults import (
     WORKSPACE_ALLOWED_SHELL_BINARIES,
@@ -104,7 +104,7 @@ class WorkspaceShellMixin:
         result: dict[str, str]
         try:
             result = self._run_command(shlex.split(command), cwd=cwd, timeout=self.shell_timeout_seconds)
-        except Exception:  # noqa: BLE001
+        except Exception:
             self.db.update_approval_request_status(request.request_id, "failed")
             raise
         self.db.update_approval_request_status(request.request_id, "applied")

@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import html
 import json
+import re
+from collections.abc import Callable
 from email.utils import getaddresses
 from pathlib import Path
-import re
-from typing import Any, Callable
+from typing import Any
 
 from jclaw.core.db import Database, EmailAccountRecord
 from jclaw.tools.base import ActionSpec, RuntimeState, ToolContext, ToolResult, build_tool_description
 from jclaw.tools.email.auth import ConnectedEmailAccount, GmailOAuthManager
 from jclaw.tools.email.gmail_client import GmailClient
-
 
 GMAIL_READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose"

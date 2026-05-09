@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-from datetime import datetime, timezone
 import json
 import sqlite3
+from collections.abc import Iterable
+from datetime import UTC, datetime
 
 from jclaw.core.records import WorkspaceChangeRecord
 from jclaw.core.time import utc_now
@@ -107,7 +107,7 @@ class WorkspaceChangeStore:
         )
         if max_age_seconds is not None:
             created = datetime.fromisoformat(record.created_at)
-            age_seconds = (datetime.now(timezone.utc) - created).total_seconds()
+            age_seconds = (datetime.now(UTC) - created).total_seconds()
             if age_seconds > max_age_seconds:
                 return None
         return record
@@ -120,7 +120,7 @@ class WorkspaceChangeStore:
         self._connection.commit()
 
     def prune_changes(self, chat_id: str, *, keep_latest: int, max_age_seconds: int) -> None:
-        cutoff = datetime.now(timezone.utc).timestamp() - max_age_seconds
+        cutoff = datetime.now(UTC).timestamp() - max_age_seconds
         rows = self._connection.execute(
             """
             SELECT id, created_at
@@ -140,7 +140,7 @@ class WorkspaceChangeStore:
             placeholders = ", ".join("?" for _ in keep_ids)
             params: tuple[object, ...] = (chat_id, *keep_ids)
             self._connection.execute(
-                f"DELETE FROM workspace_changes WHERE chat_id = ? AND id NOT IN ({placeholders})",  # noqa: S608
+                f"DELETE FROM workspace_changes WHERE chat_id = ? AND id NOT IN ({placeholders})",
                 params,
             )
         else:

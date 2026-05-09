@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 import json
 import sqlite3
+from collections.abc import Iterable
 
 from jclaw.core.records import EmailAccountRecord
 from jclaw.core.time import utc_now

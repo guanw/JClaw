@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 
@@ -111,7 +111,7 @@ def next_run_at(spec: ScheduleSpec, *, from_dt: datetime | None = None) -> datet
 
 
 def to_utc_iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat()
+    return dt.astimezone(UTC).isoformat()
 
 
 def _parse_structured_when(payload: dict[str, Any]) -> ScheduleSpec:

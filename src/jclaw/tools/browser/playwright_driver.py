@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
 import hashlib
 import re
+from pathlib import Path
+from typing import Any
 
-from playwright.sync_api import BrowserContext, Error, Page, Playwright, TimeoutError, sync_playwright
+from playwright.sync_api import BrowserContext, Page, Playwright, sync_playwright
 
 from jclaw.core.defaults import BROWSER_SLOW_MO_MS, BROWSER_VIEWPORT_HEIGHT, BROWSER_VIEWPORT_WIDTH
 from jclaw.tools.browser.models import Target

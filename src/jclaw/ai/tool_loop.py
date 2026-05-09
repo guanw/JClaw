@@ -1,13 +1,20 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from jclaw.core.defaults import AGENT_CONTINUE_TOOL_STEPS, AGENT_MAX_TOOL_STEPS, WORKSPACE_CONTINUE_TOOL_STEPS
-from jclaw.tools.base import Decision, DecisionType, Observation, RuntimeState, ToolContext, ToolExecutionState, ToolResult
-
+from jclaw.tools.base import (
+    Decision,
+    DecisionType,
+    Observation,
+    RuntimeState,
+    ToolContext,
+    ToolExecutionState,
+    ToolResult,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -259,7 +266,7 @@ class AgentToolLoopMixin:
                         ),
                     )
                     self._apply_tool_loop_state(execution, decision.tool, result)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     LOGGER.exception(
                         "tool step failed tool=%s action=%s",
                         decision.tool,
@@ -493,7 +500,7 @@ class AgentToolLoopMixin:
                             dict(finalizer.params),
                             ToolContext(chat_id=chat_id, user_id=user_name),
                         )
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         LOGGER.exception("failed to run tool loop cleanup for %s", tool_name)
 
     def _interrupt_if_requested(
@@ -566,7 +573,7 @@ class AgentToolLoopMixin:
             return None
         try:
             payload = controller_output(action, result)
-        except Exception:  # noqa: BLE001
+        except Exception:
             LOGGER.exception("tool controller_output failed tool=%s action=%s", tool_name, action)
             return None
         return dict(payload) if isinstance(payload, dict) else None

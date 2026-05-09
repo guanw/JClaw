@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import base64
 from email.message import EmailMessage
 from typing import Any
-import base64
 
 from jclaw.tools.email.auth import GmailOAuthManager
 
@@ -134,4 +134,4 @@ class GmailClient:
 
     def _service(self, alias: str, scopes: tuple[str, ...]) -> Any:
         creds = self.auth.load_credentials(alias, scopes)
-        return self.auth._build_service(creds)  # noqa: SLF001
+        return self.auth._build_service(creds)

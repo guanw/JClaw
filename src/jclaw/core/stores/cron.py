@@ -114,7 +114,7 @@ class CronStore:
             return 0
         params.extend([chat_id, job_id])
         cursor = self._connection.execute(
-            f"UPDATE cron_jobs SET {', '.join(updates)} WHERE chat_id = ? AND id = ?",  # noqa: S608
+            f"UPDATE cron_jobs SET {', '.join(updates)} WHERE chat_id = ? AND id = ?",
             tuple(params),
         )
         self._connection.commit()

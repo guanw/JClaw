@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
-import sqlite3
 
 from jclaw.ai.agent import AssistantAgent
 from jclaw.ai.client import OpenAICompatibleClient

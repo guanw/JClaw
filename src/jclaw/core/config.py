@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from copy import deepcopy
-from pathlib import Path
 import os
 import tomllib
+from copy import deepcopy
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from jclaw.core.defaults import (
     APP_NAME,
@@ -39,8 +39,8 @@ from jclaw.core.defaults import (
     PROVIDER_TIMEOUT_SECONDS,
     TELEGRAM_BASE_URL,
     TELEGRAM_POLL_TIMEOUT_SECONDS,
-    WORKSPACE_ENABLED,
     WORKSPACE_AGENT_MAX_TOOL_STEPS,
+    WORKSPACE_ENABLED,
     WORKSPACE_MAX_FILES_PER_CHANGE,
     WORKSPACE_MAX_INTERNAL_READ_BYTES,
     WORKSPACE_MAX_PATH_ENTRIES,

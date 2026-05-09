@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-import re
-from typing import Any, Callable
+from typing import Any
 
 from jclaw.core.defaults import (
     BROWSER_CHANNEL,
@@ -33,6 +33,7 @@ from jclaw.tools.browser.observations import BrowserObservationsMixin
 from jclaw.tools.browser.playwright_driver import PlaywrightBrowserDriver
 from jclaw.tools.browser.reasoning import BrowserReasoningMixin, LLMBrowserReasoner
 from jclaw.tools.browser.session import BrowserSessionStore
+
 
 class BrowserTool(
     BrowserNavigationMixin,
@@ -210,7 +211,7 @@ class BrowserTool(
         self._trace_event("invoke_start", ctx=ctx, action=action, params=params)
         try:
             result = handler(params, ctx)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._trace_event("invoke_error", ctx=ctx, action=action, params=params, error=str(exc))
             raise
         self._trace_event(
@@ -274,7 +275,7 @@ class BrowserTool(
         error: str | None = None,
     ) -> None:
         payload = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "event": event,
             "chat_id": ctx.chat_id,
             "user_id": ctx.user_id,

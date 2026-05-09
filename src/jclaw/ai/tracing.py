@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-
 MAX_RENDERED_TRACE_EVENTS = 18
 
 

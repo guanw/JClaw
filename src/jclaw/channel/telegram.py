@@ -9,7 +9,6 @@ import httpx
 from jclaw.channel.base import IncomingMessage
 from jclaw.core.config import TelegramConfig
 
-
 LOGGER = logging.getLogger(__name__)
 
 

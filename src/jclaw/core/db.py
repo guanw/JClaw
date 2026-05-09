@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-from datetime import datetime, timezone
-import json
-from pathlib import Path
-import re
 import sqlite3
+from collections.abc import Iterable
+from pathlib import Path
 
 from jclaw.core.records import (
     ApprovalRequestRecord,
@@ -25,7 +22,6 @@ from jclaw.core.stores.messages import MessageStore
 from jclaw.core.stores.permissions import PermissionStore
 from jclaw.core.stores.traces import TraceStore
 from jclaw.core.stores.workspace_changes import WorkspaceChangeStore
-from jclaw.core.time import utc_now
 
 
 class Database:

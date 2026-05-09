@@ -63,7 +63,7 @@ class NotionClient:
         config: NotionConfig,
         *,
         http_client: httpx.Client | None = None,
-    ) -> "NotionClient":
+    ) -> NotionClient:
         if not config.enabled:
             raise NotionDisabledError("Notion integration is disabled.")
         if not str(config.api_token).strip():

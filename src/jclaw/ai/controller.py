@@ -7,7 +7,6 @@ from typing import Any
 
 from jclaw.tools.base import Decision, DecisionType, Observation, RuntimeState, ToolResult
 
-
 LOGGER = logging.getLogger(__name__)
 MAX_CONTROLLER_OBSERVATIONS = 5
 
@@ -221,13 +220,13 @@ class AgentControllerMixin:
 
     def _artifact_preview_limits(self) -> dict[str, dict[str, int]]:
         limits: dict[str, dict[str, int]] = {}
-        for tool_name, tool in self.tools._tools.items():  # noqa: SLF001
+        for tool_name, tool in self.tools._tools.items():
             preview_limits = getattr(tool, "artifact_preview_limits", None)
             if not callable(preview_limits):
                 continue
             try:
                 payload = preview_limits()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 LOGGER.exception("tool artifact_preview_limits failed tool=%s", tool_name)
                 continue
             if not isinstance(payload, dict):

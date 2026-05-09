@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 
 @dataclass(slots=True)
@@ -166,7 +167,7 @@ class Observation:
         result: ToolResult,
         *,
         controller_output: dict[str, Any] | None = None,
-    ) -> "Observation":
+    ) -> Observation:
         data = result.data if isinstance(result.data, dict) else {}
         artifacts = data.get("artifacts", {})
         normalized_artifacts = dict(artifacts) if isinstance(artifacts, dict) else {}
@@ -283,7 +284,7 @@ class Decision:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "Decision":
+    def from_dict(cls, payload: dict[str, Any]) -> Decision:
         decision_type = DecisionType(str(payload.get("type", "")).strip().lower())
         tool = str(payload.get("tool", "")).strip()
         action = str(payload.get("action", "")).strip()

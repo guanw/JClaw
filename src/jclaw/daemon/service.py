@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import logging
-from dataclasses import dataclass
 import threading
 import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from jclaw.ai.agent import AssistantAgent
 from jclaw.ai.client import OpenAICompatibleClient
@@ -13,7 +13,6 @@ from jclaw.channel.telegram import TelegramBotChannel, TelegramPollingConflictEr
 from jclaw.core.config import Config
 from jclaw.core.db import Database
 from jclaw.core.scheduler import next_run_at, parse_schedule, to_utc_iso
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -82,7 +81,7 @@ class JClawDaemon:
                         "another instance is already polling this bot"
                     )
                     self._running = False
-                except Exception:  # noqa: BLE001
+                except Exception:
                     LOGGER.exception("daemon loop failed")
                     time.sleep(max(self.config.daemon.idle_sleep_seconds, 3.0))
         finally:
@@ -171,7 +170,7 @@ class JClawDaemon:
                 )
             except KeyboardInterrupt:
                 raise
-            except Exception:  # noqa: BLE001
+            except Exception:
                 LOGGER.exception("message handling failed for chat %s", current.chat_id)
             with self._chat_workers_lock:
                 state = self._chat_workers.get(current.chat_id)
@@ -213,7 +212,7 @@ class JClawDaemon:
                     if trace_text and trace_text != last_trace_text:
                         self.channel.edit_message(chat_id, trace_placeholder_id, trace_text)
                         last_trace_text = trace_text
-            except Exception:  # noqa: BLE001
+            except Exception:
                 LOGGER.exception("failed to update thinking indicator for chat %s", chat_id)
                 return
             step += 1
@@ -227,7 +226,7 @@ class JClawDaemon:
         return ""
 
     def _run_due_cron_jobs(self) -> None:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         cron = getattr(self, "cron", self.db.cron)
         for job in cron.due_jobs(now):
             LOGGER.info("running cron job %s for chat %s", job.id, job.chat_id)

@@ -276,7 +276,7 @@ class WorkspaceGitOpsMixin:
                 combined = "\n".join(part for part in (result["stdout"], result["stderr"]) if part).strip()
                 if combined:
                     outputs.append(combined[: self.shell_output_chars])
-        except Exception:  # noqa: BLE001
+        except Exception:
             self.db.update_approval_request_status(request.request_id, "failed")
             raise
         self.db.update_approval_request_status(request.request_id, "applied")

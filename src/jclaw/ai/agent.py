@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 import threading
 import uuid
 
@@ -17,7 +16,7 @@ from jclaw.ai.tracing import AgentTracingMixin
 from jclaw.core.config import Config
 from jclaw.core.db import Database, MemoryRecord
 from jclaw.tools.automation.tool import AutomationTool
-from jclaw.tools.base import DecisionType, RuntimeState, ToolExecutionState
+from jclaw.tools.base import DecisionType, RuntimeState
 from jclaw.tools.browser.tool import BrowserTool
 from jclaw.tools.email.tool import EmailTool
 from jclaw.tools.knowledge.tool import KnowledgeTool
@@ -26,7 +25,6 @@ from jclaw.tools.notion.tool import NotionTool
 from jclaw.tools.permissions.tool import PermissionsTool
 from jclaw.tools.registry import ToolRegistry
 from jclaw.tools.workspace.tool import WorkspaceTool
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -175,7 +173,7 @@ class AssistantAgent(
             return reply
         except RunInterruptedError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._append_execution_trace_event(
                 chat_id,
                 "turn_failed",

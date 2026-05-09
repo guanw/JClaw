@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import StrEnum
 import json
 import logging
+from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 from jclaw.tools.base import DecisionType
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -35,7 +34,7 @@ class RetrospectiveCritique:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "RetrospectiveCritique":
+    def from_dict(cls, payload: dict[str, Any]) -> RetrospectiveCritique:
         ready_to_complete = payload.get("ready_to_complete")
         if not isinstance(ready_to_complete, bool):
             raise ValueError("retrospective critique requires boolean ready_to_complete")
@@ -69,7 +68,7 @@ class RetrospectiveCritique:
 
 
 class AgentRetrospectiveMixin:
-    def _run_retrospective_critique(  # noqa: PLR0913
+    def _run_retrospective_critique(
         self,
         chat_id: str,
         text: str,
@@ -146,7 +145,7 @@ class AgentRetrospectiveMixin:
             except ValueError:
                 return None
 
-    def _maybe_apply_retrospective_critique(  # noqa: PLR0913
+    def _maybe_apply_retrospective_critique(
         self,
         chat_id: str,
         text: str,
@@ -211,7 +210,7 @@ class AgentRetrospectiveMixin:
             )
         return critique
 
-    def _next_decision_after_retrospective(  # noqa: PLR0913
+    def _next_decision_after_retrospective(
         self,
         chat_id: str,
         text: str,

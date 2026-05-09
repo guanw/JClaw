@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import difflib
-from pathlib import Path
 import shutil
+from pathlib import Path
 from typing import Any
 
 from jclaw.tools.base import ToolContext, ToolResult
@@ -202,7 +202,7 @@ class WorkspaceMutationsMixin:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(str(edit["after"]), encoding="utf-8")
                 touched_files.append(str(edit["relative_path"]))
-        except Exception:  # noqa: BLE001
+        except Exception:
             self.db.update_approval_request_status(request.request_id, "failed")
             raise
         self.db.update_approval_request_status(request.request_id, "applied")
@@ -379,7 +379,7 @@ class WorkspaceMutationsMixin:
                     source.unlink()
             else:
                 raise RuntimeError(f"Unsupported path operation: {operation}")
-        except Exception:  # noqa: BLE001
+        except Exception:
             self.db.update_approval_request_status(request.request_id, "failed")
             raise
         self.db.update_approval_request_status(request.request_id, "applied")

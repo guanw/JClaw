@@ -4,7 +4,6 @@ from pathlib import Path
 
 from jclaw.tools.knowledge.models import ExtractedDocument
 
-
 TEXT_SUFFIXES = {
     ".c",
     ".cc",
