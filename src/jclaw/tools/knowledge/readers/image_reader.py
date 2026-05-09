@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
+from typing import ClassVar
 
 from jclaw.tools.knowledge.models import ExtractedDocument
 
 
 class ImageReader:
     name = "image"
-    SUPPORTED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".tiff", ".tif", ".icns"}
+    SUPPORTED_SUFFIXES: ClassVar[set[str]] = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".tiff", ".tif", ".icns"}
 
     def __init__(
         self,

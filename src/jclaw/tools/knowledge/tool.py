@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
+from datetime import UTC, datetime
 from pathlib import Path
-import re
-from typing import Any
+from typing import Any, ClassVar
 
 from jclaw.core.db import Database
 from jclaw.core.defaults import (
@@ -15,18 +14,25 @@ from jclaw.core.defaults import (
     KNOWLEDGE_MAX_TOTAL_CHUNKS,
     KNOWLEDGE_TEXT_PREVIEW_CHARS,
 )
-from jclaw.tools.base import ActionSpec, ToolContext, ToolResult, append_field, append_list_section, build_tool_description
+from jclaw.tools.base import (
+    ActionSpec,
+    ToolContext,
+    ToolResult,
+    append_field,
+    append_list_section,
+    build_tool_description,
+)
 from jclaw.tools.knowledge.models import DocumentChunk, ExtractedDocument
 from jclaw.tools.knowledge.registry import KnowledgeReaderRegistry
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class KnowledgeTool:
     name = "knowledge"
-    COMMON_HOME_FOLDERS = {
+    COMMON_HOME_FOLDERS: ClassVar[set[str]] = {
         "Desktop",
         "Documents",
         "Downloads",
@@ -144,7 +150,7 @@ class KnowledgeTool:
         self._trace_event("invoke_start", ctx=ctx, action=action, params=params)
         try:
             result = handlers[action](params, ctx)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._trace_event("invoke_error", ctx=ctx, action=action, params=params, error=str(exc))
             raise
         self._trace_event(

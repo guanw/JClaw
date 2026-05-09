@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import fnmatch
-from pathlib import Path
 import re
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from jclaw.tools.base import ToolContext, ToolResult
@@ -93,8 +93,8 @@ class WorkspaceReadsMixin:
         kind = "directory" if target_path.is_dir() else "file"
         metadata = {
             "size_bytes": stats.st_size,
-            "modified_at": datetime.fromtimestamp(stats.st_mtime, tz=timezone.utc).isoformat(),
-            "created_at": datetime.fromtimestamp(stats.st_ctime, tz=timezone.utc).isoformat(),
+            "modified_at": datetime.fromtimestamp(stats.st_mtime, tz=UTC).isoformat(),
+            "created_at": datetime.fromtimestamp(stats.st_ctime, tz=UTC).isoformat(),
             "suffix": target_path.suffix,
             "mode": oct(stats.st_mode & 0o777),
         }
@@ -201,7 +201,7 @@ class WorkspaceReadsMixin:
         )
         if permission is not None:
             return permission
-        search_root = target_path if target_path.exists() and target_path.is_dir() else target_path
+        search_root = target_path
         candidate_files = [search_root] if search_root.exists() and search_root.is_file() else self._iter_searchable_paths(search_root)
         matches: list[dict[str, Any]] = []
         match_count = 0

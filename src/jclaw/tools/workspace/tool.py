@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
-from pathlib import Path
 import re
 import subprocess
-from typing import Any
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, ClassVar
 
 from jclaw.core.db import Database
 from jclaw.core.defaults import (
@@ -28,7 +28,7 @@ from jclaw.tools.workspace.shell import WorkspaceShellMixin
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class WorkspaceTool(
@@ -43,7 +43,7 @@ class WorkspaceTool(
     name = "workspace"
     MAX_CHANGE_HISTORY = 10
     CHANGE_HISTORY_TTL_SECONDS = 3600
-    COMMON_HOME_FOLDERS = {
+    COMMON_HOME_FOLDERS: ClassVar[set[str]] = {
         "Desktop",
         "Documents",
         "Downloads",
@@ -348,7 +348,7 @@ class WorkspaceTool(
         self._trace_event("invoke_start", ctx=ctx, action=action, params=params)
         try:
             result = handlers[action](params, ctx)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._trace_event("invoke_error", ctx=ctx, action=action, params=params, error=str(exc))
             raise
         self._trace_event(
