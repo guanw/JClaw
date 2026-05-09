@@ -319,6 +319,8 @@ class RuntimeState:
     observations: list[Observation] = field(default_factory=list)
     artifacts_by_type: dict[str, Any] = field(default_factory=dict)
     artifacts_by_id: dict[str, Any] = field(default_factory=dict)
+    retrospective_critiques: list[dict[str, Any]] = field(default_factory=list)
+    latest_retrospective_critique: dict[str, Any] = field(default_factory=dict)
     last_decision: Decision | None = None
     last_observation: Observation | None = None
     pending_confirmation: bool = False
@@ -333,6 +335,11 @@ class RuntimeState:
             if artifact_type:
                 self.artifacts_by_type[artifact_type] = value
             self.artifacts_by_id[str(artifact_id)] = value
+
+    def append_retrospective_critique(self, critique: dict[str, Any]) -> None:
+        payload = dict(critique)
+        self.retrospective_critiques.append(payload)
+        self.latest_retrospective_critique = payload
 
 
 class Tool(Protocol):

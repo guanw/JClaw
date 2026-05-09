@@ -82,6 +82,38 @@ class AgentToolLoopMixin:
         if decision is None:
             return None
         if decision.type is DecisionType.ANSWER:
+            retrospective_followup = self._next_decision_after_retrospective(
+                chat_id,
+                text,
+                user_name=user_name,
+                runtime=runtime,
+                steps=[],
+                decision_type=DecisionType.ANSWER,
+                candidate_answer=decision.answer,
+                candidate_reason=decision.reason,
+            )
+            if isinstance(retrospective_followup, Decision):
+                decision = retrospective_followup
+                return self._execute_tool_loop(
+                    chat_id,
+                    text,
+                    user_name=user_name,
+                    decision=decision,
+                    runtime=runtime,
+                    steps=[],
+                    execution=ToolExecutionState(),
+                    seen_signatures=set(),
+                    step_budget=self._tool_loop_step_budget(decision.tool),
+                )
+            if isinstance(retrospective_followup, str):
+                self._append_execution_trace_event(
+                    chat_id,
+                    "turn_blocked",
+                    retrospective_followup,
+                    {"mode": "retrospective_blocked"},
+                )
+                self._set_execution_trace_status(chat_id, "blocked")
+                return retrospective_followup
             self._append_execution_trace_event(
                 chat_id,
                 "turn_answered",
@@ -100,6 +132,37 @@ class AgentToolLoopMixin:
             self._set_execution_trace_status(chat_id, "blocked")
             return decision.reason or "Stopped because progress is blocked."
         if decision.type is DecisionType.COMPLETE:
+            retrospective_followup = self._next_decision_after_retrospective(
+                chat_id,
+                text,
+                user_name=user_name,
+                runtime=runtime,
+                steps=[],
+                decision_type=DecisionType.COMPLETE,
+                candidate_reason=decision.reason,
+            )
+            if isinstance(retrospective_followup, Decision):
+                decision = retrospective_followup
+                return self._execute_tool_loop(
+                    chat_id,
+                    text,
+                    user_name=user_name,
+                    decision=decision,
+                    runtime=runtime,
+                    steps=[],
+                    execution=ToolExecutionState(),
+                    seen_signatures=set(),
+                    step_budget=self._tool_loop_step_budget(decision.tool),
+                )
+            if isinstance(retrospective_followup, str):
+                self._append_execution_trace_event(
+                    chat_id,
+                    "turn_blocked",
+                    retrospective_followup,
+                    {"mode": "retrospective_blocked"},
+                )
+                self._set_execution_trace_status(chat_id, "blocked")
+                return retrospective_followup
             LOGGER.info("initial controller completed without tool use: %s", decision.reason)
             self._append_execution_trace_event(
                 chat_id,
@@ -270,6 +333,22 @@ class AgentToolLoopMixin:
                     runtime=runtime,
                 )
                 if next_decision is None:
+                    retrospective_followup = self._next_decision_after_retrospective(
+                        chat_id,
+                        text,
+                        user_name=user_name,
+                        runtime=runtime,
+                        steps=steps,
+                        decision_type=DecisionType.COMPLETE,
+                        candidate_reason="Controller produced no further usable decision; returning the latest tool result.",
+                        force=True,
+                    )
+                    if isinstance(retrospective_followup, Decision):
+                        decision = retrospective_followup
+                        continue
+                    if isinstance(retrospective_followup, str):
+                        self._set_execution_trace_status(chat_id, "blocked")
+                        return retrospective_followup
                     LOGGER.info("tool continuation returned no usable decision; stopping with latest result")
                     self._append_execution_trace_event(
                         chat_id,
@@ -288,6 +367,29 @@ class AgentToolLoopMixin:
                         steps=steps,
                     )
                 if next_decision.type is DecisionType.ANSWER:
+                    retrospective_followup = self._next_decision_after_retrospective(
+                        chat_id,
+                        text,
+                        user_name=user_name,
+                        runtime=runtime,
+                        steps=steps,
+                        decision_type=DecisionType.ANSWER,
+                        candidate_answer=next_decision.answer,
+                        candidate_reason=next_decision.reason,
+                    )
+                    if isinstance(retrospective_followup, Decision):
+                        decision = retrospective_followup
+                        continue
+                    if isinstance(retrospective_followup, str):
+                        self._pending_tool_loop_continuations.pop(chat_id, None)
+                        self._append_execution_trace_event(
+                            chat_id,
+                            "turn_blocked",
+                            retrospective_followup,
+                            {"mode": "retrospective_blocked"},
+                        )
+                        self._set_execution_trace_status(chat_id, "blocked")
+                        return retrospective_followup
                     self._pending_tool_loop_continuations.pop(chat_id, None)
                     self._append_execution_trace_event(
                         chat_id,
@@ -316,6 +418,28 @@ class AgentToolLoopMixin:
                         steps=steps,
                     )
                 if next_decision.type is DecisionType.COMPLETE:
+                    retrospective_followup = self._next_decision_after_retrospective(
+                        chat_id,
+                        text,
+                        user_name=user_name,
+                        runtime=runtime,
+                        steps=steps,
+                        decision_type=DecisionType.COMPLETE,
+                        candidate_reason=next_decision.reason,
+                    )
+                    if isinstance(retrospective_followup, Decision):
+                        decision = retrospective_followup
+                        continue
+                    if isinstance(retrospective_followup, str):
+                        self._pending_tool_loop_continuations.pop(chat_id, None)
+                        self._append_execution_trace_event(
+                            chat_id,
+                            "turn_blocked",
+                            retrospective_followup,
+                            {"mode": "retrospective_blocked"},
+                        )
+                        self._set_execution_trace_status(chat_id, "blocked")
+                        return retrospective_followup
                     self._pending_tool_loop_continuations.pop(chat_id, None)
                     self._append_execution_trace_event(
                         chat_id,

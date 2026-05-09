@@ -141,6 +141,8 @@ class AgentControllerMixin:
                 for key, value in runtime.artifacts_by_type.items()
             },
             "latest_observation": runtime.last_observation.to_dict() if runtime.last_observation else {},
+            "latest_retrospective_critique": dict(runtime.latest_retrospective_critique),
+            "retrospective_critiques": list(runtime.retrospective_critiques[-3:]),
             "observations": observations,
             "interrupted_run_context": self._current_interrupted_context(chat_id) if chat_id else {},
         }

@@ -5,6 +5,7 @@ import threading
 import time
 
 from jclaw.ai.agent import AssistantAgent
+from jclaw.ai.retrospective import RetrospectiveNextAction
 from jclaw.ai.tool_loop import RunInterruptedError
 from jclaw.core.config import Config, DaemonConfig, MemoryConfig, ProviderConfig, TelegramConfig
 from jclaw.core.defaults import (
@@ -2058,6 +2059,7 @@ def test_workspace_tool_loop_uses_higher_step_budget_than_general_tasks(tmp_path
                 '{"type":"tool_call","tool":"workspace","action":"step_four","params":{},"reason":"Read fourth."}',
                 '{"type":"tool_call","tool":"workspace","action":"step_five","params":{},"reason":"Read fifth."}',
                 '{"type":"answer","tool":"","action":"","params":{},"answer":"Done after five workspace steps.","reason":"Enough inspection completed."}',
+                '{"ready_to_complete":true,"issues":[],"missing_verification":false,"recommended_next_action":"answer","rationale":"The evidence is sufficient."}',
             ]
         ),
     )
@@ -2126,6 +2128,7 @@ def test_workspace_tool_loop_continue_adds_more_budget_after_exhaustion(tmp_path
                 '{"type":"tool_call","tool":"workspace","action":"step_four","params":{},"reason":"Read fourth."}',
                 '{"type":"tool_call","tool":"workspace","action":"step_five","params":{},"reason":"Read fifth."}',
                 '{"type":"answer","tool":"","action":"","params":{},"answer":"Done after explicit continuation.","reason":"Enough inspection completed."}',
+                '{"ready_to_complete":true,"issues":[],"missing_verification":false,"recommended_next_action":"answer","rationale":"The evidence is sufficient."}',
             ]
         ),
     )
@@ -2472,7 +2475,7 @@ def test_retrospective_gate_runs_for_multi_step_runtime(tmp_path) -> None:  # no
         steps=[{"tool": "notion"}, {"tool": "notion"}],
     )
 
-    assert should_run is True
+    assert should_run is False
     db.close()
 
 
@@ -2495,6 +2498,132 @@ def test_retrospective_gate_runs_for_failed_or_confirmation_observations(tmp_pat
         steps=[{"tool": "email"}],
     )
 
+    db.close()
+
+
+def test_run_retrospective_critique_parses_valid_json_response(tmp_path) -> None:  # noqa: ANN001
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                '{"ready_to_complete":false,"issues":["Verification was skipped."],"missing_verification":true,"recommended_next_action":"tool_call","rationale":"Run verification before stopping."}',
+            ]
+        ),
+    )
+    runtime = RuntimeState(request="update the notion page")
+    runtime.append(Observation(ok=True, summary="Found the page."))
+    critique = agent._run_retrospective_critique(  # noqa: SLF001
+        "chat-1",
+        "update the notion page",
+        user_name="tester",
+        runtime=runtime,
+        steps=[{"tool": "notion", "action": "search_pages", "reason": "Find the page first."}],
+        decision_type=DecisionType.COMPLETE,
+        candidate_answer="Updated the page.",
+        candidate_reason="The latest tool result appears sufficient.",
+    )
+
+    assert critique is not None
+    assert critique.ready_to_complete is False
+    assert critique.issues == ["Verification was skipped."]
+    assert critique.missing_verification is True
+    assert critique.recommended_next_action is RetrospectiveNextAction.TOOL_CALL
+    db.close()
+
+
+def test_run_retrospective_critique_repairs_unparseable_response(tmp_path) -> None:  # noqa: ANN001
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                "I think another tool step is needed before stopping.",
+                '{"ready_to_complete":false,"issues":["Need another tool step."],"missing_verification":false,"recommended_next_action":"tool_call","rationale":"The latest evidence is not sufficient yet."}',
+            ]
+        ),
+    )
+    runtime = RuntimeState(request="update the notion page")
+    runtime.append(Observation(ok=True, summary="Found the page."))
+    critique = agent._run_retrospective_critique(  # noqa: SLF001
+        "chat-1",
+        "update the notion page",
+        user_name="tester",
+        runtime=runtime,
+        steps=[{"tool": "notion", "action": "search_pages", "reason": "Find the page first."}],
+        decision_type=DecisionType.COMPLETE,
+        candidate_answer="Updated the page.",
+        candidate_reason="The latest tool result appears sufficient.",
+    )
+
+    assert critique is not None
+    assert critique.ready_to_complete is False
+    assert critique.issues == ["Need another tool step."]
+    assert critique.recommended_next_action is RetrospectiveNextAction.TOOL_CALL
+    db.close()
+
+
+def test_retrospective_critique_can_resume_tool_loop_before_answer(tmp_path) -> None:  # noqa: ANN001
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"fake","action":"step_one","params":{},"reason":"Start with the first step."}',
+                '{"type":"answer","answer":"done","reason":"One step should be enough."}',
+                '{"ready_to_complete":false,"issues":["Need another tool step."],"missing_verification":false,"recommended_next_action":"tool_call","rationale":"Take one more tool step before stopping."}',
+                '{"type":"tool_call","tool":"fake","action":"step_two","params":{},"reason":"Take the missing follow-up step."}',
+                '{"type":"complete","tool":"","action":"","params":{},"reason":"The tool run is now complete."}',
+                '{"ready_to_complete":true,"issues":[],"missing_verification":false,"recommended_next_action":"answer","rationale":"The evidence is now sufficient."}',
+                "Final tool-based reply.",
+            ]
+        ),
+    )
+    fake = FakeTool()
+    agent.tools._tools["fake"] = fake  # noqa: SLF001
+    agent._should_run_retrospective_critique = lambda **kwargs: True  # type: ignore[method-assign]  # noqa: SLF001
+    db.set_trace_mode("chat-1", "summary")
+
+    reply = agent.handle_text("chat-1", "do the fake task")
+
+    assert reply == "Final tool-based reply."
+    assert [action for action, _params in fake.invocations] == ["step_one", "step_two"]
+
+    latest = db.get_latest_execution_trace_session("chat-1")
+    assert latest is not None
+    summaries = [event.summary for event in db.list_execution_trace_events(latest.trace_id)]
+    assert "Retrospective critique blocked completion and requested another tool step." in summaries
+    assert "Retrospective critique requested another tool step; returning to the normal controller loop." in summaries
+    assert "Retrospective critique allowed completion." in summaries
+    db.close()
+
+
+def test_retrospective_critique_runs_for_latest_result_fallback(tmp_path) -> None:  # noqa: ANN001
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"fake","action":"step_one","params":{},"reason":"Start with the first step."}',
+                "",
+                '{"ready_to_complete":false,"issues":["The latest tool result is not enough to stop."],"missing_verification":false,"recommended_next_action":"tool_call","rationale":"Take one more tool step before returning the latest tool result."}',
+                '{"type":"tool_call","tool":"fake","action":"step_two","params":{},"reason":"Take the missing follow-up step."}',
+                '{"type":"complete","tool":"","action":"","params":{},"reason":"The tool run is now complete."}',
+                "Final tool-based reply.",
+            ]
+        ),
+    )
+    fake = FakeTool()
+    agent.tools._tools["fake"] = fake  # noqa: SLF001
+    db.set_trace_mode("chat-1", "summary")
+
+    reply = agent.handle_text("chat-1", "do the fake task")
+
+    assert reply == "Final tool-based reply."
+    assert [action for action, _params in fake.invocations] == ["step_one", "step_two"]
+
+    latest = db.get_latest_execution_trace_session("chat-1")
+    assert latest is not None
+    summaries = [event.summary for event in db.list_execution_trace_events(latest.trace_id)]
+    assert "Running retrospective critique before stopping." in summaries
+    assert "Retrospective critique blocked completion and requested another tool step." in summaries
+    assert "Retrospective critique requested another tool step; returning to the normal controller loop." in summaries
     db.close()
 
 
@@ -2876,7 +3005,8 @@ def test_workspace_inspect_reply_is_raw_tool_output(tmp_path) -> None:
         SequenceLLM(
             [
                 '{"type":"tool_call","tool":"workspace","action":"inspect_root","params":{"path":".","objective":"Inspect repo root"},"reason":"Local workspace inspection requested."}',
-                "Hallucinated workspace summary that should never be used.",
+                "",
+                '{"ready_to_complete":true,"issues":[],"missing_verification":false,"recommended_next_action":"answer","rationale":"The latest tool result is sufficient."}',
             ]
         ),
     )
@@ -2916,7 +3046,8 @@ def test_workspace_find_files_reply_preserves_all_matches(tmp_path) -> None:
         SequenceLLM(
             [
                 '{"type":"tool_call","tool":"workspace","action":"find_files","params":{"path":".","pattern":"*.py"},"reason":"Find python files."}',
-                "This fallback LLM text should not be used.",
+                "",
+                '{"ready_to_complete":true,"issues":[],"missing_verification":false,"recommended_next_action":"answer","rationale":"The latest tool result is sufficient."}',
             ]
         ),
     )

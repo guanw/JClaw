@@ -11,6 +11,7 @@ from jclaw.ai.commands import AgentCommandsMixin
 from jclaw.ai.controller import AgentControllerMixin
 from jclaw.ai.prompts import load_system_prompt
 from jclaw.ai.replying import AgentReplyingMixin
+from jclaw.ai.retrospective import AgentRetrospectiveMixin
 from jclaw.ai.tool_loop import AgentToolLoopMixin, PendingToolLoopContinuation, RunInterruptedError
 from jclaw.ai.tracing import AgentTracingMixin
 from jclaw.core.config import Config
@@ -36,6 +37,7 @@ class AssistantAgent(
     AgentToolLoopMixin,
     AgentControllerMixin,
     AgentReplyingMixin,
+    AgentRetrospectiveMixin,
 ):
     def __init__(self, config: Config, db: Database, llm: OpenAICompatibleClient) -> None:
         self.config = config
@@ -247,21 +249,10 @@ class AssistantAgent(
             return False
         if runtime.step_count >= 5:
             return True
-        if len(runtime.observations) >= 2:
-            return True
         if any(not observation.ok for observation in runtime.observations):
             return True
         if any(observation.needs_confirmation for observation in runtime.observations):
             return True
-        if len(runtime.artifacts_by_type) >= 2:
-            return True
-        if isinstance(steps, list) and len(steps) >= 2:
-            return True
-        if isinstance(steps, list):
-            for step in steps:
-                tool_name = str(step.get("tool", "")).strip()
-                if tool_name in {"workspace", "notion", "browser", "email", "automation"}:
-                    return True
         return False
 
     def request_interrupt(self, chat_id: str) -> bool:
