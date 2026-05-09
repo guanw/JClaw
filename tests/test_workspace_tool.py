@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 from jclaw.core.db import Database
 from jclaw.tools.base import ToolContext
@@ -309,7 +309,7 @@ def test_read_file_marks_truncation_when_content_exceeds_internal_limit(tmp_path
     db.close()
 
 
-def test_read_snippet_returns_inclusive_line_range_and_clamps_to_eof(tmp_path) -> None:
+def test_read_file_returns_inclusive_line_range_and_clamps_to_eof(tmp_path) -> None:
     root = tmp_path / "repo"
     root.mkdir()
     target = root / "app.py"
@@ -319,7 +319,7 @@ def test_read_snippet_returns_inclusive_line_range_and_clamps_to_eof(tmp_path) -
     tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
 
     snippet = tool.invoke(
-        "read_snippet",
+        "read_file",
         {"path": str(target), "start_line": 2, "end_line": 3},
         ToolContext(chat_id="chat-1"),
     )
@@ -329,7 +329,7 @@ def test_read_snippet_returns_inclusive_line_range_and_clamps_to_eof(tmp_path) -
     assert snippet.data["end_line"] == 3
 
     clamped = tool.invoke(
-        "read_snippet",
+        "read_file",
         {"path": str(target), "start_line": 3, "end_line": 10},
         ToolContext(chat_id="chat-1"),
     )
@@ -340,7 +340,7 @@ def test_read_snippet_returns_inclusive_line_range_and_clamps_to_eof(tmp_path) -
     db.close()
 
 
-def test_read_snippet_rejects_invalid_ranges(tmp_path) -> None:
+def test_read_file_rejects_invalid_ranges(tmp_path) -> None:
     root = tmp_path / "repo"
     root.mkdir()
     target = root / "app.py"
@@ -350,14 +350,14 @@ def test_read_snippet_rejects_invalid_ranges(tmp_path) -> None:
     tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
 
     invalid = tool.invoke(
-        "read_snippet",
+        "read_file",
         {"path": str(target), "start_line": 3, "end_line": 2},
         ToolContext(chat_id="chat-1"),
     )
     assert invalid.ok is False
 
     out_of_range = tool.invoke(
-        "read_snippet",
+        "read_file",
         {"path": str(target), "start_line": 5, "end_line": 6},
         ToolContext(chat_id="chat-1"),
     )
@@ -366,7 +366,7 @@ def test_read_snippet_rejects_invalid_ranges(tmp_path) -> None:
     db.close()
 
 
-def test_read_snippet_can_read_late_lines_from_large_file_without_whole_file_truncation(tmp_path) -> None:
+def test_read_file_can_read_late_lines_from_large_file_without_whole_file_truncation(tmp_path) -> None:
     root = tmp_path / "repo"
     root.mkdir()
     target = root / "big.py"
@@ -383,7 +383,7 @@ def test_read_snippet_can_read_late_lines_from_large_file_without_whole_file_tru
     )
 
     snippet = tool.invoke(
-        "read_snippet",
+        "read_file",
         {"path": str(target), "start_line": 1290, "end_line": 1295},
         ToolContext(chat_id="chat-1"),
     )
@@ -397,7 +397,7 @@ def test_read_snippet_can_read_late_lines_from_large_file_without_whole_file_tru
     db.close()
 
 
-def test_read_snippet_truncates_only_the_requested_range_when_snippet_is_too_large(tmp_path) -> None:
+def test_read_file_truncates_only_the_requested_range_when_snippet_is_too_large(tmp_path) -> None:
     root = tmp_path / "repo"
     root.mkdir()
     target = root / "big.py"
@@ -414,7 +414,7 @@ def test_read_snippet_truncates_only_the_requested_range_when_snippet_is_too_lar
     )
 
     snippet = tool.invoke(
-        "read_snippet",
+        "read_file",
         {"path": str(target), "start_line": 1, "end_line": 10},
         ToolContext(chat_id="chat-1"),
     )
@@ -436,11 +436,11 @@ def test_format_result_includes_snippet_content_and_diff_text(tmp_path) -> None:
     tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
 
     snippet = tool.invoke(
-        "read_snippet",
+        "read_file",
         {"path": str(target), "start_line": 2, "end_line": 3},
         ToolContext(chat_id="chat-1"),
     )
-    snippet_text = tool.format_result("read_snippet", snippet)
+    snippet_text = tool.format_result("read_file", snippet)
     assert "Content:" in snippet_text
     assert "<pre>b\nc\n</pre>" in snippet_text
 
@@ -481,6 +481,67 @@ def test_list_file_symbols_returns_python_symbols(tmp_path) -> None:
     assert result.data["match_count"] == 3
     assert {item["name"] for item in result.data["symbols"]} == {"Greeter", "hello", "top_level"}
     assert result.data["artifacts"]["workspace_symbol_search:latest"]["mode"] == "list_file_symbols"
+    db.close()
+
+
+def test_symbol_search_supports_non_python_source_files(tmp_path) -> None:
+    root = tmp_path / "repo"
+    src = root / "src"
+    src.mkdir(parents=True)
+    target = src / "app.ts"
+    target.write_text(
+        "export class Greeter {}\n"
+        "export interface Message {}\n"
+        "export const helper = () => 'hi'\n"
+        "helper()\n",
+        encoding="utf-8",
+    )
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    symbols = tool.invoke("list_file_symbols", {"path": str(target)}, ToolContext(chat_id="chat-1"))
+    assert symbols.ok is True
+    assert {item["name"] for item in symbols.data["symbols"]} == {"Greeter", "Message", "helper"}
+
+    definitions = tool.invoke("find_symbol", {"name": "helper", "path": str(root)}, ToolContext(chat_id="chat-1"))
+    assert definitions.ok is True
+    assert definitions.data["match_count"] == 1
+    assert definitions.data["matches"][0]["path"] == "src/app.ts"
+
+    references = tool.invoke("find_references", {"name": "helper", "path": str(root)}, ToolContext(chat_id="chat-1"))
+    assert references.ok is True
+    assert references.data["match_count"] == 2
+    assert references.data["matches"][0]["match_type"] == "definition"
+    assert references.data["matches"][1]["match_type"] == "reference"
+    db.close()
+
+
+def test_symbol_search_supports_extensionless_text_files_and_skips_binary_files(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    script = root / "script"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "helper() {\n"
+        "  echo hi\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    binary = root / "image.bin"
+    binary.write_bytes(b"\x89PNG\x00binary")
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+
+    script_symbols = tool.invoke("list_file_symbols", {"path": str(script)}, ToolContext(chat_id="chat-1"))
+    assert script_symbols.ok is True
+    assert {item["name"] for item in script_symbols.data["symbols"]} == {"helper"}
+
+    binary_symbols = tool.invoke("list_file_symbols", {"path": str(binary)}, ToolContext(chat_id="chat-1"))
+    assert binary_symbols.ok is True
+    assert binary_symbols.data["match_count"] == 0
+    assert binary_symbols.data["symbols"] == []
     db.close()
 
 
@@ -812,7 +873,6 @@ def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> No
     assert description["actions"]["git_status"]["produces_artifacts"] == ["workspace_git_status"]
     assert description["actions"]["git_log"]["produces_artifacts"] == ["workspace_git_log"]
     assert description["actions"]["read_file"]["produces_artifacts"] == ["workspace_file"]
-    assert description["actions"]["read_snippet"]["produces_artifacts"] == ["workspace_file"]
     assert description["actions"]["list_file_symbols"]["produces_artifacts"] == ["workspace_symbol_search"]
     assert description["actions"]["find_symbol"]["produces_artifacts"] == ["workspace_symbol_search"]
     assert description["actions"]["find_references"]["produces_artifacts"] == ["workspace_symbol_search"]
@@ -823,24 +883,24 @@ def test_workspace_tool_describe_exposes_structured_action_specs(tmp_path) -> No
     assert description["actions"]["revert_last_change"]["produces_artifacts"] == ["workspace_patch"]
     assert description["actions"]["redo_last_change"]["produces_artifacts"] == ["workspace_patch"]
     assert description["actions"]["run_command"]["produces_artifacts"] == ["workspace_command_result"]
-    assert "bounded code section" in description["actions"]["read_snippet"]["description"]
+    assert "Optional start_line and end_line" in description["actions"]["read_file"]["description"]
     assert "Prefer this when the request names a function or class" in description["actions"]["find_symbol"]["description"]
     assert "affect callers or usages" in description["actions"]["find_references"]["description"]
     assert "generated file contents" in description["actions"]["write_file"]["description"]
     assert "small, localized edits" in description["actions"]["apply_patch"]["description"]
 
     preview_limits = tool.artifact_preview_limits()
-    assert preview_limits["workspace_symbol_search"]["query"] == 220
-    assert preview_limits["workspace_file"]["content"] == 4000
-    assert preview_limits["workspace_diff"]["diff"] == 4000
-    assert preview_limits["workspace_patch"]["diff"] == 4000
-    assert preview_limits["workspace_command_result"]["stdout"] == 4000
+    assert preview_limits["workspace_symbol_search"]["query"] == 1_000_000
+    assert preview_limits["workspace_file"]["content"] == 1_000_000
+    assert preview_limits["workspace_diff"]["diff"] == 1_000_000
+    assert preview_limits["workspace_patch"]["diff"] == 1_000_000
+    assert preview_limits["workspace_command_result"]["stdout"] == 1_000_000
     assert "after code edits" in description["actions"]["run_command"]["description"]
     assert "prepare_change" not in description["actions"]
     db.close()
 
 
-def test_workspace_controller_output_for_read_snippet_and_run_command(tmp_path) -> None:
+def test_workspace_controller_output_for_read_file_and_run_command(tmp_path) -> None:
     db = Database(tmp_path / "jclaw.db")
     root = tmp_path / "repo"
     root.mkdir()
@@ -850,11 +910,11 @@ def test_workspace_controller_output_for_read_snippet_and_run_command(tmp_path) 
     db.upsert_grant(str(root.resolve()), ("read", "shell"), "chat-1")
 
     snippet = tool.invoke(
-        "read_snippet",
+        "read_file",
         {"path": str(target), "start_line": 2, "end_line": 3},
         ToolContext(chat_id="chat-1"),
     )
-    snippet_output = tool.controller_output("read_snippet", snippet)
+    snippet_output = tool.controller_output("read_file", snippet)
     assert snippet_output["target_path"] == str(target.resolve())
     assert snippet_output["start_line"] == 2
     assert snippet_output["end_line"] == 3

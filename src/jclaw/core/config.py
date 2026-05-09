@@ -42,11 +42,9 @@ from jclaw.core.defaults import (
     WORKSPACE_AGENT_MAX_TOOL_STEPS,
     WORKSPACE_ENABLED,
     WORKSPACE_MAX_FILES_PER_CHANGE,
-    WORKSPACE_MAX_INTERNAL_READ_BYTES,
     WORKSPACE_MAX_PATH_ENTRIES,
     WORKSPACE_MAX_PREPARED_DIFF_BYTES,
     WORKSPACE_MAX_STEPS,
-    WORKSPACE_SHELL_OUTPUT_CHARS,
     WORKSPACE_SHELL_TIMEOUT_SECONDS,
 )
 
@@ -193,11 +191,18 @@ class WorkspaceConfig:
     max_steps: int = WORKSPACE_MAX_STEPS
     agent_max_tool_steps: int = WORKSPACE_AGENT_MAX_TOOL_STEPS
     shell_timeout_seconds: int = WORKSPACE_SHELL_TIMEOUT_SECONDS
-    shell_output_chars: int = WORKSPACE_SHELL_OUTPUT_CHARS
+    shell_output_chars: int | None = None
     max_prepared_diff_bytes: int = WORKSPACE_MAX_PREPARED_DIFF_BYTES
     max_files_per_change: int = WORKSPACE_MAX_FILES_PER_CHANGE
     max_path_entries: int = WORKSPACE_MAX_PATH_ENTRIES
-    max_internal_read_bytes: int = WORKSPACE_MAX_INTERNAL_READ_BYTES
+    max_internal_read_bytes: int | None = None
+
+
+def _optional_int(value: object, default: int | None = None) -> int | None:
+    if value in (None, ""):
+        return default
+    parsed = int(value)
+    return parsed if parsed > 0 else None
 
 
 @dataclass(slots=True)
@@ -300,11 +305,9 @@ enabled = {str(WORKSPACE_ENABLED).lower()}
 max_steps = {WORKSPACE_MAX_STEPS}
 agent_max_tool_steps = {WORKSPACE_AGENT_MAX_TOOL_STEPS}
 shell_timeout_seconds = {WORKSPACE_SHELL_TIMEOUT_SECONDS}
-shell_output_chars = {WORKSPACE_SHELL_OUTPUT_CHARS}
 max_prepared_diff_bytes = {WORKSPACE_MAX_PREPARED_DIFF_BYTES}
 max_files_per_change = {WORKSPACE_MAX_FILES_PER_CHANGE}
 max_path_entries = {WORKSPACE_MAX_PATH_ENTRIES}
-max_internal_read_bytes = {WORKSPACE_MAX_INTERNAL_READ_BYTES}
 
 [knowledge]
 enabled = {str(KNOWLEDGE_ENABLED).lower()}
@@ -400,15 +403,13 @@ def load_config(path: str | Path | None = None) -> Config:
         max_steps=int(workspace_data.get("max_steps", WORKSPACE_MAX_STEPS)),
         agent_max_tool_steps=int(workspace_data.get("agent_max_tool_steps", WORKSPACE_AGENT_MAX_TOOL_STEPS)),
         shell_timeout_seconds=int(workspace_data.get("shell_timeout_seconds", WORKSPACE_SHELL_TIMEOUT_SECONDS)),
-        shell_output_chars=int(workspace_data.get("shell_output_chars", WORKSPACE_SHELL_OUTPUT_CHARS)),
+        shell_output_chars=_optional_int(workspace_data.get("shell_output_chars")),
         max_prepared_diff_bytes=int(
             workspace_data.get("max_prepared_diff_bytes", WORKSPACE_MAX_PREPARED_DIFF_BYTES)
         ),
         max_files_per_change=int(workspace_data.get("max_files_per_change", WORKSPACE_MAX_FILES_PER_CHANGE)),
         max_path_entries=int(workspace_data.get("max_path_entries", WORKSPACE_MAX_PATH_ENTRIES)),
-        max_internal_read_bytes=int(
-            workspace_data.get("max_internal_read_bytes", WORKSPACE_MAX_INTERNAL_READ_BYTES)
-        ),
+        max_internal_read_bytes=_optional_int(workspace_data.get("max_internal_read_bytes")),
     )
     knowledge = KnowledgeConfig(
         enabled=bool(knowledge_data.get("enabled", KNOWLEDGE_ENABLED)),

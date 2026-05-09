@@ -488,9 +488,7 @@ class WorkspaceMutationsMixin:
             edits=[{**edit, "before_exists": before_exists, "after_exists": True}],
         )
         diff_preview = self._build_diff_preview([edit])
-        after_bytes = after.encode("utf-8")
-        content = after_bytes[: self.max_internal_read_bytes].decode("utf-8", errors="ignore")
-        truncated = len(after_bytes) > self.max_internal_read_bytes
+        content, bytes_read, truncated = self._truncate_bytes(after)
         patch_artifact = {
             "root_path": str(root_path),
             "target_path": str(target_path),
@@ -521,7 +519,7 @@ class WorkspaceMutationsMixin:
                 "content": content,
                 "line_count": len(after.splitlines()),
                 "char_count": len(content),
-                "bytes_read": min(len(after_bytes), self.max_internal_read_bytes),
+                "bytes_read": bytes_read,
                 "truncated": truncated,
                 "artifacts": {
                     "workspace_patch:latest": patch_artifact,

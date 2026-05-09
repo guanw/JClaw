@@ -181,6 +181,7 @@ class WorkspaceReadsMixin:
 
     def _search_contents(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         objective = str(params.get("objective", "Search file contents")).strip()
+        continuation_action = str(params.get("_continuation_action") or "grep").strip() or "grep"
         query = str(params.get("query") or params.get("text") or "").strip()
         if not query:
             return ToolResult(ok=False, summary="Searching contents requires a query string.", data={})
@@ -196,7 +197,7 @@ class WorkspaceReadsMixin:
             ctx=ctx,
             objective=objective or query,
             kind="grant",
-            continuation_action="search_contents",
+            continuation_action=continuation_action,
             continuation_params=params,
         )
         if permission is not None:
@@ -278,71 +279,6 @@ class WorkspaceReadsMixin:
         )
         if permission is not None:
             return permission
-        file_state = self._read_text_file_state(target_path)
-        if file_state["error"]:
-            return ToolResult(
-                ok=False,
-                summary=str(file_state["error"]),
-                data={"root_path": str(root_path), "target_path": str(target_path)},
-            )
-        git_root = self._detect_git_root(target_path)
-        line_count = int(file_state["line_count"])
-        content = str(file_state["content"])
-        artifact = {
-            "root_path": str(root_path),
-            "target_path": str(target_path),
-            "kind": "file",
-            "start_line": 1,
-            "end_line": line_count,
-            "line_count": line_count,
-            "content": content,
-            "truncated": bool(file_state["truncated"]),
-            "git_root": None if git_root is None else str(git_root),
-        }
-        return ToolResult(
-            ok=True,
-            summary=f"Read {target_path}.",
-            data={
-                "root_path": str(root_path),
-                "target_path": str(target_path),
-                "exists": True,
-                "kind": "file",
-                "content": content,
-                "line_count": line_count,
-                "char_count": int(file_state["char_count"]),
-                "bytes_read": int(file_state["bytes_read"]),
-                "truncated": bool(file_state["truncated"]),
-                "git_root": None if git_root is None else str(git_root),
-                "artifacts": {
-                    "workspace_file:latest": artifact,
-                },
-            },
-        )
-
-    def _read_snippet(self, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        objective = str(params.get("objective", "Read local file snippet")).strip()
-        if params.get("path") in (None, ""):
-            return ToolResult(ok=False, summary="Reading a snippet requires a path.", data={})
-        target_path = self._resolve_target_path(params.get("path"))
-        root_path = self._default_root_for_path(target_path)
-        permission = self._ensure_grant(
-            root_path,
-            capabilities=("read",),
-            ctx=ctx,
-            objective=objective,
-            kind="grant",
-            continuation_action="read_snippet",
-            continuation_params=params,
-        )
-        if permission is not None:
-            return permission
-        try:
-            start_line = int(params.get("start_line", 0))
-            end_line = int(params.get("end_line", 0))
-        except (TypeError, ValueError):
-            return ToolResult(ok=False, summary="Reading a snippet requires integer start_line and end_line.", data={})
-        if start_line < 1 or end_line < 1 or start_line > end_line:
-            return ToolResult(ok=False, summary="Invalid line range for read_snippet.", data={})
         file_state = self._read_text_file_state(target_path, include_full_text=True)
         if file_state["error"]:
             return ToolResult(
@@ -350,21 +286,41 @@ class WorkspaceReadsMixin:
                 summary=str(file_state["error"]),
                 data={"root_path": str(root_path), "target_path": str(target_path)},
             )
+        git_root = self._detect_git_root(target_path)
         line_count = int(file_state["line_count"])
+        start_line_raw = params.get("start_line")
+        end_line_raw = params.get("end_line")
+        if start_line_raw in (None, ""):
+            start_line = 1
+        else:
+            try:
+                start_line = int(start_line_raw)
+            except (TypeError, ValueError):
+                return ToolResult(ok=False, summary="Reading a file requires integer start_line when provided.", data={})
+        if end_line_raw in (None, ""):
+            end_line = line_count
+        else:
+            try:
+                end_line = int(end_line_raw)
+            except (TypeError, ValueError):
+                return ToolResult(ok=False, summary="Reading a file requires integer end_line when provided.", data={})
+        if start_line < 1 or end_line < 1 or start_line > end_line:
+            return ToolResult(ok=False, summary="Invalid line range for read_file.", data={})
         if start_line > line_count:
             return ToolResult(
                 ok=False,
-                summary=f"Requested snippet starts after end of file ({line_count} lines).",
+                summary=f"Requested read starts after end of file ({line_count} lines).",
                 data={"root_path": str(root_path), "target_path": str(target_path), "line_count": line_count},
             )
         actual_end_line = min(end_line, line_count)
         all_lines = str(file_state["full_text"]).splitlines(keepends=True)
         raw_content = "".join(all_lines[start_line - 1 : actual_end_line])
-        raw_content_bytes = raw_content.encode("utf-8")
-        snippet_bytes_read = min(len(raw_content_bytes), self.max_internal_read_bytes)
-        content = raw_content_bytes[: self.max_internal_read_bytes].decode("utf-8", errors="ignore")
-        snippet_truncated = len(raw_content_bytes) > self.max_internal_read_bytes
-        git_root = self._detect_git_root(target_path)
+        if start_line == 1 and actual_end_line == line_count:
+            content = str(file_state["content"])
+            bytes_read = int(file_state["bytes_read"])
+            truncated = bool(file_state["truncated"])
+        else:
+            content, bytes_read, truncated = self._truncate_bytes(raw_content)
         artifact = {
             "root_path": str(root_path),
             "target_path": str(target_path),
@@ -373,12 +329,17 @@ class WorkspaceReadsMixin:
             "end_line": actual_end_line,
             "line_count": line_count,
             "content": content,
-            "truncated": snippet_truncated,
+            "truncated": truncated,
             "git_root": None if git_root is None else str(git_root),
         }
+        summary = (
+            f"Read {target_path}."
+            if start_line == 1 and actual_end_line == line_count
+            else f"Read lines {start_line}-{actual_end_line} from {target_path}."
+        )
         return ToolResult(
             ok=True,
-            summary=f"Read lines {start_line}-{actual_end_line} from {target_path}.",
+            summary=summary,
             data={
                 "root_path": str(root_path),
                 "target_path": str(target_path),
@@ -389,8 +350,8 @@ class WorkspaceReadsMixin:
                 "end_line": actual_end_line,
                 "line_count": line_count,
                 "char_count": len(content),
-                "bytes_read": snippet_bytes_read,
-                "truncated": snippet_truncated,
+                "bytes_read": bytes_read,
+                "truncated": truncated,
                 "git_root": None if git_root is None else str(git_root),
                 "artifacts": {
                     "workspace_file:latest": artifact,
@@ -440,15 +401,14 @@ class WorkspaceReadsMixin:
             return {"error": f"{path} appears to be a binary file and cannot be read as text."}
         raw = path.read_bytes()
         text = raw.decode("utf-8", errors="ignore")
-        max_bytes = min(len(raw), self.max_internal_read_bytes)
-        content = raw[: self.max_internal_read_bytes].decode("utf-8", errors="ignore")
+        content, max_bytes, truncated = self._truncate_bytes(text)
         state = {
             "error": "",
             "content": content,
             "line_count": len(text.splitlines()),
             "char_count": len(content),
             "bytes_read": max_bytes,
-            "truncated": len(raw) > self.max_internal_read_bytes,
+            "truncated": truncated,
         }
         if include_full_text:
             state["full_text"] = text
@@ -458,4 +418,4 @@ class WorkspaceReadsMixin:
         if not path.exists():
             return ""
         data = path.read_text(encoding="utf-8", errors="ignore")
-        return data[: self.max_internal_read_bytes]
+        return data

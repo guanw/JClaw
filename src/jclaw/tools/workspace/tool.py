@@ -10,11 +10,9 @@ from typing import Any, ClassVar
 from jclaw.core.db import Database
 from jclaw.core.defaults import (
     WORKSPACE_MAX_FILES_PER_CHANGE,
-    WORKSPACE_MAX_INTERNAL_READ_BYTES,
     WORKSPACE_MAX_PATH_ENTRIES,
     WORKSPACE_MAX_PREPARED_DIFF_BYTES,
     WORKSPACE_MAX_STEPS,
-    WORKSPACE_SHELL_OUTPUT_CHARS,
     WORKSPACE_SHELL_TIMEOUT_SECONDS,
 )
 from jclaw.tools.base import ActionSpec, RuntimeState, ToolContext, ToolResult, build_tool_description
@@ -22,7 +20,7 @@ from jclaw.tools.workspace.formatting import WorkspaceFormattingMixin
 from jclaw.tools.workspace.git_ops import WorkspaceGitOpsMixin
 from jclaw.tools.workspace.mutations import WorkspaceMutationsMixin
 from jclaw.tools.workspace.permissions import WorkspacePermissionsMixin
-from jclaw.tools.workspace.python_symbols import WorkspacePythonSymbolsMixin
+from jclaw.tools.workspace.python_symbols import WorkspaceSymbolSearchMixin
 from jclaw.tools.workspace.reads import WorkspaceReadsMixin
 from jclaw.tools.workspace.shell import WorkspaceShellMixin
 
@@ -34,7 +32,7 @@ def _utc_now() -> str:
 class WorkspaceTool(
     WorkspaceFormattingMixin,
     WorkspaceReadsMixin,
-    WorkspacePythonSymbolsMixin,
+    WorkspaceSymbolSearchMixin,
     WorkspaceMutationsMixin,
     WorkspaceGitOpsMixin,
     WorkspacePermissionsMixin,
@@ -70,15 +68,13 @@ class WorkspaceTool(
         options = options or {}
         self.max_steps = int(options.get("max_steps", WORKSPACE_MAX_STEPS))
         self.shell_timeout_seconds = int(options.get("shell_timeout_seconds", WORKSPACE_SHELL_TIMEOUT_SECONDS))
-        self.shell_output_chars = int(options.get("shell_output_chars", WORKSPACE_SHELL_OUTPUT_CHARS))
+        self.shell_output_chars = self._normalize_limit(options.get("shell_output_chars"))
         self.max_prepared_diff_bytes = int(
             options.get("max_prepared_diff_bytes", WORKSPACE_MAX_PREPARED_DIFF_BYTES)
         )
         self.max_files_per_change = int(options.get("max_files_per_change", WORKSPACE_MAX_FILES_PER_CHANGE))
         self.max_path_entries = int(options.get("max_path_entries", WORKSPACE_MAX_PATH_ENTRIES))
-        self.max_internal_read_bytes = int(
-            options.get("max_internal_read_bytes", WORKSPACE_MAX_INTERNAL_READ_BYTES)
-        )
+        self.max_internal_read_bytes = self._normalize_limit(options.get("max_internal_read_bytes"))
 
     def describe(self) -> dict[str, Any]:
         specs = self._action_specs()
@@ -108,14 +104,14 @@ class WorkspaceTool(
 
     def artifact_preview_limits(self) -> dict[str, dict[str, int]]:
         return {
-            "workspace_file": {"content": 4000},
-            "workspace_diff": {"diff": 4000},
-            "workspace_patch": {"diff": 4000},
+            "workspace_file": {"content": 1_000_000},
+            "workspace_diff": {"diff": 1_000_000},
+            "workspace_patch": {"diff": 1_000_000},
             "workspace_command_result": {
-                "stdout": 4000,
-                "stderr": 4000,
+                "stdout": 1_000_000,
+                "stderr": 1_000_000,
             },
-            "workspace_symbol_search": {"query": 220},
+            "workspace_symbol_search": {"query": 1_000_000},
         }
 
     def controller_output(self, action: str, result: ToolResult) -> dict[str, Any]:
@@ -133,7 +129,7 @@ class WorkspaceTool(
                 "metadata",
             )
             if isinstance(data.get("entries"), list):
-                payload["entries"] = data["entries"][:10]
+                payload["entries"] = data["entries"]
             return payload
         if action in {"find_files", "search_contents", "grep"}:
             payload = self._pick_controller_fields(
@@ -144,9 +140,9 @@ class WorkspaceTool(
                 "match_count",
             )
             if isinstance(data.get("matches"), list):
-                payload["matches"] = data["matches"][:10]
+                payload["matches"] = data["matches"]
             return payload
-        if action in {"read_file", "read_snippet"}:
+        if action in {"read_file"}:
             payload = self._pick_controller_fields(
                 data,
                 "root_path",
@@ -162,7 +158,7 @@ class WorkspaceTool(
                 "git_root",
             )
             if "content" in data:
-                payload["content"] = self._controller_text(data.get("content"), limit=4000)
+                payload["content"] = self._controller_text(data.get("content"))
             return payload
         if action in {"list_file_symbols", "find_symbol", "find_references"}:
             payload = self._pick_controller_fields(
@@ -173,9 +169,9 @@ class WorkspaceTool(
                 "match_count",
             )
             if isinstance(data.get("symbols"), list):
-                payload["symbols"] = data["symbols"][:10]
+                payload["symbols"] = data["symbols"]
             if isinstance(data.get("matches"), list):
-                payload["matches"] = data["matches"][:10]
+                payload["matches"] = data["matches"]
             return payload
         if action in {
             "write_file",
@@ -202,11 +198,11 @@ class WorkspaceTool(
                 "truncated",
             )
             if isinstance(data.get("touched_files"), list):
-                payload["touched_files"] = data["touched_files"][:10]
+                payload["touched_files"] = data["touched_files"]
             if "diff_preview" in data:
-                payload["diff_preview"] = self._controller_text(data.get("diff_preview"), limit=4000)
+                payload["diff_preview"] = self._controller_text(data.get("diff_preview"))
             if "content" in data:
-                payload["content"] = self._controller_text(data.get("content"), limit=4000)
+                payload["content"] = self._controller_text(data.get("content"))
             return payload
         if action in {"run_command", "apply_shell_request"}:
             payload = self._pick_controller_fields(
@@ -218,14 +214,14 @@ class WorkspaceTool(
                 "request_id",
             )
             if "stdout" in data:
-                payload["stdout"] = self._controller_text(data.get("stdout"), limit=4000)
+                payload["stdout"] = self._controller_text(data.get("stdout"))
             if "stderr" in data:
-                payload["stderr"] = self._controller_text(data.get("stderr"), limit=4000)
+                payload["stderr"] = self._controller_text(data.get("stderr"))
             return payload
         if action in {"git_status"}:
             payload = self._pick_controller_fields(data, "root_path", "status")
             if "diff_stat" in data:
-                payload["diff_stat"] = self._controller_text(data.get("diff_stat"), limit=4000)
+                payload["diff_stat"] = self._controller_text(data.get("diff_stat"))
             return payload
         if action in {"git_log"}:
             payload = self._pick_controller_fields(
@@ -240,7 +236,7 @@ class WorkspaceTool(
                 "rev",
             )
             if isinstance(data.get("commits"), list):
-                payload["commits"] = data["commits"][:10]
+                payload["commits"] = data["commits"]
             return payload
         if action in {"git_diff"}:
             payload = self._pick_controller_fields(
@@ -253,7 +249,7 @@ class WorkspaceTool(
                 "has_staged",
             )
             if "diff" in data:
-                payload["diff"] = self._controller_text(data.get("diff"), limit=4000)
+                payload["diff"] = self._controller_text(data.get("diff"))
             return payload
         if action in {"prepare_git_action", "prepare_shell_action", "abort_request"}:
             payload = self._pick_controller_fields(
@@ -282,7 +278,6 @@ class WorkspaceTool(
         # describe what changed without inventing edit details from the test result alone.
         evidence_actions = {
             "read_file",
-            "read_snippet",
             "find_symbol",
             "find_references",
             "list_file_symbols",
@@ -315,10 +310,11 @@ class WorkspaceTool(
             "inspect_root": self._inspect_root,
             "path_metadata": self._path_metadata,
             "find_files": self._find_files,
-            "search_contents": self._search_contents,
-            "grep": self._search_contents,
+            "search_contents": lambda params, call_ctx: self._search_contents(
+                {**params, "_continuation_action": "search_contents"}, call_ctx
+            ),
+            "grep": lambda params, call_ctx: self._search_contents({**params, "_continuation_action": "grep"}, call_ctx),
             "read_file": self._read_file,
-            "read_snippet": self._read_snippet,
             "list_file_symbols": self._list_file_symbols,
             "find_symbol": self._find_symbol,
             "find_references": self._find_references,
@@ -494,9 +490,28 @@ class WorkspaceTool(
                 payload[key] = data[key]
         return payload
 
-    def _controller_text(self, value: Any, *, limit: int) -> str:
-        text = str(value).strip()
-        return f"{text[:limit]}..." if len(text) > limit else text
+    def _normalize_limit(self, value: Any) -> int | None:
+        try:
+            limit = int(value)
+        except (TypeError, ValueError):
+            return None
+        return limit if limit > 0 else None
+
+    def _controller_text(self, value: Any) -> str:
+        return str(value).strip()
+
+    def _truncate_chars(self, text: str, *, limit: int | None = None) -> tuple[str, bool]:
+        actual_limit = self.shell_output_chars if limit is None else limit
+        if actual_limit is None or len(text) <= actual_limit:
+            return text, False
+        return text[:actual_limit], True
+
+    def _truncate_bytes(self, text: str) -> tuple[str, int, bool]:
+        raw = text.encode("utf-8")
+        if self.max_internal_read_bytes is None or len(raw) <= self.max_internal_read_bytes:
+            return text, len(raw), False
+        content = raw[: self.max_internal_read_bytes].decode("utf-8", errors="ignore")
+        return content, self.max_internal_read_bytes, True
 
     def _schema(self, properties: dict[str, Any], *, required: tuple[str, ...] = ()) -> dict[str, Any]:
         schema: dict[str, Any] = {"type": "object", "properties": properties}
@@ -579,9 +594,9 @@ class WorkspaceTool(
                 },
                 produces_artifacts=("workspace_search_results",),
             ),
-            "search_contents": self._read_action(
-                action="search_contents",
-                description="Search literal text inside readable local files under an approved path.",
+            "grep": self._read_action(
+                action="grep",
+                description="Search text inside readable local files under an approved path. Supports literal text, regex, case-sensitive search, and file glob filters. Prefer this for code and text search.",
                 properties={
                     **self._root_search_properties(),
                     "query": {"type": "string"},
@@ -592,9 +607,9 @@ class WorkspaceTool(
                 },
                 produces_artifacts=("workspace_search_results",),
             ),
-            "grep": self._read_action(
-                action="grep",
-                description="Search literal text inside readable local files under an approved path. Alias of search_contents for controller/tooling compatibility.",
+            "search_contents": self._read_action(
+                action="search_contents",
+                description="Alias of grep for controller and backward compatibility.",
                 properties={
                     **self._root_search_properties(),
                     "query": {"type": "string"},
@@ -607,33 +622,26 @@ class WorkspaceTool(
             ),
             "read_file": self._read_action(
                 action="read_file",
-                description="Read a local text file for coding-oriented inspection when no specific line range is requested. Do not use this when the user asks for explicit line numbers or a line range; use read_snippet instead.",
-                properties={"path": {"type": "string"}, "objective": {"type": "string"}},
-                required=("path",),
-                produces_artifacts=("workspace_file",),
-            ),
-            "read_snippet": self._read_action(
-                action="read_snippet",
-                description="Read a focused inclusive line range from a local text file. Use this when the user asks for explicit line numbers, a line range, a bounded code section, or a specific portion of a function or class.",
+                description="Read a local text file for coding-oriented inspection. Optional start_line and end_line let you request a focused inclusive line range. If start_line is omitted, reading starts at the beginning. If end_line is omitted, reading continues to the end of file.",
                 properties={
                     "path": {"type": "string"},
                     "start_line": {"type": "integer"},
                     "end_line": {"type": "integer"},
                     "objective": {"type": "string"},
                 },
-                required=("path", "start_line", "end_line"),
+                required=("path",),
                 produces_artifacts=("workspace_file",),
             ),
             "list_file_symbols": self._read_action(
                 action="list_file_symbols",
-                description="List Python class and function definitions from one Python source file. Use this to understand file structure before choosing a narrower snippet read.",
+                description="List structural symbols from one source file, such as classes, functions, interfaces, enums, and similar definitions when they can be recognized heuristically. Use this to understand file structure before choosing a narrower snippet read.",
                 properties={"path": {"type": "string"}, "objective": {"type": "string"}},
                 required=("path",),
                 produces_artifacts=("workspace_symbol_search",),
             ),
             "find_symbol": self._read_action(
                 action="find_symbol",
-                description="Find exact Python class or function definitions by symbol name within a Python file or directory tree. Prefer this when the request names a function or class to inspect or edit.",
+                description="Find exact symbol definitions by name within a source file or directory tree using language-agnostic heuristics. Prefer this when the request names a function or class, and use it for interfaces, enums, or similar symbols too.",
                 properties={
                     "name": {"type": "string"},
                     "symbol": {"type": "string"},
@@ -644,7 +652,7 @@ class WorkspaceTool(
             ),
             "find_references": self._read_action(
                 action="find_references",
-                description="Find exact Python symbol occurrences across Python source files, including whether each occurrence is a definition or a reference. Prefer this before edits that may affect callers or usages.",
+                description="Find exact symbol occurrences across source files, including whether each occurrence is likely a definition or a reference. Prefer this before edits that may affect callers or usages.",
                 properties={
                     "name": {"type": "string"},
                     "symbol": {"type": "string"},

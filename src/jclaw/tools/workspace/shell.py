@@ -218,8 +218,10 @@ class WorkspaceShellMixin:
             timeout=timeout,
             env=self._command_env(cwd=cwd),
         )
+        stdout, _ = self._truncate_chars(result.stdout)
+        stderr, _ = self._truncate_chars(result.stderr)
         return {
             "exit_code": result.returncode,
-            "stdout": result.stdout[: self.shell_output_chars],
-            "stderr": result.stderr[: self.shell_output_chars],
+            "stdout": stdout,
+            "stderr": stderr,
         }

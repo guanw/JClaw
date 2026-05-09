@@ -11,3 +11,4 @@ build/
 plan/**
 client_secret_**.json
 .vscode/
+uv.lock

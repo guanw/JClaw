@@ -158,7 +158,6 @@ class AgentReplyingMixin:
         action = str(decision.get("action", "")).strip()
         return tool_name == "workspace" and action in {
             "read_file",
-            "read_snippet",
             "find_symbol",
             "find_references",
             "list_file_symbols",

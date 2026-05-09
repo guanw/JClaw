@@ -275,7 +275,7 @@ class WorkspaceGitOpsMixin:
                 result = self._run_command([str(part) for part in command], cwd=Path(request.root_path))
                 combined = "\n".join(part for part in (result["stdout"], result["stderr"]) if part).strip()
                 if combined:
-                    outputs.append(combined[: self.shell_output_chars])
+                    outputs.append(self._truncate_chars(combined)[0])
         except Exception:
             self.db.update_approval_request_status(request.request_id, "failed")
             raise
@@ -286,7 +286,7 @@ class WorkspaceGitOpsMixin:
             data={
                 "request_id": request.request_id,
                 "root_path": request.root_path,
-                "output": "\n".join(outputs)[: self.shell_output_chars],
+                "output": self._truncate_chars("\n".join(outputs))[0],
             },
         )
 

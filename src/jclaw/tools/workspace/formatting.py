@@ -27,7 +27,7 @@ class WorkspaceFormattingMixin:
             lines.append(f"Capabilities: {', '.join(str(item) for item in data['capabilities'])}")
         if data.get("entries"):
             lines.append("Entries:")
-            for entry in data["entries"][:10]:
+            for entry in data["entries"]:
                 lines.append(f"- {entry['kind']}: {entry['name']}")
             if data.get("entries_truncated"):
                 shown = len(data["entries"])
@@ -37,7 +37,7 @@ class WorkspaceFormattingMixin:
             lines.append("Entries: none")
         if data.get("touched_files"):
             lines.append("Touched files:")
-            for file_path in data["touched_files"][:10]:
+            for file_path in data["touched_files"]:
                 lines.append(f"- {file_path}")
         if data.get("source_path"):
             lines.append(f"Source: {data['source_path']}")
@@ -59,10 +59,10 @@ class WorkspaceFormattingMixin:
         if "truncated" in data:
             lines.append(f"Truncated: {data['truncated']}")
         if data.get("content"):
-            lines.append(f"Content:\n{self._code_block(str(data['content'])[:3200])}")
+            lines.append(f"Content:\n{self._code_block(str(data['content']))}")
         if data.get("symbols"):
             lines.append("Symbols:")
-            for item in data["symbols"][:10]:
+            for item in data["symbols"]:
                 lines.append(
                     f"- {item['kind']} {item['name']} ({item['path']}:{item['line_number']}-{item['end_line']})"
                 )
@@ -70,7 +70,7 @@ class WorkspaceFormattingMixin:
                 lines.append(f"Shown {len(data['symbols'])} of {data['match_count']} symbols.")
         if data.get("matches"):
             lines.append("Matches:")
-            for item in data["matches"][:10]:
+            for item in data["matches"]:
                 if "kind" in item and "name" in item and "line_number" in item:
                     lines.append(
                         f"- {item['kind']} {item['name']} ({item['path']}:{item['line_number']}-{item['end_line']})"
@@ -83,31 +83,31 @@ class WorkspaceFormattingMixin:
                 lines.append(f"Shown {len(data['matches'])} of {data['match_count']} matches.")
         if data.get("commits"):
             lines.append("Commits:")
-            for item in data["commits"][:10]:
+            for item in data["commits"]:
                 lines.append(
                     f"- {item['short_sha']} {item['date']} {item['author']}: {item['subject']}"
                 )
             if data.get("commit_count", 0) > len(data["commits"]):
                 lines.append(f"Shown {len(data['commits'])} of {data['commit_count']} commits.")
         if data.get("diff_preview"):
-            lines.append(f"Diff preview:\n{self._code_block(str(data['diff_preview'])[:1500])}")
+            lines.append(f"Diff preview:\n{self._code_block(str(data['diff_preview']))}")
         if "diff" in data:
             diff_text = str(data["diff"])
-            lines.append(f"Diff:\n{self._code_block(diff_text[:3200])}")
+            lines.append(f"Diff:\n{self._code_block(diff_text)}")
         if data.get("command"):
             lines.append(f"Command: {data['command']}")
         if data.get("preview"):
             lines.append(f"Preview: {data['preview']}")
         if data.get("status"):
-            lines.append(f"Git status:\n{self._code_block(str(data['status'])[:1200])}")
+            lines.append(f"Git status:\n{self._code_block(str(data['status']))}")
         if data.get("diff_stat"):
-            lines.append(f"Git diff:\n{self._code_block(str(data['diff_stat'])[:1200])}")
+            lines.append(f"Git diff:\n{self._code_block(str(data['diff_stat']))}")
         if data.get("stdout"):
-            lines.append(f"Stdout:\n{self._code_block(str(data['stdout'])[:1200])}")
+            lines.append(f"Stdout:\n{self._code_block(str(data['stdout']))}")
         if data.get("stderr"):
-            lines.append(f"Stderr:\n{self._code_block(str(data['stderr'])[:1200])}")
+            lines.append(f"Stderr:\n{self._code_block(str(data['stderr']))}")
         if data.get("output"):
-            lines.append(f"Output:\n{self._code_block(str(data['output'])[:1200])}")
+            lines.append(f"Output:\n{self._code_block(str(data['output']))}")
         return "\n".join(lines)
 
     def _code_block(self, text: str) -> str:

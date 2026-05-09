@@ -1,13 +1,13 @@
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
-import threading
-import time
 
 from jclaw.ai.agent import AssistantAgent
 from jclaw.ai.retrospective import RetrospectiveNextAction
 from jclaw.ai.tool_loop import RunInterruptedError
 from jclaw.core.config import Config, DaemonConfig, MemoryConfig, ProviderConfig, TelegramConfig
+from jclaw.core.db import Database
 from jclaw.core.defaults import (
     AGENT_CONTINUE_TOOL_STEPS,
     AGENT_MAX_TOOL_STEPS,
@@ -22,40 +22,46 @@ from jclaw.core.defaults import (
     KNOWLEDGE_MAX_FOLDER_SCAN_FILES,
     KNOWLEDGE_MAX_TOTAL_CHUNKS,
     KNOWLEDGE_TEXT_PREVIEW_CHARS,
-    WORKSPACE_MAX_FILES_PER_CHANGE,
     WORKSPACE_AGENT_MAX_TOOL_STEPS,
     WORKSPACE_CONTINUE_TOOL_STEPS,
-    WORKSPACE_MAX_INTERNAL_READ_BYTES,
+    WORKSPACE_MAX_FILES_PER_CHANGE,
     WORKSPACE_MAX_PATH_ENTRIES,
     WORKSPACE_MAX_PREPARED_DIFF_BYTES,
     WORKSPACE_MAX_STEPS,
-    WORKSPACE_SHELL_OUTPUT_CHARS,
     WORKSPACE_SHELL_TIMEOUT_SECONDS,
 )
-from jclaw.core.db import Database
-from jclaw.tools.base import DecisionType, Observation, RuntimeState, ToolContext, ToolExecutionState, ToolLoopFinalizer, ToolLoopState, ToolResult
+from jclaw.tools.base import (
+    DecisionType,
+    Observation,
+    RuntimeState,
+    ToolContext,
+    ToolExecutionState,
+    ToolLoopFinalizer,
+    ToolLoopState,
+    ToolResult,
+)
 from jclaw.tools.email.tool import EmailTool
 
 
 class DummyLLM:
-    def chat(self, messages):  # noqa: ANN001
+    def chat(self, messages):
         return "stubbed"
 
 
 class SequenceLLM:
-    def __init__(self, responses) -> None:  # noqa: ANN001
+    def __init__(self, responses) -> None:
         self._responses = iter(responses)
 
-    def chat(self, messages):  # noqa: ANN001
+    def chat(self, messages):
         return next(self._responses)
 
 
 class RecordingSequenceLLM:
-    def __init__(self, responses) -> None:  # noqa: ANN001
+    def __init__(self, responses) -> None:
         self._responses = iter(responses)
         self.calls: list[list[dict]] = []
 
-    def chat(self, messages):  # noqa: ANN001
+    def chat(self, messages):
         self.calls.append(messages)
         return next(self._responses)
 
@@ -64,7 +70,7 @@ class FreshToolReplyLLM:
     def __init__(self) -> None:
         self.calls: list[list[dict[str, str]]] = []
 
-    def chat(self, messages):  # noqa: ANN001
+    def chat(self, messages):
         self.calls.append(messages)
         flattened = "\n".join(message["content"] for message in messages)
         if "already delegates to _read_text_file_state" in flattened:
@@ -78,7 +84,7 @@ class StrictGroundingToolReplyLLM:
     def __init__(self) -> None:
         self.calls: list[list[dict[str, str]]] = []
 
-    def chat(self, messages):  # noqa: ANN001
+    def chat(self, messages):
         self.calls.append(messages)
         flattened = "\n".join(message["content"] for message in messages)
         if "tests/tools/browser/test_browser_tool.py" in flattened:
@@ -94,7 +100,7 @@ class CompletionGroundingToolReplyLLM:
     def __init__(self) -> None:
         self.calls: list[list[dict[str, str]]] = []
 
-    def chat(self, messages):  # noqa: ANN001
+    def chat(self, messages):
         self.calls.append(messages)
         flattened = "\n".join(message["content"] for message in messages)
         if "Recent relevant observations:" not in flattened:
@@ -108,7 +114,7 @@ class CompletionGroundingToolReplyLLM:
         return "grounded-completion-reply"
 
 
-def _build_agent_for_test(tmp_path, llm) -> tuple[AssistantAgent, Database]:  # noqa: ANN001
+def _build_agent_for_test(tmp_path, llm) -> tuple[AssistantAgent, Database]:
     config = Config(
         provider=ProviderConfig(),
         telegram=TelegramConfig(),
@@ -190,7 +196,7 @@ class FakeBindingTool:
             },
         }
 
-    def materialize_params(self, action: str, params: dict, runtime) -> dict:  # noqa: ANN001
+    def materialize_params(self, action: str, params: dict, runtime) -> dict:
         materialized = dict(params)
         if action == "reply" and not materialized.get("message_id"):
             message_ref = runtime.artifacts_by_type.get("message_ref", {})
@@ -774,7 +780,7 @@ def test_email_controller_can_search_select_and_answer(tmp_path) -> None:
             ]
         ),
     )
-    agent.tools._tools["email"] = EmailTool(  # noqa: SLF001
+    agent.tools._tools["email"] = EmailTool(
         db,
         oauth_client_path=Path("/tmp/client.json"),
         token_dir=tmp_path / "tokens",
@@ -826,7 +832,7 @@ def test_email_controller_repairs_prose_answer_instead_of_falling_back_to_raw_se
             ]
         ),
     )
-    agent.tools._tools["email"] = EmailTool(  # noqa: SLF001
+    agent.tools._tools["email"] = EmailTool(
         db,
         oauth_client_path=Path("/tmp/client.json"),
         token_dir=tmp_path / "tokens",
@@ -880,7 +886,7 @@ def test_email_controller_can_search_select_and_draft_reply(tmp_path) -> None:
             ]
         ),
     )
-    agent.tools._tools["email"] = EmailTool(  # noqa: SLF001
+    agent.tools._tools["email"] = EmailTool(
         db,
         oauth_client_path=Path("/tmp/client.json"),
         token_dir=tmp_path / "tokens",
@@ -939,7 +945,7 @@ def test_email_controller_ignores_person_name_in_alias_and_uses_connected_mailbo
             ]
         ),
     )
-    agent.tools._tools["email"] = EmailTool(  # noqa: SLF001
+    agent.tools._tools["email"] = EmailTool(
         db,
         oauth_client_path=Path("/tmp/client.json"),
         token_dir=tmp_path / "tokens",
@@ -984,7 +990,7 @@ def test_llm_selected_tool_routes_to_browser(tmp_path) -> None:
             ]
         ),
     )
-    agent.tools._tools["browser"] = FakeBrowserObjectiveTool()  # noqa: SLF001
+    agent.tools._tools["browser"] = FakeBrowserObjectiveTool()
 
     reply = agent.handle_text("chat-1", "please open example.com for me")
     assert "example.com" in reply.lower()
@@ -1014,7 +1020,7 @@ def test_choose_browser_link_uses_inspected_elements(tmp_path) -> None:
     )
 
     browser = agent.tools.get("browser")
-    href = browser._choose_follow_up_url_via_llm(  # noqa: SLF001
+    href = browser._choose_follow_up_url_via_llm(
         "latest deepseek news",
         {
             "url": "https://html.duckduckgo.com/html/?q=latest+deepseek+news",
@@ -1053,7 +1059,7 @@ def test_choose_browser_next_action_uses_controller_output(tmp_path) -> None:
     )
 
     browser = agent.tools.get("browser")
-    decision = browser._decide_next_action_via_llm(  # noqa: SLF001
+    decision = browser._decide_next_action_via_llm(
         "latest trend on us stock market",
         {
             "url": "https://html.duckduckgo.com/html/?q=us+stock+market+trend",
@@ -1275,7 +1281,7 @@ def test_controller_state_limits_observations_to_latest_five(tmp_path) -> None:
             }
         )
 
-    controller_state = agent._controller_state_for_prompt(steps, runtime)  # noqa: SLF001
+    controller_state = agent._controller_state_for_prompt(steps, runtime)
 
     assert controller_state["step_count"] == 6
     assert len(controller_state["observations"]) == 5
@@ -1300,9 +1306,9 @@ def test_controller_state_includes_authoritative_local_datetime(tmp_path) -> Non
     db = Database(config.daemon.db_path)
     agent = AssistantAgent(config, db, DummyLLM())
     fixed_now = datetime.fromisoformat("2026-04-26T12:34:56-04:00")
-    agent._controller_now = lambda: fixed_now  # type: ignore[method-assign]  # noqa: SLF001
+    agent._controller_now = lambda: fixed_now  # type: ignore[method-assign]
 
-    controller_state = agent._controller_state_for_prompt([], RuntimeState(request="schedule reminder"))  # noqa: SLF001
+    controller_state = agent._controller_state_for_prompt([], RuntimeState(request="schedule reminder"))
 
     assert controller_state["current_local_time"] == "2026-04-26T12:34:56-04:00"
     assert controller_state["current_local_date"] == "2026-04-26"
@@ -1365,7 +1371,7 @@ def test_controller_state_preserves_workspace_file_and_diff_artifact_previews(tm
             controller_output=agent.tools.get("workspace").controller_output("read_file", result),
         )
     )
-    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+    controller_state = agent._controller_state_for_prompt(
         [{"tool": "workspace", "action": "read_file", "reason": "Inspect file", "result": result}],
         runtime,
     )
@@ -1373,12 +1379,12 @@ def test_controller_state_preserves_workspace_file_and_diff_artifact_previews(tm
     file_preview = controller_state["artifacts_by_type"]["workspace_file"]["content"]
     diff_preview = controller_state["artifacts_by_type"]["workspace_diff"]["diff"]
     assert len(file_preview) > 220
-    assert len(file_preview) == 4003
+    assert len(file_preview) == 5000
     assert len(diff_preview) > 220
-    assert len(diff_preview) == 4003
+    assert len(diff_preview) == 5000
     latest_preview = controller_state["latest_observation"]["data_preview"]["content"]
     assert len(latest_preview) > 220
-    assert len(latest_preview) == 4003
+    assert len(latest_preview) == 5000
     db.close()
 
 
@@ -1416,11 +1422,11 @@ def test_controller_state_uses_workspace_controller_output_for_observation_previ
     runtime.append(
         Observation.from_tool_result(
             result,
-            controller_output=workspace.controller_output("read_snippet", result),
+            controller_output=workspace.controller_output("read_file", result),
         )
     )
-    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
-        [{"tool": "workspace", "action": "read_snippet", "reason": "Inspect snippet", "result": result}],
+    controller_state = agent._controller_state_for_prompt(
+        [{"tool": "workspace", "action": "read_file", "reason": "Inspect snippet", "result": result}],
         runtime,
     )
 
@@ -1428,7 +1434,7 @@ def test_controller_state_uses_workspace_controller_output_for_observation_previ
     assert latest_preview["target_path"] == "/repo/app.py"
     assert latest_preview["start_line"] == 10
     assert latest_preview["end_line"] == 20
-    assert len(latest_preview["content"]) == 4003
+    assert len(latest_preview["content"]) == 5000
     db.close()
 
 
@@ -1470,7 +1476,7 @@ def test_controller_state_uses_knowledge_controller_output_for_observation_previ
             controller_output=knowledge.controller_output("analyze_paths", result),
         )
     )
-    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+    controller_state = agent._controller_state_for_prompt(
         [{"tool": "knowledge", "action": "analyze_paths", "reason": "Analyze files", "result": result}],
         runtime,
     )
@@ -1526,7 +1532,7 @@ def test_controller_state_uses_email_controller_output_for_observation_preview(t
             controller_output=email.controller_output("search_messages", result),
         )
     )
-    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+    controller_state = agent._controller_state_for_prompt(
         [{"tool": "email", "action": "search_messages", "reason": "Find matching email", "result": result}],
         runtime,
     )
@@ -1585,7 +1591,7 @@ def test_controller_state_uses_browser_controller_output_for_observation_preview
             controller_output=browser.controller_output("read_page", result),
         )
     )
-    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+    controller_state = agent._controller_state_for_prompt(
         [{"tool": "browser", "action": "read_page", "reason": "Read page", "result": result}],
         runtime,
     )
@@ -1631,7 +1637,7 @@ def test_controller_state_uses_automation_controller_output_for_observation_prev
             controller_output=automation.controller_output("list_schedules", result),
         )
     )
-    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+    controller_state = agent._controller_state_for_prompt(
         [{"tool": "automation", "action": "list_schedules", "reason": "List schedules", "result": result}],
         runtime,
     )
@@ -1670,7 +1676,7 @@ def test_controller_state_uses_memory_controller_output_for_observation_preview(
             controller_output=memory.controller_output("search_memories", result),
         )
     )
-    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+    controller_state = agent._controller_state_for_prompt(
         [{"tool": "memory", "action": "search_memories", "reason": "Search memory", "result": result}],
         runtime,
     )
@@ -1720,7 +1726,7 @@ def test_controller_state_uses_permissions_controller_output_for_observation_pre
             controller_output=permissions.controller_output("list_grants", result),
         )
     )
-    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+    controller_state = agent._controller_state_for_prompt(
         [{"tool": "permissions", "action": "list_grants", "reason": "List grants", "result": result}],
         runtime,
     )
@@ -1767,14 +1773,14 @@ def test_controller_state_preserves_workspace_patch_artifact_preview(tmp_path) -
     )
     runtime.append(Observation.from_tool_result(result))
 
-    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+    controller_state = agent._controller_state_for_prompt(
         [{"tool": "workspace", "action": "apply_patch", "reason": "Patch file", "result": result}],
         runtime,
     )
 
     patch_preview = controller_state["artifacts_by_type"]["workspace_patch"]["diff"]
     assert len(patch_preview) > 220
-    assert len(patch_preview) == 4003
+    assert len(patch_preview) == 5000
     db.close()
 
 
@@ -1821,16 +1827,16 @@ def test_controller_state_preserves_workspace_command_result_preview(tmp_path) -
     )
     runtime.append(Observation.from_tool_result(result))
 
-    controller_state = agent._controller_state_for_prompt(  # noqa: SLF001
+    controller_state = agent._controller_state_for_prompt(
         [{"tool": "workspace", "action": "run_command", "reason": "Run tests", "result": result}],
         runtime,
     )
 
     command_preview = controller_state["artifacts_by_type"]["workspace_command_result"]
     assert len(command_preview["stdout"]) > 220
-    assert len(command_preview["stdout"]) == 4003
+    assert len(command_preview["stdout"]) == 5000
     assert len(command_preview["stderr"]) > 220
-    assert len(command_preview["stderr"]) == 4003
+    assert len(command_preview["stderr"]) == 5000
     db.close()
 
 
@@ -1871,7 +1877,7 @@ def test_tool_result_for_controller_includes_workspace_read_fields(tmp_path) -> 
         },
     )
 
-    controller_view = agent._tool_result_for_controller("workspace", "read_file", result)  # noqa: SLF001
+    controller_view = agent._tool_result_for_controller("workspace", "read_file", result)
 
     assert controller_view["summary"] == "Read source file."
     assert controller_view["needs_confirmation"] is False
@@ -1883,7 +1889,7 @@ def test_tool_result_for_controller_includes_workspace_read_fields(tmp_path) -> 
     db.close()
 
 
-def test_tool_catalog_and_controller_prompt_bias_workspace_line_requests_to_read_snippet(tmp_path) -> None:
+def test_tool_catalog_and_controller_prompt_bias_workspace_line_requests_to_read_file(tmp_path) -> None:
     config = Config(
         provider=ProviderConfig(),
         telegram=TelegramConfig(),
@@ -1903,7 +1909,7 @@ def test_tool_catalog_and_controller_prompt_bias_workspace_line_requests_to_read
         def __init__(self) -> None:
             super().__init__(
                 [
-                    '{"type":"tool_call","tool":"workspace","action":"read_snippet","params":{"path":"src/jclaw/tools/workspace/tool.py","start_line":1290,"end_line":1415},"answer":"","reason":"The user requested a specific line range."}'
+                    '{"type":"tool_call","tool":"workspace","action":"read_file","params":{"path":"src/jclaw/tools/workspace/tool.py","start_line":1290,"end_line":1415},"answer":"","reason":"The user requested a specific line range."}'
                 ]
             )
             self.last_system_prompt = ""
@@ -1915,14 +1921,14 @@ def test_tool_catalog_and_controller_prompt_bias_workspace_line_requests_to_read
     llm = PromptCapturingLLM()
     agent = AssistantAgent(config, db, llm)
 
-    catalog = json.loads(agent._tool_catalog_for_prompt(agent.tools.list_tools()))  # noqa: SLF001
+    catalog = json.loads(agent._tool_catalog_for_prompt(agent.tools.list_tools()))
     workspace_tool = next(item for item in catalog if item["name"] == "workspace")
     read_file = workspace_tool["actions"]["read_file"]["description"]
-    read_snippet = workspace_tool["actions"]["read_snippet"]["description"]
     controller_guidance = workspace_tool["controller_guidance"]
 
-    assert "Do not use this when the user asks for explicit line numbers" in read_file
-    assert "Use this when the user asks for explicit line numbers" in read_snippet
+    assert "Optional start_line and end_line" in read_file
+    assert "start_line is omitted" in read_file
+    assert "end_line is omitted" in read_file
     assert "switch to mutation as soon as the edit site is known" in controller_guidance
     assert "prefer apply_patch over more reads" in controller_guidance
     assert "After a code mutation, prefer a verification step such as run_command" in controller_guidance
@@ -1931,7 +1937,7 @@ def test_tool_catalog_and_controller_prompt_bias_workspace_line_requests_to_read
     assert "prefer revert_last_change instead of inferring the target from git diff" in controller_guidance
     assert "prefer redo_last_change" in controller_guidance
 
-    decision = agent._decide_next_tool_step(  # noqa: SLF001
+    decision = agent._decide_next_tool_step(
         "chat-1",
         "Show me lines 1290 to 1415 of src/jclaw/tools/workspace/tool.py",
         user_name="tester",
@@ -1942,7 +1948,7 @@ def test_tool_catalog_and_controller_prompt_bias_workspace_line_requests_to_read
     assert "prefer the focused range read" in llm.last_system_prompt
     assert decision is not None
     assert decision.tool == "workspace"
-    assert decision.action == "read_snippet"
+    assert decision.action == "read_file"
     assert decision.params["start_line"] == 1290
     assert decision.params["end_line"] == 1415
     db.close()
@@ -2008,7 +2014,7 @@ def test_browser_tool_loop_reuses_one_session_across_steps_and_closes_at_end(tmp
         ),
     )
     fake_browser = FakeBrowserTool()
-    agent.tools._tools["browser"] = fake_browser  # noqa: SLF001
+    agent.tools._tools["browser"] = fake_browser
 
     reply = agent.handle_text("chat-1", "find a millburn remodeling contractor")
 
@@ -2035,7 +2041,7 @@ def test_generic_tool_loop_state_contract_supports_non_browser_finalizers(tmp_pa
         ),
     )
     scratchpad = FakeScratchpadTool()
-    agent.tools._tools["scratchpad"] = scratchpad  # noqa: SLF001
+    agent.tools._tools["scratchpad"] = scratchpad
 
     reply = agent.handle_text("chat-1", "do scratchpad work")
 
@@ -2064,7 +2070,7 @@ def test_workspace_tool_loop_uses_higher_step_budget_than_general_tasks(tmp_path
         ),
     )
     workspace = FakeLongWorkspaceTool()
-    agent.tools._tools["workspace"] = workspace  # noqa: SLF001
+    agent.tools._tools["workspace"] = workspace
 
     reply = agent.handle_text("chat-1", "inspect and then answer")
 
@@ -2093,7 +2099,7 @@ def test_general_tool_loop_exhaustion_requires_explicit_continue(tmp_path) -> No
         ),
     )
     tool = FakeLongTool()
-    agent.tools._tools["longtool"] = tool  # noqa: SLF001
+    agent.tools._tools["longtool"] = tool
 
     reply = agent.handle_text("chat-1", "do a long general task")
 
@@ -2133,7 +2139,7 @@ def test_workspace_tool_loop_continue_adds_more_budget_after_exhaustion(tmp_path
         ),
     )
     workspace = FakeLongWorkspaceTool()
-    agent.tools._tools["workspace"] = workspace  # noqa: SLF001
+    agent.tools._tools["workspace"] = workspace
     agent.config.workspace.agent_max_tool_steps = 4
 
     first_reply = agent.handle_text("chat-1", "inspect and then answer")
@@ -2163,7 +2169,7 @@ def test_interrupt_requested_stops_tool_loop_at_safe_boundary_and_records_contex
         ),
     )
     tool = BlockingInterruptTool()
-    agent.tools._tools["interruptible"] = tool  # noqa: SLF001
+    agent.tools._tools["interruptible"] = tool
 
     outcome: dict[str, object] = {}
 
@@ -2182,7 +2188,7 @@ def test_interrupt_requested_stops_tool_loop_at_safe_boundary_and_records_contex
 
     assert isinstance(outcome.get("exception"), RunInterruptedError)
     assert [action for action, _ in tool.invocations] == ["step_one"]
-    interrupted = agent._current_interrupted_context("chat-1")  # noqa: SLF001
+    interrupted = agent._current_interrupted_context("chat-1")
     assert interrupted is not None
     assert interrupted["request"] == "do interruptible work"
     assert interrupted["latest_action"] == "step_one"
@@ -2203,7 +2209,7 @@ def test_superseded_paused_continuation_becomes_interrupted_context_for_next_tur
     )
     agent, db = _build_agent_for_test(tmp_path, llm)
     tool = FakeLongTool()
-    agent.tools._tools["longtool"] = tool  # noqa: SLF001
+    agent.tools._tools["longtool"] = tool
 
     first_reply = agent.handle_text("chat-1", "do a long general task")
     second_reply = agent.handle_text("chat-1", "ignore that and answer directly")
@@ -2219,9 +2225,9 @@ def test_superseded_paused_continuation_becomes_interrupted_context_for_next_tur
 
 def test_interrupted_followup_context_is_exposed_in_messages_without_hardcoded_relation(tmp_path) -> None:
     agent, db = _build_agent_for_test(tmp_path, DummyLLM())
-    agent._record_interrupted_run_context(  # noqa: SLF001
+    agent._record_interrupted_run_context(
         "chat-1",
-        agent._build_interrupted_run_context(  # noqa: SLF001
+        agent._build_interrupted_run_context(
             request='update notion page jude test content to be "first version"',
             step_count=1,
             summary="Interrupted after resolving the target page.",
@@ -2231,9 +2237,9 @@ def test_interrupted_followup_context_is_exposed_in_messages_without_hardcoded_r
             artifact_types=["notion_search_results"],
         ),
     )
-    agent._begin_run("chat-1")  # noqa: SLF001
+    agent._begin_run("chat-1")
 
-    messages = agent._build_messages(  # noqa: SLF001
+    messages = agent._build_messages(
         "chat-1",
         user_text='actually make it "second version"',
         user_name="Jude",
@@ -2248,27 +2254,27 @@ def test_interrupted_followup_context_is_exposed_in_messages_without_hardcoded_r
 
 def test_controller_state_exposes_generic_interrupted_context(tmp_path) -> None:
     agent, db = _build_agent_for_test(tmp_path, DummyLLM())
-    agent._record_interrupted_run_context(  # noqa: SLF001
+    agent._record_interrupted_run_context(
         "chat-1",
-        agent._build_interrupted_run_context(  # noqa: SLF001
+        agent._build_interrupted_run_context(
             request="find the browser tool comment and update it",
             step_count=2,
             summary="Interrupted after reading the target snippet.",
             latest_tool="workspace",
-            latest_action="read_snippet",
+            latest_action="read_file",
             latest_observation={"summary": "Read lines 128-138 from /repo/browser/tool.py."},
             artifact_types=["workspace_read"],
         ),
     )
-    agent._begin_run("chat-1")  # noqa: SLF001
+    agent._begin_run("chat-1")
 
-    state = agent._controller_state_for_prompt(  # noqa: SLF001
+    state = agent._controller_state_for_prompt(
         [],
         RuntimeState(request='actually just tell me if the comment already exists'),
         chat_id="chat-1",
     )
 
-    assert state["interrupted_run_context"]["latest_action"] == "read_snippet"
+    assert state["interrupted_run_context"]["latest_action"] == "read_file"
     assert state["interrupted_run_context"]["request"] == "find the browser tool comment and update it"
     db.close()
 
@@ -2284,7 +2290,7 @@ def test_execution_trace_records_controller_tool_and_completion_events(tmp_path)
             ]
         ),
     )
-    agent.tools._tools["fake"] = FakeTool()  # noqa: SLF001
+    agent.tools._tools["fake"] = FakeTool()
     db.set_trace_mode("chat-1", "summary")
 
     reply = agent.handle_text("chat-1", "inspect the file and report back")
@@ -2348,20 +2354,20 @@ def test_controller_accepts_structured_tool_call_without_explicit_type(tmp_path)
     )
     notion = FakeTool()
     notion.name = "notion"
-    notion.describe = lambda: {  # noqa: ARG005
+    notion.describe = lambda: {
         "name": "notion",
         "description": "Fake notion tool.",
         "actions": {
             "search_pages": {"description": "Search pages."},
         },
     }
-    notion.invoke = lambda action, params, ctx: ToolResult(  # noqa: ARG005
+    notion.invoke = lambda action, params, ctx: ToolResult(
         ok=True,
         summary="Found 1 Notion page.",
         data={"result_count": 1, "matches": [{"page_id": "page-1", "title": "2026 interview"}]},
     )
-    notion.format_result = lambda action, result: result.summary  # noqa: ARG005
-    agent.tools._tools["notion"] = notion  # noqa: SLF001
+    notion.format_result = lambda action, result: result.summary
+    agent.tools._tools["notion"] = notion
 
     reply = agent.handle_text("chat-1", "find the notion page and update it")
 
@@ -2383,20 +2389,20 @@ def test_controller_attempts_schema_repair_for_structured_but_invalid_response(t
     )
     notion = FakeTool()
     notion.name = "notion"
-    notion.describe = lambda: {  # noqa: ARG005
+    notion.describe = lambda: {
         "name": "notion",
         "description": "Fake notion tool.",
         "actions": {
             "search_pages": {"description": "Search pages."},
         },
     }
-    notion.invoke = lambda action, params, ctx: ToolResult(  # noqa: ARG005
+    notion.invoke = lambda action, params, ctx: ToolResult(
         ok=True,
         summary="Found 1 Notion page.",
         data={"result_count": 1},
     )
-    notion.format_result = lambda action, result: result.summary  # noqa: ARG005
-    agent.tools._tools["notion"] = notion  # noqa: SLF001
+    notion.format_result = lambda action, result: result.summary
+    agent.tools._tools["notion"] = notion
     db.set_trace_mode("chat-1", "summary")
 
     reply = agent.handle_text("chat-1", "find the notion page and update it")
@@ -2423,20 +2429,20 @@ def test_controller_repairs_tool_action_not_in_catalog(tmp_path) -> None:
     )
     notion = FakeTool()
     notion.name = "notion"
-    notion.describe = lambda: {  # noqa: ARG005
+    notion.describe = lambda: {
         "name": "notion",
         "description": "Fake notion tool.",
         "actions": {
             "get_page_metadata": {"description": "Read page metadata."},
         },
     }
-    notion.invoke = lambda action, params, ctx: ToolResult(  # noqa: ARG005
+    notion.invoke = lambda action, params, ctx: ToolResult(
         ok=True,
         summary="Loaded page metadata.",
         data={"page_id": params.get("page_id"), "title": "2026 interview"},
     )
-    notion.format_result = lambda action, result: result.summary  # noqa: ARG005
-    agent.tools._tools["notion"] = notion  # noqa: SLF001
+    notion.format_result = lambda action, result: result.summary
+    agent.tools._tools["notion"] = notion
     db.set_trace_mode("chat-1", "summary")
 
     reply = agent.handle_text("chat-1", "find the notion page metadata")
@@ -2449,11 +2455,11 @@ def test_controller_repairs_tool_action_not_in_catalog(tmp_path) -> None:
     db.close()
 
 
-def test_retrospective_gate_skips_trivial_completion(tmp_path) -> None:  # noqa: ANN001
+def test_retrospective_gate_skips_trivial_completion(tmp_path) -> None:
     agent, db = _build_agent_for_test(tmp_path, DummyLLM())
     runtime = RuntimeState(request="what tools do you have")
 
-    should_run = agent._should_run_retrospective_critique(  # noqa: SLF001
+    should_run = agent._should_run_retrospective_critique(
         decision_type=DecisionType.ANSWER,
         runtime=runtime,
         steps=[],
@@ -2463,13 +2469,13 @@ def test_retrospective_gate_skips_trivial_completion(tmp_path) -> None:  # noqa:
     db.close()
 
 
-def test_retrospective_gate_runs_for_multi_step_runtime(tmp_path) -> None:  # noqa: ANN001
+def test_retrospective_gate_runs_for_multi_step_runtime(tmp_path) -> None:
     agent, db = _build_agent_for_test(tmp_path, DummyLLM())
     runtime = RuntimeState(request="update a notion page")
     runtime.append(Observation(ok=True, summary="Found a page."))
     runtime.append(Observation(ok=True, summary="Loaded page content."))
 
-    should_run = agent._should_run_retrospective_critique(  # noqa: SLF001
+    should_run = agent._should_run_retrospective_critique(
         decision_type=DecisionType.COMPLETE,
         runtime=runtime,
         steps=[{"tool": "notion"}, {"tool": "notion"}],
@@ -2479,12 +2485,12 @@ def test_retrospective_gate_runs_for_multi_step_runtime(tmp_path) -> None:  # no
     db.close()
 
 
-def test_retrospective_gate_runs_for_failed_or_confirmation_observations(tmp_path) -> None:  # noqa: ANN001
+def test_retrospective_gate_runs_for_failed_or_confirmation_observations(tmp_path) -> None:
     agent, db = _build_agent_for_test(tmp_path, DummyLLM())
 
     failed_runtime = RuntimeState(request="do a risky update")
     failed_runtime.append(Observation(ok=False, summary="Latest check failed."))
-    assert agent._should_run_retrospective_critique(  # noqa: SLF001
+    assert agent._should_run_retrospective_critique(
         decision_type=DecisionType.ANSWER,
         runtime=failed_runtime,
         steps=[{"tool": "workspace"}],
@@ -2492,7 +2498,7 @@ def test_retrospective_gate_runs_for_failed_or_confirmation_observations(tmp_pat
 
     confirm_runtime = RuntimeState(request="draft an email")
     confirm_runtime.append(Observation(ok=True, summary="Draft is ready.", needs_confirmation=True))
-    assert agent._should_run_retrospective_critique(  # noqa: SLF001
+    assert agent._should_run_retrospective_critique(
         decision_type=DecisionType.ANSWER,
         runtime=confirm_runtime,
         steps=[{"tool": "email"}],
@@ -2501,7 +2507,7 @@ def test_retrospective_gate_runs_for_failed_or_confirmation_observations(tmp_pat
     db.close()
 
 
-def test_run_retrospective_critique_parses_valid_json_response(tmp_path) -> None:  # noqa: ANN001
+def test_run_retrospective_critique_parses_valid_json_response(tmp_path) -> None:
     agent, db = _build_agent_for_test(
         tmp_path,
         SequenceLLM(
@@ -2512,7 +2518,7 @@ def test_run_retrospective_critique_parses_valid_json_response(tmp_path) -> None
     )
     runtime = RuntimeState(request="update the notion page")
     runtime.append(Observation(ok=True, summary="Found the page."))
-    critique = agent._run_retrospective_critique(  # noqa: SLF001
+    critique = agent._run_retrospective_critique(
         "chat-1",
         "update the notion page",
         user_name="tester",
@@ -2531,7 +2537,7 @@ def test_run_retrospective_critique_parses_valid_json_response(tmp_path) -> None
     db.close()
 
 
-def test_run_retrospective_critique_repairs_unparseable_response(tmp_path) -> None:  # noqa: ANN001
+def test_run_retrospective_critique_repairs_unparseable_response(tmp_path) -> None:
     agent, db = _build_agent_for_test(
         tmp_path,
         SequenceLLM(
@@ -2543,7 +2549,7 @@ def test_run_retrospective_critique_repairs_unparseable_response(tmp_path) -> No
     )
     runtime = RuntimeState(request="update the notion page")
     runtime.append(Observation(ok=True, summary="Found the page."))
-    critique = agent._run_retrospective_critique(  # noqa: SLF001
+    critique = agent._run_retrospective_critique(
         "chat-1",
         "update the notion page",
         user_name="tester",
@@ -2561,7 +2567,7 @@ def test_run_retrospective_critique_repairs_unparseable_response(tmp_path) -> No
     db.close()
 
 
-def test_retrospective_critique_can_resume_tool_loop_before_answer(tmp_path) -> None:  # noqa: ANN001
+def test_retrospective_critique_can_resume_tool_loop_before_answer(tmp_path) -> None:
     agent, db = _build_agent_for_test(
         tmp_path,
         SequenceLLM(
@@ -2577,8 +2583,8 @@ def test_retrospective_critique_can_resume_tool_loop_before_answer(tmp_path) -> 
         ),
     )
     fake = FakeTool()
-    agent.tools._tools["fake"] = fake  # noqa: SLF001
-    agent._should_run_retrospective_critique = lambda **kwargs: True  # type: ignore[method-assign]  # noqa: SLF001
+    agent.tools._tools["fake"] = fake
+    agent._should_run_retrospective_critique = lambda **kwargs: True  # type: ignore[method-assign]
     db.set_trace_mode("chat-1", "summary")
 
     reply = agent.handle_text("chat-1", "do the fake task")
@@ -2595,7 +2601,7 @@ def test_retrospective_critique_can_resume_tool_loop_before_answer(tmp_path) -> 
     db.close()
 
 
-def test_retrospective_critique_runs_for_latest_result_fallback(tmp_path) -> None:  # noqa: ANN001
+def test_retrospective_critique_runs_for_latest_result_fallback(tmp_path) -> None:
     agent, db = _build_agent_for_test(
         tmp_path,
         SequenceLLM(
@@ -2610,7 +2616,7 @@ def test_retrospective_critique_runs_for_latest_result_fallback(tmp_path) -> Non
         ),
     )
     fake = FakeTool()
-    agent.tools._tools["fake"] = fake  # noqa: SLF001
+    agent.tools._tools["fake"] = fake
     db.set_trace_mode("chat-1", "summary")
 
     reply = agent.handle_text("chat-1", "do the fake task")
@@ -2629,10 +2635,10 @@ def test_retrospective_critique_runs_for_latest_result_fallback(tmp_path) -> Non
 
 def test_compose_tool_reply_uses_latest_tool_result_not_stale_history(tmp_path) -> None:
     agent, db = _build_agent_for_test(tmp_path, FreshToolReplyLLM())
-    agent.tools._tools["fake"] = FakeTool()  # noqa: SLF001
+    agent.tools._tools["fake"] = FakeTool()
     db.store_message("chat-1", "assistant", "_read_file already delegates to _read_text_file_state with caching enabled.")
 
-    reply = agent._compose_tool_reply(  # noqa: SLF001
+    reply = agent._compose_tool_reply(
         "chat-1",
         "let's enable caching or memoization for _read_file in src/jclaw/tools/workspace/tool.py",
         user_name="tester",
@@ -2658,11 +2664,11 @@ def test_compose_tool_reply_uses_strict_grounding_for_workspace_code_reads(tmp_p
         "============================================================ 4 passed in 0.64s ============================================================",
     )
 
-    reply = agent._compose_tool_reply(  # noqa: SLF001
+    reply = agent._compose_tool_reply(
         "chat-1",
         "Add a short comment above controller_output in src/jclaw/tools/browser/tool.py explaining why the payload is selective.",
         user_name="tester",
-        decision={"tool": "workspace", "action": "read_snippet", "reason": "Inspect code", "params": {}},
+        decision={"tool": "workspace", "action": "read_file", "reason": "Inspect code", "params": {}},
         result=ToolResult(
             ok=True,
             summary="Read lines 128-138 from /repo/browser/tool.py.",
@@ -2713,7 +2719,7 @@ def test_compose_tool_reply_includes_recent_workspace_evidence_for_verification_
     steps = [
         {
             "tool": "workspace",
-            "action": "read_snippet",
+            "action": "read_file",
             "reason": "Inspect code",
             "result": snippet_result,
         },
@@ -2725,7 +2731,7 @@ def test_compose_tool_reply_includes_recent_workspace_evidence_for_verification_
         },
     ]
 
-    reply = agent._compose_tool_reply(  # noqa: SLF001
+    reply = agent._compose_tool_reply(
         "chat-1",
         "Add a short comment above controller_output in src/jclaw/tools/browser/tool.py explaining why the payload is selective, and verify browser-related tests still pass.",
         user_name="tester",
@@ -2751,7 +2757,7 @@ def test_apply_tool_loop_state_sets_state_and_finalizer(tmp_path) -> None:
         ),
     )
 
-    agent._apply_tool_loop_state(execution, "scratchpad", result)  # noqa: SLF001
+    agent._apply_tool_loop_state(execution, "scratchpad", result)
 
     assert execution.tool_state["scratchpad"] == {"resource_id": "scratch-1"}
     assert execution.finalizers["scratchpad"].action == "release"
@@ -2766,7 +2772,7 @@ def test_apply_tool_loop_state_clears_requested_state_and_finalizer(tmp_path) ->
         finalizers={"scratchpad": ToolLoopFinalizer(action="release", params={"resource_id": "scratch-1"})},
     )
 
-    agent._apply_tool_loop_state(  # noqa: SLF001
+    agent._apply_tool_loop_state(
         execution,
         "scratchpad",
         ToolResult(ok=True, summary="Released resource.", loop_state=ToolLoopState(clear=True)),
@@ -2784,7 +2790,7 @@ def test_apply_tool_loop_state_can_clear_only_finalizer_without_touching_state(t
         finalizers={"browser": ToolLoopFinalizer(action="close_session", params={"session_id": "sess-1"})},
     )
 
-    agent._apply_tool_loop_state(  # noqa: SLF001
+    agent._apply_tool_loop_state(
         execution,
         "browser",
         ToolResult(ok=True, summary="Session should stay open.", loop_state=ToolLoopState(clear_finalizer=True)),
@@ -2802,7 +2808,7 @@ def test_apply_tool_loop_state_ignores_missing_loop_state(tmp_path) -> None:
         finalizers={"browser": ToolLoopFinalizer(action="close_session", params={"session_id": "sess-1"})},
     )
 
-    agent._apply_tool_loop_state(  # noqa: SLF001
+    agent._apply_tool_loop_state(
         execution,
         "browser",
         ToolResult(ok=True, summary="No loop-state change."),
@@ -2850,11 +2856,11 @@ def test_workspace_and_knowledge_defaults_are_centralized(tmp_path) -> None:
     assert config.workspace.max_steps == WORKSPACE_MAX_STEPS
     assert config.workspace.agent_max_tool_steps == WORKSPACE_AGENT_MAX_TOOL_STEPS
     assert config.workspace.shell_timeout_seconds == WORKSPACE_SHELL_TIMEOUT_SECONDS
-    assert config.workspace.shell_output_chars == WORKSPACE_SHELL_OUTPUT_CHARS
+    assert config.workspace.shell_output_chars is None
     assert config.workspace.max_prepared_diff_bytes == WORKSPACE_MAX_PREPARED_DIFF_BYTES
     assert config.workspace.max_files_per_change == WORKSPACE_MAX_FILES_PER_CHANGE
     assert config.workspace.max_path_entries == WORKSPACE_MAX_PATH_ENTRIES
-    assert config.workspace.max_internal_read_bytes == WORKSPACE_MAX_INTERNAL_READ_BYTES
+    assert config.workspace.max_internal_read_bytes is None
     assert config.automation.enabled == AUTOMATION_ENABLED
     assert config.knowledge.max_file_read_bytes == KNOWLEDGE_MAX_FILE_READ_BYTES
     assert config.knowledge.max_folder_scan_files == KNOWLEDGE_MAX_FOLDER_SCAN_FILES
@@ -3290,7 +3296,7 @@ def test_automation_prompt_catalog_prefers_structured_when_only(tmp_path) -> Non
     db = Database(config.daemon.db_path)
     agent = AssistantAgent(config, db, DummyLLM())
 
-    catalog = json.loads(agent._tool_catalog_for_prompt(agent.tools.list_tools()))  # noqa: SLF001
+    catalog = json.loads(agent._tool_catalog_for_prompt(agent.tools.list_tools()))
     automation = next(item for item in catalog if item["name"] == "automation")
     create_schema = automation["actions"]["create_schedule"]["input_schema"]["properties"]
     update_schema = automation["actions"]["update_schedule"]["input_schema"]["properties"]
