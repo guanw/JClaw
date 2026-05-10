@@ -19,6 +19,7 @@ from jclaw.tools.automation.tool import AutomationTool
 from jclaw.tools.base import DecisionType, RuntimeState
 from jclaw.tools.browser.tool import BrowserTool
 from jclaw.tools.email.tool import EmailTool
+from jclaw.tools.environment.tool import EnvironmentTool
 from jclaw.tools.knowledge.tool import KnowledgeTool
 from jclaw.tools.memory.tool import MemoryTool
 from jclaw.tools.notion.tool import NotionTool
@@ -55,6 +56,13 @@ class AssistantAgent(
         self.tools = ToolRegistry()
         self.tools.register(MemoryTool(db, search_limit=config.memory.max_memory_items))
         self.tools.register(PermissionsTool(db))
+        self.tools.register(
+            EnvironmentTool(
+                db,
+                repo_root=config.repo_root,
+                environment_path=config.daemon.environment_path,
+            )
+        )
         if config.automation.enabled:
             self.tools.register(AutomationTool(db))
         if config.email.enabled:
