@@ -7,7 +7,12 @@ from typing import Any
 
 from playwright.sync_api import BrowserContext, Page, Playwright, sync_playwright
 
-from jclaw.core.defaults import BROWSER_SLOW_MO_MS, BROWSER_VIEWPORT_HEIGHT, BROWSER_VIEWPORT_WIDTH
+from jclaw.core.defaults import (
+    BROWSER_SLOW_MO_MS,
+    BROWSER_VIEWPORT_HEIGHT,
+    BROWSER_VIEWPORT_WIDTH,
+    GENERIC_PREVIEW_CHARS,
+)
 from jclaw.tools.browser.models import Target
 from jclaw.tools.browser.session import BrowserSessionStore
 
@@ -167,7 +172,7 @@ class PlaywrightBrowserDriver:
         elements = page.evaluate(
             """
             ({ pageKind }) => {
-              const normalize = (value, limit = 220) => {
+              const normalize = (value, limit = __GENERIC_PREVIEW_CHARS__) => {
                 const text = (value || '').replace(/\\s+/g, ' ').trim();
                 return text.slice(0, limit);
               };
@@ -268,7 +273,7 @@ class PlaywrightBrowserDriver:
               });
               return items.slice(0, 40).map(({ y, ...item }) => item);
             }
-            """,
+            """.replace("__GENERIC_PREVIEW_CHARS__", str(GENERIC_PREVIEW_CHARS)),
             {"pageKind": page_kind},
         )
         return elements if isinstance(elements, list) else []

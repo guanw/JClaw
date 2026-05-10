@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
 
+from jclaw.core.defaults import GENERIC_PREVIEW_CHARS
+
 
 @dataclass(slots=True)
 class ToolLoopFinalizer:
@@ -239,7 +241,11 @@ class Observation:
         if isinstance(value, str):
             text = value.strip()
             limit_value = (preview_limits or {}).get(field_name)
-            limit = int(limit_value) if isinstance(limit_value, int | float) and int(limit_value) > 0 else 220
+            limit = (
+                int(limit_value)
+                if isinstance(limit_value, int | float) and int(limit_value) > 0
+                else GENERIC_PREVIEW_CHARS
+            )
             return f"{text[:limit]}..." if len(text) > limit else text
         if depth >= 2:
             return f"<{type(value).__name__}>"

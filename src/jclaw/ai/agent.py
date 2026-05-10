@@ -89,6 +89,7 @@ class AssistantAgent(
                     config.daemon.state_dir / "tools" / "workspace",
                     config.repo_root,
                     options={
+                        "environment_path": config.daemon.environment_path,
                         "max_steps": config.workspace.max_steps,
                         "shell_timeout_seconds": config.workspace.shell_timeout_seconds,
                         "shell_output_chars": config.workspace.shell_output_chars,

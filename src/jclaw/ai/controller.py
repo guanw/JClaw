@@ -5,6 +5,7 @@ import logging
 import re
 from typing import Any
 
+from jclaw.core.defaults import GENERIC_PREVIEW_CHARS
 from jclaw.tools.base import Decision, DecisionType, Observation, RuntimeState, ToolResult
 
 LOGGER = logging.getLogger(__name__)
@@ -158,7 +159,7 @@ class AgentControllerMixin:
             return value
         if isinstance(value, str):
             text = value.strip()
-            return f"{text[:220]}..." if len(text) > 220 else text
+            return f"{text[:GENERIC_PREVIEW_CHARS]}..." if len(text) > GENERIC_PREVIEW_CHARS else text
         if depth >= 2:
             return f"<{type(value).__name__}>"
         if isinstance(value, list):

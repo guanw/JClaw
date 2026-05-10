@@ -15,6 +15,7 @@ from jclaw.core.defaults import (
     WORKSPACE_MAX_STEPS,
     WORKSPACE_SHELL_TIMEOUT_SECONDS,
 )
+from jclaw.core.environment import environment_catalog_path
 from jclaw.tools.base import ActionSpec, RuntimeState, ToolContext, ToolResult, build_tool_description
 from jclaw.tools.workspace.formatting import WorkspaceFormattingMixin
 from jclaw.tools.workspace.git_ops import WorkspaceGitOpsMixin
@@ -66,6 +67,9 @@ class WorkspaceTool(
         self.repo_root = Path(repo_root).expanduser().resolve()
         self.home_dir = Path.home().expanduser().resolve()
         options = options or {}
+        self.environment_path = Path(
+            options.get("environment_path") or environment_catalog_path(self.root)
+        ).expanduser()
         self.max_steps = int(options.get("max_steps", WORKSPACE_MAX_STEPS))
         self.shell_timeout_seconds = int(options.get("shell_timeout_seconds", WORKSPACE_SHELL_TIMEOUT_SECONDS))
         self.shell_output_chars = self._normalize_limit(options.get("shell_output_chars"))

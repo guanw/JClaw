@@ -3,13 +3,37 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shutil
+import subprocess
 from collections.abc import Iterable
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
 ENVIRONMENT_CATALOG_VERSION = 1
+DEFAULT_ENVIRONMENT_COMMAND_NAMES = (
+    "git",
+    "rg",
+    "python",
+    "python3",
+    "pytest",
+    "node",
+    "npm",
+    "pnpm",
+    "uv",
+)
 
+COMMAND_DESCRIPTIONS = {
+    "git": "Version control CLI for status, diff, log, branch, and commit workflows.",
+    "node": "Node.js runtime for executing JavaScript programs and package scripts.",
+    "npm": "Node package manager for install, run, and repository script workflows.",
+    "pnpm": "Node package manager optimized for workspace and lockfile-based project workflows.",
+    "pytest": "Python test runner for repository test suites and targeted test execution.",
+    "python": "Python interpreter for repository scripts, tooling, and local automation.",
+    "python3": "Python interpreter for repository scripts, tooling, and local automation.",
+    "rg": "Fast recursive text search tool for locating files and code references.",
+    "uv": "Python package and environment manager for running and installing Python tooling.",
+}
 
 def environment_catalog_path(state_dir: str | Path) -> Path:
     return Path(state_dir).expanduser() / "environment.json"
@@ -69,6 +93,44 @@ def save_environment_catalog(path: str | Path, payload: dict[str, Any]) -> dict[
         temp_path = Path(handle.name)
     temp_path.replace(target)
     return normalized
+
+
+def sync_environment_catalog(
+    path: str | Path,
+    *,
+    repo_root: str | Path,
+    approved_roots: Iterable[str | Path],
+    shell: str | None = None,
+    cwd: str | Path | None = None,
+    search_path: str | None = None,
+    command_names: Iterable[str] = (),
+) -> dict[str, Any]:
+    target = Path(path).expanduser()
+    existing = load_environment_catalog(target)
+    current_cwd = Path(cwd).expanduser().resolve() if cwd is not None else Path.cwd().resolve()
+    command_set = _command_seed(command_names, bootstrap=existing is None)
+    commands = dict(existing.get("commands", {})) if isinstance(existing, dict) else {}
+
+    discovered_commands = _discover_commands(command_set, search_path=search_path)
+    for name in command_set:
+        if name in discovered_commands:
+            commands[name] = discovered_commands[name]
+        else:
+            commands.pop(name, None)
+
+    payload = build_environment_catalog(
+        repo_root=repo_root,
+        approved_roots=approved_roots,
+        shell=shell,
+        cwd=current_cwd,
+        interpreters=dict(existing.get("interpreters", {})) if isinstance(existing, dict) else None,
+        commands=commands,
+        apps=None,
+    )
+    normalized = normalize_environment_catalog(payload)
+    if existing == normalized and target.exists():
+        return normalized
+    return save_environment_catalog(target, normalized)
 
 
 def normalize_environment_catalog(payload: dict[str, Any]) -> dict[str, Any]:
@@ -148,3 +210,62 @@ def _normalize_capability_mapping(
 
 def _platform_name() -> str:
     return "macOS" if platform.system() == "Darwin" else platform.system()
+
+
+def _command_seed(command_names: Iterable[str], *, bootstrap: bool) -> tuple[str, ...]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for name in DEFAULT_ENVIRONMENT_COMMAND_NAMES if bootstrap else ():
+        token = str(name).strip()
+        if token and token not in seen:
+            seen.add(token)
+            ordered.append(token)
+    for name in command_names:
+        token = str(name).strip()
+        if token and token not in seen:
+            seen.add(token)
+            ordered.append(token)
+    return tuple(ordered)
+
+
+def _discover_commands(
+    command_names: Iterable[str],
+    *,
+    search_path: str | None = None,
+) -> dict[str, dict[str, str]]:
+    discovered: dict[str, dict[str, str]] = {}
+    for raw_name in command_names:
+        name = str(raw_name).strip()
+        if not name:
+            continue
+        resolved = shutil.which(name, path=search_path)
+        if not resolved:
+            continue
+        discovered[name] = {
+            "path": resolved,
+            "description": _command_description(name, resolved),
+        }
+    return discovered
+
+
+def _command_description(command_name: str, resolved_path: str) -> str:
+    curated = COMMAND_DESCRIPTIONS.get(command_name)
+    if curated:
+        return curated
+    try:
+        result = subprocess.run(
+            [resolved_path, "--help"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2,
+            env={"PATH": os.environ.get("PATH", "")},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "Local CLI command available in the current execution environment."
+    output = f"{result.stdout}\n{result.stderr}"
+    for line in output.splitlines():
+        summary = line.strip()
+        if summary:
+            return summary[:160]
+    return "Local CLI command available in the current execution environment."

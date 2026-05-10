@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 APP_NAME = "JClaw"
+GENERIC_PREVIEW_CHARS = 500
 
 PROVIDER_MAX_TOKENS = 350
 PROVIDER_TEMPERATURE = 0.2

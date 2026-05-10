@@ -1378,12 +1378,12 @@ def test_controller_state_preserves_workspace_file_and_diff_artifact_previews(tm
 
     file_preview = controller_state["artifacts_by_type"]["workspace_file"]["content"]
     diff_preview = controller_state["artifacts_by_type"]["workspace_diff"]["diff"]
-    assert len(file_preview) > 220
+    assert len(file_preview) > 500
     assert len(file_preview) == 5000
-    assert len(diff_preview) > 220
+    assert len(diff_preview) > 500
     assert len(diff_preview) == 5000
     latest_preview = controller_state["latest_observation"]["data_preview"]["content"]
-    assert len(latest_preview) > 220
+    assert len(latest_preview) > 500
     assert len(latest_preview) == 5000
     db.close()
 
@@ -1779,7 +1779,7 @@ def test_controller_state_preserves_workspace_patch_artifact_preview(tmp_path) -
     )
 
     patch_preview = controller_state["artifacts_by_type"]["workspace_patch"]["diff"]
-    assert len(patch_preview) > 220
+    assert len(patch_preview) > 500
     assert len(patch_preview) == 5000
     db.close()
 
@@ -1833,9 +1833,9 @@ def test_controller_state_preserves_workspace_command_result_preview(tmp_path) -
     )
 
     command_preview = controller_state["artifacts_by_type"]["workspace_command_result"]
-    assert len(command_preview["stdout"]) > 220
+    assert len(command_preview["stdout"]) > 500
     assert len(command_preview["stdout"]) == 5000
-    assert len(command_preview["stderr"]) > 220
+    assert len(command_preview["stderr"]) > 500
     assert len(command_preview["stderr"]) == 5000
     db.close()
 

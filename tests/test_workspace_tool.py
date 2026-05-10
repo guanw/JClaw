@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
 from jclaw.core.db import Database
+from jclaw.core.environment import load_environment_catalog
 from jclaw.tools.base import ToolContext
 from jclaw.tools.workspace.tool import WorkspaceTool
 
@@ -1152,6 +1154,10 @@ def test_run_command_uses_repo_local_venv_bin_when_present(tmp_path) -> None:
     assert success.ok is True
     assert success.data["exit_code"] == 0
     assert success.data["stdout"].strip() == "repo-local-python"
+    catalog = load_environment_catalog(tmp_path / "state" / "environment.json")
+    assert catalog is not None
+    assert catalog["commands"]["python"]["path"] == str(fake_python)
+    assert catalog["interpreters"] == {}
     db.close()
 
 
@@ -1177,4 +1183,88 @@ def test_run_command_requires_grant_and_enforces_policy(tmp_path) -> None:
     )
     assert blocked.ok is False
     assert "not allowed" in blocked.summary.lower() or "blocked" in blocked.summary.lower()
+    db.close()
+
+
+def test_run_command_updates_environment_catalog_with_new_successful_command(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    custom_bin = tmp_path / "custom-bin"
+    custom_bin.mkdir()
+    fake_make = custom_bin / "make"
+    fake_make.write_text("#!/bin/sh\necho custom-make\n", encoding="utf-8")
+    fake_make.chmod(0o755)
+
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+    original_command_env = tool._command_env
+    tool._command_env = lambda *, cwd=None: {
+        **original_command_env(cwd=cwd),
+        "PATH": f"{custom_bin}:{original_command_env(cwd=cwd)['PATH']}",
+    }
+
+    success = tool.invoke(
+        "run_command",
+        {"command": "make", "cwd": str(root)},
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert success.ok is True
+    assert success.data["stdout"].strip() == "custom-make"
+    catalog = load_environment_catalog(tmp_path / "state" / "environment.json")
+    assert catalog is not None
+    assert catalog["commands"]["make"]["path"] == str(fake_make)
+    assert str(root.resolve()) in catalog["roots"]["approved"]
+    db.close()
+
+
+def test_run_command_missing_binary_returns_structured_failure_and_removes_stale_catalog_entry(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    db = Database(tmp_path / "jclaw.db")
+    _grant_all(db, root)
+    tool = WorkspaceTool(db, tmp_path / "state", root, draft_change=lambda payload: None)
+    original_command_env = tool._command_env
+    tool._command_env = lambda *, cwd=None: {
+        **original_command_env(cwd=cwd),
+        "PATH": str(tmp_path / "empty-bin"),
+    }
+
+    environment_path = tmp_path / "state" / "environment.json"
+    environment_path.parent.mkdir(parents=True, exist_ok=True)
+    environment_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "host": {"platform": "macOS", "shell": "/bin/zsh", "cwd": "/tmp"},
+                "roots": {
+                    "repo_root": str(root.resolve()),
+                    "approved": [str(root.resolve())],
+                },
+                "interpreters": {},
+                "commands": {
+                    "python": {
+                        "path": "/missing/python",
+                        "description": "Python interpreter for repository scripts, tooling, and local automation.",
+                    }
+                },
+                "apps": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    failure = tool.invoke(
+        "run_command",
+        {"command": "python -c \"print('x')\"", "cwd": str(root)},
+        ToolContext(chat_id="chat-1"),
+    )
+
+    assert failure.ok is False
+    assert failure.data["exit_code"] == 127
+    assert "No such file or directory" in failure.data["stderr"]
+    catalog = load_environment_catalog(environment_path)
+    assert catalog is not None
+    assert "python" not in catalog["commands"]
     db.close()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -9,6 +10,7 @@ from jclaw.core.defaults import (
     WORKSPACE_BLOCKED_GIT_SUBCOMMANDS,
     WORKSPACE_BLOCKED_SHELL_TOKENS,
 )
+from jclaw.core.environment import sync_environment_catalog
 from jclaw.tools.base import ToolContext, ToolResult
 
 
@@ -209,15 +211,24 @@ class WorkspaceShellMixin:
         timeout: int | None = None,
         check: bool = False,
     ) -> dict[str, str | int]:
-        result = subprocess.run(
-            argv,
-            cwd=str(cwd) if cwd else None,
-            capture_output=True,
-            check=check,
-            text=True,
-            timeout=timeout,
-            env=self._command_env(cwd=cwd),
-        )
+        env = self._command_env(cwd=cwd)
+        self._sync_environment_catalog_for_command(argv[0], cwd=cwd, env=env)
+        try:
+            result = subprocess.run(
+                argv,
+                cwd=str(cwd) if cwd else None,
+                capture_output=True,
+                check=check,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+        except FileNotFoundError as exc:
+            return {
+                "exit_code": 127,
+                "stdout": "",
+                "stderr": str(exc),
+            }
         stdout, _ = self._truncate_chars(result.stdout)
         stderr, _ = self._truncate_chars(result.stderr)
         return {
@@ -225,3 +236,26 @@ class WorkspaceShellMixin:
             "stdout": stdout,
             "stderr": stderr,
         }
+
+    def _sync_environment_catalog_for_command(
+        self,
+        command_name: str,
+        *,
+        cwd: Path | None,
+        env: dict[str, str],
+    ) -> None:
+        sync_environment_catalog(
+            self.environment_path,
+            repo_root=self.repo_root,
+            approved_roots=self._approved_environment_roots(),
+            shell=os.environ.get("SHELL", ""),
+            cwd=cwd or self.repo_root,
+            search_path=env.get("PATH", ""),
+            command_names=(command_name,),
+        )
+
+    def _approved_environment_roots(self) -> list[Path]:
+        roots = {self.repo_root.resolve()}
+        for grant in self.db.list_grants(active_only=True):
+            roots.add(Path(grant.root_path).expanduser().resolve())
+        return sorted(roots, key=str)

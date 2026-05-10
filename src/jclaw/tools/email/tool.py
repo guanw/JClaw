@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from jclaw.core.db import Database, EmailAccountRecord
+from jclaw.core.defaults import GENERIC_PREVIEW_CHARS
 from jclaw.tools.base import ActionSpec, RuntimeState, ToolContext, ToolResult, build_tool_description
 from jclaw.tools.email.auth import ConnectedEmailAccount, GmailOAuthManager
 from jclaw.tools.email.gmail_client import GmailClient
@@ -622,7 +623,7 @@ class EmailTool:
                 continue
             preview = self._trim_quoted_history(raw)
             if preview:
-                return preview[:220]
+                return preview[:GENERIC_PREVIEW_CHARS]
         return "(no preview)"
 
     def _display_text(self, value: Any) -> str:
