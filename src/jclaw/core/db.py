@@ -223,6 +223,9 @@ class Database:
     def update_cron_next_run(self, job_id: int, next_run_at: str) -> None:
         self.cron.update_next_run(job_id, next_run_at)
 
+    def prune_disabled_cron_jobs(self, before: str) -> int:
+        return self.cron.prune_disabled_jobs(before)
+
     def upsert_grant(self, root_path: str, capabilities: Iterable[str], granted_by_chat_id: str) -> GrantRecord:
         return self.permissions.upsert_grant(root_path, capabilities, granted_by_chat_id)
 

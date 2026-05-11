@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 import threading
 import time
+from types import SimpleNamespace
 
 from jclaw.ai.tool_loop import RunInterruptedError
 from jclaw.channel.base import IncomingMessage
@@ -15,6 +15,7 @@ class FakeDB:
     def __init__(self) -> None:
         self.offset = 0
         self.trace_mode = "off"
+        self.pruned_before: list[str] = []
 
     def get_telegram_offset(self) -> int:
         return self.offset
@@ -28,6 +29,10 @@ class FakeDB:
 
     def due_cron_jobs(self, now: str) -> list[object]:
         return []
+
+    def prune_disabled_cron_jobs(self, before: str) -> int:
+        self.pruned_before.append(before)
+        return 0
 
     def close(self) -> None:
         return None
@@ -157,6 +162,34 @@ def test_run_due_cron_jobs_disables_explicit_date_job_after_execution(tmp_path) 
     db.close()
 
 
+def test_prune_completed_cron_jobs_daily_removes_disabled_jobs_once_per_day(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    active_job_id = db.add_cron_job(
+        "chat-1",
+        "interval:1800",
+        "stretch",
+        "2000-01-01T00:00:00+00:00",
+    )
+    disabled_job_id = db.add_cron_job(
+        "chat-1",
+        "once:1800",
+        "one-off",
+        "2000-01-01T00:00:00+00:00",
+    )
+    db.update_cron_job("chat-1", disabled_job_id, enabled=False)
+
+    daemon = object.__new__(JClawDaemon)
+    daemon.db = db
+    daemon._last_cron_cleanup_date = None
+
+    daemon._prune_completed_cron_jobs_daily()
+    daemon._prune_completed_cron_jobs_daily()
+
+    assert db.get_cron_job("chat-1", disabled_job_id) is None
+    assert db.get_cron_job("chat-1", active_job_id) is not None
+    db.close()
+
+
 def test_handle_message_edits_placeholder_with_final_reply() -> None:
     daemon = object.__new__(JClawDaemon)
     daemon.config = SimpleNamespace(telegram=SimpleNamespace(allowed_chat_ids=()))
@@ -240,7 +273,7 @@ def test_dispatch_message_interrupts_active_chat_and_runs_latest_pending_message
             self.interrupted.set()
             return True
 
-        def handle_text(self, chat_id: str, text: str, user_name=None) -> str:  # noqa: ANN001
+        def handle_text(self, chat_id: str, text: str, user_name=None) -> str:
             _ = chat_id, user_name
             self.calls.append(text)
             if text == "first":

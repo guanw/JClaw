@@ -51,6 +51,7 @@ class JClawDaemon:
         self._running = True
         self._chat_workers: dict[str, ChatWorkerState] = {}
         self._chat_workers_lock = threading.Lock()
+        self._last_cron_cleanup_date: str | None = None
 
     def close(self) -> None:
         self.channel.close()
@@ -62,6 +63,7 @@ class JClawDaemon:
         try:
             while self._running:
                 try:
+                    self._prune_completed_cron_jobs_daily()
                     self._run_due_cron_jobs()
                     offset = self.db.get_telegram_offset()
                     messages = self.channel.poll_updates(offset)
@@ -237,3 +239,11 @@ class JClawDaemon:
                 cron.update_job(job.chat_id, job.id, enabled=False)
             else:
                 cron.update_next_run(job.id, to_utc_iso(next_run_at(spec)))
+
+    def _prune_completed_cron_jobs_daily(self) -> None:
+        now = datetime.now(UTC)
+        today = now.date().isoformat()
+        if getattr(self, "_last_cron_cleanup_date", None) == today:
+            return
+        self.db.prune_disabled_cron_jobs(now.isoformat())
+        self._last_cron_cleanup_date = today

@@ -148,3 +148,11 @@ class CronStore:
             (next_run_at, job_id),
         )
         self._connection.commit()
+
+    def prune_disabled_jobs(self, before: str) -> int:
+        cursor = self._connection.execute(
+            "DELETE FROM cron_jobs WHERE enabled = 0 AND next_run_at <= ?",
+            (before,),
+        )
+        self._connection.commit()
+        return cursor.rowcount
