@@ -1,4 +1,7 @@
-from jclaw.core.config import load_config
+import tomllib
+
+from jclaw.core.config import load_config, render_default_config
+from jclaw.core.defaults import GOOGLE_DOCS_DEFAULT_SCOPES
 from jclaw.core.environment import environment_catalog_path
 
 
@@ -35,6 +38,55 @@ oauth_client_path = "{oauth_client}"
 
     assert config.email.enabled is True
     assert config.email.oauth_client_path == oauth_client
+
+
+def test_load_config_allows_google_docs_disabled_without_oauth_client(tmp_path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[google_docs]
+enabled = false
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.google_docs.enabled is False
+    assert config.google_docs.oauth_client_path is None
+    assert config.google_docs.scopes == GOOGLE_DOCS_DEFAULT_SCOPES
+
+
+def test_load_config_reads_google_docs_settings(tmp_path) -> None:
+    oauth_client = tmp_path / "google-client.json"
+    oauth_client.write_text("{}", encoding="utf-8")
+    token_dir = tmp_path / "google-tokens"
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"""
+[google_docs]
+enabled = true
+oauth_client_path = "{oauth_client}"
+token_dir = "{token_dir}"
+scopes = ["scope-one", "scope-two"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.google_docs.enabled is True
+    assert config.google_docs.oauth_client_path == oauth_client
+    assert config.google_docs.token_dir == token_dir
+    assert config.google_docs.scopes == ("scope-one", "scope-two")
+
+
+def test_render_default_config_includes_google_docs_section() -> None:
+    data = tomllib.loads(render_default_config())
+
+    assert data["google_docs"]["enabled"] is False
+    assert data["google_docs"]["oauth_client_path"] == ""
+    assert data["google_docs"]["scopes"] == list(GOOGLE_DOCS_DEFAULT_SCOPES)
 
 
 def test_load_config_supports_extends_overlay(tmp_path) -> None:

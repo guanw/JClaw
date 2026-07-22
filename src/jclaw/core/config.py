@@ -21,6 +21,8 @@ from jclaw.core.defaults import (
     DAEMON_LAUNCHD_LABEL,
     EMAIL_DEFAULT_ACCOUNT_ALIAS,
     EMAIL_ENABLED,
+    GOOGLE_DOCS_DEFAULT_SCOPES,
+    GOOGLE_DOCS_ENABLED,
     KNOWLEDGE_ENABLED,
     KNOWLEDGE_MAX_ANSWER_CITATIONS,
     KNOWLEDGE_MAX_CHUNKS_PER_FILE,
@@ -176,6 +178,14 @@ class EmailConfig:
 
 
 @dataclass(slots=True)
+class GoogleDocsConfig:
+    enabled: bool = GOOGLE_DOCS_ENABLED
+    oauth_client_path: Path | None = None
+    token_dir: Path = field(default_factory=lambda: default_state_dir() / "tools" / "google_docs" / "tokens")
+    scopes: tuple[str, ...] = GOOGLE_DOCS_DEFAULT_SCOPES
+
+
+@dataclass(slots=True)
 class BrowserConfig:
     enabled: bool = BROWSER_ENABLED
     headless: bool = BROWSER_HEADLESS
@@ -236,6 +246,7 @@ class Config:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     automation: AutomationConfig = field(default_factory=AutomationConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
+    google_docs: GoogleDocsConfig = field(default_factory=GoogleDocsConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
@@ -252,6 +263,7 @@ class Config:
 
 def render_default_config() -> str:
     state_dir = default_state_dir()
+    google_docs_scopes = "[" + ", ".join(f'"{scope}"' for scope in GOOGLE_DOCS_DEFAULT_SCOPES) + "]"
     return f"""# JClaw configuration
 # Replace the placeholder values below.
 
@@ -293,6 +305,12 @@ enabled = {str(EMAIL_ENABLED).lower()}
 oauth_client_path = ""
 token_dir = "{state_dir / "tools" / "email" / "tokens"}"
 default_account_alias = "{EMAIL_DEFAULT_ACCOUNT_ALIAS}"
+
+[google_docs]
+enabled = {str(GOOGLE_DOCS_ENABLED).lower()}
+oauth_client_path = ""
+token_dir = "{state_dir / "tools" / "google_docs" / "tokens"}"
+scopes = {google_docs_scopes}
 
 [browser]
 enabled = {str(BROWSER_ENABLED).lower()}
@@ -340,6 +358,7 @@ def load_config(path: str | Path | None = None) -> Config:
     memory_data = data.get("memory", {})
     automation_data = data.get("automation", {})
     email_data = data.get("email", {})
+    google_docs_data = data.get("google_docs", {})
     browser_data = data.get("browser", {})
     workspace_data = data.get("workspace", {})
     knowledge_data = data.get("knowledge", {})
@@ -392,6 +411,21 @@ def load_config(path: str | Path | None = None) -> Config:
         oauth_client_path=detected_oauth_client,
         token_dir=_expand_path(email_data.get("token_dir"), default_state_dir() / "tools" / "email" / "tokens"),
         default_account_alias=str(email_data.get("default_account_alias", EMAIL_DEFAULT_ACCOUNT_ALIAS)),
+    )
+    google_docs_enabled = bool(google_docs_data.get("enabled", GOOGLE_DOCS_ENABLED))
+    google_docs_oauth_path = google_docs_data.get("oauth_client_path")
+    google_docs = GoogleDocsConfig(
+        enabled=google_docs_enabled,
+        oauth_client_path=(
+            _expand_path(google_docs_oauth_path, repo_root())
+            if google_docs_enabled and google_docs_oauth_path not in (None, "")
+            else None
+        ),
+        token_dir=_expand_path(
+            google_docs_data.get("token_dir"),
+            default_state_dir() / "tools" / "google_docs" / "tokens",
+        ),
+        scopes=tuple(str(value) for value in google_docs_data.get("scopes", GOOGLE_DOCS_DEFAULT_SCOPES)),
     )
     browser = BrowserConfig(
         enabled=bool(browser_data.get("enabled", BROWSER_ENABLED)),
@@ -454,6 +488,7 @@ def load_config(path: str | Path | None = None) -> Config:
         memory=memory,
         automation=automation,
         email=email,
+        google_docs=google_docs,
         browser=browser,
         workspace=workspace,
         knowledge=knowledge,

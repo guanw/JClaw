@@ -30,6 +30,11 @@ AUTOMATION_ENABLED = True
 EMAIL_ENABLED = True
 EMAIL_DEFAULT_ACCOUNT_ALIAS = "gmail"
 
+GOOGLE_DOCS_ENABLED = False
+GOOGLE_DOCS_DEFAULT_SCOPES = (
+    "https://www.googleapis.com/auth/drive.file",
+)
+
 BROWSER_ENABLED = True
 BROWSER_HEADLESS = False
 BROWSER_CHANNEL = "chromium"
