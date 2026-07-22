@@ -20,6 +20,7 @@ from jclaw.tools.base import DecisionType, RuntimeState
 from jclaw.tools.browser.tool import BrowserTool
 from jclaw.tools.email.tool import EmailTool
 from jclaw.tools.environment.tool import EnvironmentTool
+from jclaw.tools.google_docs.tool import GoogleDocsTool
 from jclaw.tools.knowledge.tool import KnowledgeTool
 from jclaw.tools.memory.tool import MemoryTool
 from jclaw.tools.notion.tool import NotionTool
@@ -74,6 +75,8 @@ class AssistantAgent(
                     default_account_alias=config.email.default_account_alias,
                 )
             )
+        if config.google_docs.enabled:
+            self.tools.register(GoogleDocsTool(config.google_docs))
         if config.browser.enabled:
             self.tools.register(
                 BrowserTool(

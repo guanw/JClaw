@@ -324,6 +324,18 @@ class AgentToolLoopMixin:
                         runtime=runtime,
                         steps=steps,
                     )
+                tool = self.tools.get(decision.tool)
+                if self._should_return_direct_tool_result(tool, decision.action, result):
+                    self._set_execution_trace_status(chat_id, "completed")
+                    return self._compose_tool_reply(
+                        chat_id,
+                        text,
+                        user_name=user_name,
+                        decision=decision.to_dict(),
+                        result=result,
+                        runtime=runtime,
+                        steps=steps,
+                    )
 
                 self._interrupt_if_requested(
                     chat_id,

@@ -33,7 +33,7 @@ EMAIL_DEFAULT_ACCOUNT_ALIAS = "gmail"
 GOOGLE_DOCS_ENABLED = False
 GOOGLE_DOCS_DEFAULT_SCOPES = (
     "https://www.googleapis.com/auth/documents",
-    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
 )
 
 BROWSER_ENABLED = True

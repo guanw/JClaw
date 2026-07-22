@@ -19,8 +19,9 @@ class AgentReplyingMixin:
         steps: list[dict[str, Any]] | None = None,
     ) -> str:
         tool = self.tools.get(str(decision["tool"]))
-        tool_result_text = tool.format_result(str(decision["action"]), result)
-        if self._should_return_direct_tool_result(result):
+        action = str(decision["action"])
+        tool_result_text = tool.format_result(action, result)
+        if self._should_return_direct_tool_result(tool, action, result):
             self._append_execution_trace_event(
                 chat_id,
                 "turn_answered",
@@ -165,5 +166,8 @@ class AgentReplyingMixin:
             "git_diff",
         }
 
-    def _should_return_direct_tool_result(self, result: ToolResult) -> bool:
+    def _should_return_direct_tool_result(self, tool: Any, action: str, result: ToolResult) -> bool:
+        should_return_direct = getattr(tool, "should_return_direct", None)
+        if callable(should_return_direct):
+            return bool(should_return_direct(action, result))
         return result.needs_confirmation
