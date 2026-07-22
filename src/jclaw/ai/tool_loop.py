@@ -325,7 +325,7 @@ class AgentToolLoopMixin:
                         steps=steps,
                     )
                 tool = self.tools.get(decision.tool)
-                if self._should_return_direct_tool_result(tool, decision.action, result):
+                if self._should_return_direct_tool_result(tool, decision.action, result, runtime=runtime):
                     self._set_execution_trace_status(chat_id, "completed")
                     return self._compose_tool_reply(
                         chat_id,

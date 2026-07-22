@@ -361,7 +361,7 @@ class Tool(Protocol):
     def format_result(self, action: str, result: ToolResult) -> str:
         ...
 
-    def should_return_direct(self, action: str, result: ToolResult) -> bool:
+    def should_return_direct(self, action: str, result: ToolResult, runtime: RuntimeState | None = None) -> bool:
         ...
 
     def controller_output(self, action: str, result: ToolResult) -> dict[str, Any]:

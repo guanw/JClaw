@@ -76,7 +76,7 @@ class AssistantAgent(
                 )
             )
         if config.google_docs.enabled:
-            self.tools.register(GoogleDocsTool(config.google_docs))
+            self.tools.register(GoogleDocsTool(config.google_docs, db=self.db))
         if config.browser.enabled:
             self.tools.register(
                 BrowserTool(
