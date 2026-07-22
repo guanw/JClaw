@@ -42,7 +42,10 @@ class GoogleDocsTool:
                 "natural-language values and the latest inspected placeholder list. If placeholder keys are not known, "
                 "call inspect_document first. Map plain field names to matching placeholders, for example tenant name -> "
                 "[tenant_names], lease start -> [lease_start], property address -> [property_address]. Do not invent "
-                "replacement values; only infer keys and values that are explicit in the user request or observations."
+                "replacement values; only infer keys and values that are explicit in the user request or observations. "
+                "For 'update this file/doc' or references to the latest copied/referenced document, call update_document "
+                "with copy_before_update=false. Only set copy_before_update=true when the user asks for a copy, new file, "
+                "new doc, duplicate, or template-safe update."
             ),
         )
 
@@ -208,12 +211,14 @@ class GoogleDocsTool:
         if not replacements:
             return ToolResult(ok=False, summary="update_document requires a non-empty replacements object.", data={})
         copy_name = str(params.get("copy_name") or params.get("name") or "").strip()
+        copy_before_update = self._copy_before_update_param(params)
         if self.db is None:
             return ToolResult(ok=False, summary="update_document requires database-backed approval support.", data={})
         payload = {
             "summary": f"Prepared Google Doc update with {len(replacements)} replacement(s).",
             "document": document,
             "copy_name": copy_name,
+            "copy_before_update": copy_before_update,
             "replacements": replacements,
             "continuation": {
                 "tool": self.name,
@@ -226,7 +231,7 @@ class GoogleDocsTool:
             chat_id=ctx.chat_id,
             root_path=document,
             capabilities=("write",),
-            objective=f"Copy Google Doc and apply {len(replacements)} replacement(s).",
+            objective=self._update_objective(copy_before_update, len(replacements)),
             payload=payload,
         )
         return ToolResult(
@@ -239,7 +244,7 @@ class GoogleDocsTool:
                 "copy_name": copy_name,
                 "replacement_count": len(replacements),
                 "replacements": replacements,
-                "copy_before_update": True,
+                "copy_before_update": copy_before_update,
             },
             needs_confirmation=True,
         )
@@ -258,12 +263,17 @@ class GoogleDocsTool:
         try:
             document = str(request.payload.get("document", "")).strip()
             copy_name = str(request.payload.get("copy_name", "")).strip()
+            copy_before_update = bool(request.payload.get("copy_before_update", False))
             replacements = self._replacements_param(request.payload)
-            copied = self.client.copy_document(document, name=copy_name)
-            copied_document_id = str(copied.get("document_id", "")).strip()
-            if not copied_document_id:
-                raise RuntimeError("Google Docs copy did not return a document id.")
-            update = self.client.replace_text(copied_document_id, replacements)
+            if copy_before_update:
+                copied = self.client.copy_document(document, name=copy_name)
+                target_document_id = str(copied.get("document_id", "")).strip()
+                if not target_document_id:
+                    raise RuntimeError("Google Docs copy did not return a document id.")
+            else:
+                copied = {}
+                target_document_id = document
+            update = self.client.replace_text(target_document_id, replacements)
         except Exception:
             self.db.update_approval_request_status(request.request_id, "failed")
             raise
@@ -273,31 +283,35 @@ class GoogleDocsTool:
         data = {
             "request_id": request.request_id,
             "source_document": document,
-            "document_id": copied_document_id,
+            "document_id": target_document_id,
             "title": str(copied.get("title", "")).strip(),
             "url": str(copied.get("url", "")).strip(),
             "replacement_count": replacement_count,
             "request_count": request_count,
             "replacements": replacements,
+            "copy_before_update": copy_before_update,
             "artifacts": {
-                "google_doc_copy:latest": copied,
                 "google_doc_update:latest": {
                     "request_id": request.request_id,
                     "source_document": document,
-                    "document_id": copied_document_id,
+                    "document_id": target_document_id,
                     "url": str(copied.get("url", "")).strip(),
                     "replacement_count": replacement_count,
                     "request_count": request_count,
                     "replacements": replacements,
+                    "copy_before_update": copy_before_update,
                 },
             },
         }
-        if copied_document_id:
-            data["artifacts"][f"google_doc_copy:{copied_document_id}"] = copied
-            data["artifacts"][f"google_doc_update:{copied_document_id}"] = data["artifacts"]["google_doc_update:latest"]
+        if copy_before_update:
+            data["artifacts"]["google_doc_copy:latest"] = copied
+        if target_document_id:
+            if copy_before_update:
+                data["artifacts"][f"google_doc_copy:{target_document_id}"] = copied
+            data["artifacts"][f"google_doc_update:{target_document_id}"] = data["artifacts"]["google_doc_update:latest"]
         return ToolResult(
             ok=True,
-            summary=f"Copied and updated Google Doc with {replacement_count} replacement occurrence(s).",
+            summary=self._applied_update_summary(copy_before_update, replacement_count),
             data=data,
         )
 
@@ -349,7 +363,8 @@ class GoogleDocsTool:
         lines = [result.summary]
         request_id = str(data.get("request_id", "")).strip()
         if result.needs_confirmation and request_id:
-            lines.append(f"Use /approve {request_id} to copy the document and apply these replacements.")
+            action = "copy the document and apply" if data.get("copy_before_update") else "apply"
+            lines.append(f"Use /approve {request_id} to {action} these replacements.")
             lines.append(f"Use /deny {request_id} to cancel.")
         title = str(data.get("title", "")).strip()
         document_id = str(data.get("document_id", "")).strip()
@@ -379,6 +394,22 @@ class GoogleDocsTool:
         if not isinstance(raw, dict):
             return {}
         return {str(source): str(target) for source, target in raw.items() if str(source)}
+
+    def _copy_before_update_param(self, params: dict[str, Any]) -> bool:
+        if "copy_before_update" in params:
+            return bool(params.get("copy_before_update"))
+        if "in_place" in params:
+            return not bool(params.get("in_place"))
+        return False
+
+    def _update_objective(self, copy_before_update: bool, replacement_count: int) -> str:
+        mode = "Copy Google Doc and apply" if copy_before_update else "Update Google Doc in place with"
+        return f"{mode} {replacement_count} replacement(s)."
+
+    def _applied_update_summary(self, copy_before_update: bool, replacement_count: int) -> str:
+        if copy_before_update:
+            return f"Copied and updated Google Doc with {replacement_count} replacement occurrence(s)."
+        return f"Updated Google Doc with {replacement_count} replacement occurrence(s)."
 
     def _action_specs(self) -> dict[str, ActionSpec]:
         return {
@@ -425,8 +456,9 @@ class GoogleDocsTool:
                 tool=self.name,
                 action="update_document",
                 description=(
-                    "Prepare a safe Google Docs update from natural language by copying the source document first, "
-                    "then replacing exact placeholders or text in the copied document after user approval. "
+                    "Prepare a safe Google Docs update from natural language by replacing exact placeholders or text after user approval. "
+                    "By default, update the referenced or latest document in place. "
+                    "Set copy_before_update=true only when the user asks for a copy, new file, new doc, duplicate, or template-safe update. "
                     "Use this when the user asks to update, fill, edit, or change a Google Doc and provides replacement values. "
                     "Infer the replacements map from natural language by matching user-provided field values to known "
                     "placeholder keys from inspect_document, such as tenant name -> [tenant_names]. Inspect the document first "
@@ -441,7 +473,11 @@ class GoogleDocsTool:
                         },
                         "copy_name": {
                             "type": "string",
-                            "description": "Optional title for the copied document that will receive the updates.",
+                            "description": "Optional title for the copied document when copy_before_update is true.",
+                        },
+                        "copy_before_update": {
+                            "type": "boolean",
+                            "description": "False for in-place updates to the referenced/latest document. True only when the user asks for a copy/new document before updating.",
                         },
                         "replacements": {
                             "type": "object",

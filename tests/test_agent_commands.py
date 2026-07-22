@@ -2633,6 +2633,54 @@ def test_retrospective_critique_runs_for_latest_result_fallback(tmp_path) -> Non
     db.close()
 
 
+def test_controller_answer_with_unknown_approval_request_id_is_rejected(tmp_path) -> None:
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"fake","action":"step_one","params":{},"reason":"Inspect first."}',
+                '{"type":"answer","answer":"Use /approve req_deadbeef00 to apply.","reason":"Claims approval exists."}',
+            ]
+        ),
+    )
+    fake = FakeTool()
+    agent.tools._tools["fake"] = fake
+
+    reply = agent.handle_text("chat-1", "prepare a fake approval")
+
+    assert "I did not create an approval request" in reply
+    assert "req_deadbeef00" not in reply
+    assert db.get_approval_request("req_deadbeef00") is None
+    db.close()
+
+
+def test_retrospective_unresolved_does_not_surface_hallucinated_request_id(tmp_path) -> None:
+    agent, db = _build_agent_for_test(
+        tmp_path,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"fake","action":"step_one","params":{},"reason":"Inspect first."}',
+                "",
+                (
+                    '{"ready_to_complete":false,"issues":["Missing update step."],"missing_verification":false,'
+                    '"recommended_next_action":"tool_call","rationale":"Use /approve req_deadbeef00 to apply."}'
+                ),
+                "not json",
+                "still not json",
+            ]
+        ),
+    )
+    fake = FakeTool()
+    agent.tools._tools["fake"] = fake
+
+    reply = agent.handle_text("chat-1", "prepare a fake approval")
+
+    assert "No new approval request was created." in reply
+    assert "req_deadbeef00" not in reply
+    assert db.get_approval_request("req_deadbeef00") is None
+    db.close()
+
+
 def test_compose_tool_reply_uses_latest_tool_result_not_stale_history(tmp_path) -> None:
     agent, db = _build_agent_for_test(tmp_path, FreshToolReplyLLM())
     agent.tools._tools["fake"] = FakeTool()

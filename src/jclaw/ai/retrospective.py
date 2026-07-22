@@ -256,9 +256,8 @@ class AgentRetrospectiveMixin:
             )
             return next_decision
         message = (
-            critique.rationale
-            or (critique.issues[0] if critique.issues else "")
-            or "Retrospective critique requested another tool step before stopping."
+            "Another tool step is required before this task can be completed, but the controller did not produce "
+            "a usable follow-up tool call. No new approval request was created."
         )
         self._append_execution_trace_event(  # type: ignore[attr-defined]
             chat_id,
@@ -266,6 +265,8 @@ class AgentRetrospectiveMixin:
             "Retrospective critique requested another tool step, but no usable follow-up tool decision was produced.",
             {
                 "message": message,
+                "rationale": critique.rationale,
+                "issues": list(critique.issues),
                 "recommended_next_action": critique.recommended_next_action.value,
             },
         )

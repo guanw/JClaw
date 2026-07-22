@@ -180,17 +180,54 @@ def test_google_docs_update_document_prepares_approval_request(tmp_path) -> None
     assert result.ok is True
     assert result.needs_confirmation is True
     assert result.data["replacement_count"] == 2
+    assert result.data["copy_before_update"] is False
     request = db.get_approval_request(result.data["request_id"])
     assert request is not None
     assert request.kind == "google_doc_update"
     assert request.payload["document"] == "doc-123"
     assert request.payload["copy_name"] == "Lease for Alice"
+    assert request.payload["copy_before_update"] is False
     assert request.payload["replacements"] == {"[tenant_names]": "Alice Zhang", "[lease_start]": "2026-08-01"}
     assert request.payload["continuation"]["approve_action"] == "apply_update_document"
     db.close()
 
 
-def test_google_docs_apply_update_document_copies_then_replaces_text(tmp_path) -> None:
+def test_google_docs_apply_update_document_replaces_text_in_place_by_default(tmp_path) -> None:
+    db = Database(tmp_path / "jclaw.db")
+    client = FakeGoogleDocsClient()
+    tool = GoogleDocsTool(
+        GoogleDocsConfig(enabled=True, token_dir=tmp_path / "tokens"),
+        db=db,
+        client=client,  # type: ignore[arg-type]
+    )
+    preview = tool.invoke(
+        "update_document",
+        {
+            "document": "doc-123",
+            "replacements": {"[tenant_names]": "Alice Zhang"},
+        },
+        ToolContext(chat_id="chat"),
+    )
+
+    applied = tool.invoke(
+        "apply_update_document",
+        {"request_id": preview.data["request_id"]},
+        ToolContext(chat_id="chat", user_id="approval"),
+    )
+
+    assert applied.ok is True
+    assert applied.summary == "Updated Google Doc with 2 replacement occurrence(s)."
+    assert client.copies == []
+    assert client.replacements == [("doc-123", {"[tenant_names]": "Alice Zhang"})]
+    assert applied.data["document_id"] == "doc-123"
+    assert applied.data["copy_before_update"] is False
+    assert "google_doc_copy:latest" not in applied.data["artifacts"]
+    assert applied.data["artifacts"]["google_doc_update:doc-123"]["replacement_count"] == 2
+    assert db.get_approval_request(preview.data["request_id"]).status == "applied"
+    db.close()
+
+
+def test_google_docs_apply_update_document_can_copy_before_update(tmp_path) -> None:
     db = Database(tmp_path / "jclaw.db")
     client = FakeGoogleDocsClient()
     tool = GoogleDocsTool(
@@ -203,6 +240,7 @@ def test_google_docs_apply_update_document_copies_then_replaces_text(tmp_path) -
         {
             "document": "doc-123",
             "copy_name": "Lease for Alice",
+            "copy_before_update": True,
             "replacements": {"[tenant_names]": "Alice Zhang"},
         },
         ToolContext(chat_id="chat"),
@@ -220,8 +258,8 @@ def test_google_docs_apply_update_document_copies_then_replaces_text(tmp_path) -
     assert client.replacements == [("copy-123", {"[tenant_names]": "Alice Zhang"})]
     assert applied.data["document_id"] == "copy-123"
     assert applied.data["url"] == "https://docs.google.com/document/d/copy-123/edit"
+    assert applied.data["copy_before_update"] is True
     assert applied.data["artifacts"]["google_doc_update:copy-123"]["replacement_count"] == 2
-    assert db.get_approval_request(preview.data["request_id"]).status == "applied"
     db.close()
 
 
@@ -244,7 +282,7 @@ def test_google_docs_update_controller_output_is_compact(tmp_path) -> None:
         "request_id": result.data["request_id"],
         "document": "doc-123",
         "replacement_count": 1,
-        "copy_before_update": True,
+        "copy_before_update": False,
         "replacement_keys": ["[tenant_names]"],
     }
     assert "replacements" not in payload
@@ -273,6 +311,7 @@ def test_google_docs_tool_catalog_exposes_initial_actions(tmp_path) -> None:
     assert description["actions"]["update_document"]["writes"] is True
     assert description["actions"]["update_document"]["requires_confirmation"] is True
     assert "infer exact replacements" in description["controller_guidance"]
+    assert "copy_before_update=false" in description["controller_guidance"]
     assert "tenant name -> [tenant_names]" in description["actions"]["update_document"]["description"]
 
 
@@ -442,7 +481,7 @@ def test_agent_can_prepare_google_docs_update_from_inferred_prompt_values(tmp_pa
         SequenceLLM(
             [
                 '{"type":"tool_call","tool":"google_docs","action":"inspect_document","params":{"document":"doc-123"},"reason":"Inspect placeholders before inferring updates."}',
-                '{"type":"tool_call","tool":"google_docs","action":"update_document","params":{"copy_name":"Lease for Alice","replacements":{"[tenant_names]":"Alice Zhang","[total_monthly_rent]":"$2500"}},"reason":"Infer replacement keys from inspected placeholders and user values."}',
+                '{"type":"tool_call","tool":"google_docs","action":"update_document","params":{"copy_name":"Lease for Alice","copy_before_update":true,"replacements":{"[tenant_names]":"Alice Zhang","[total_monthly_rent]":"$2500"}},"reason":"Infer replacement keys from inspected placeholders and user values."}',
             ]
         ),
     )
@@ -468,8 +507,62 @@ def test_agent_can_prepare_google_docs_update_from_inferred_prompt_values(tmp_pa
     assert request is not None
     assert request.payload["document"] == "doc-123"
     assert request.payload["copy_name"] == "Lease for Alice"
+    assert request.payload["copy_before_update"] is True
     assert request.payload["replacements"] == {
         "[tenant_names]": "Alice Zhang",
         "[total_monthly_rent]": "$2500",
     }
+    db.close()
+
+
+def test_agent_can_prepare_in_place_update_for_latest_referenced_doc(tmp_path) -> None:
+    config = Config(
+        provider=ProviderConfig(),
+        telegram=TelegramConfig(),
+        daemon=DaemonConfig(
+            state_dir=tmp_path,
+            db_path=tmp_path / "jclaw.db",
+            stdout_log=tmp_path / "stdout.log",
+            stderr_log=tmp_path / "stderr.log",
+        ),
+        memory=MemoryConfig(),
+        automation=AutomationConfig(enabled=False),
+        email=EmailConfig(enabled=False),
+        google_docs=GoogleDocsConfig(enabled=False, token_dir=tmp_path / "google-docs-tokens"),
+        browser=BrowserConfig(enabled=False),
+        workspace=WorkspaceConfig(enabled=False),
+        knowledge=KnowledgeConfig(enabled=False),
+        notion=NotionConfig(enabled=False),
+        config_path=tmp_path / "config.toml",
+        repo_root=Path("/Users/guanw/Documents/JClaw"),
+    )
+    db = Database(config.daemon.db_path)
+    agent = AssistantAgent(
+        config,
+        db,
+        SequenceLLM(
+            [
+                '{"type":"tool_call","tool":"google_docs","action":"inspect_document","params":{"document":"doc-123"},"reason":"Inspect placeholders before update."}',
+                '{"type":"tool_call","tool":"google_docs","action":"update_document","params":{"copy_before_update":false,"replacements":{"[tenant_names]":"Dylan and Ruth"}},"reason":"Update the latest referenced doc in place."}',
+            ]
+        ),
+    )
+    agent.tools.register(
+        GoogleDocsTool(
+            GoogleDocsConfig(enabled=True, token_dir=tmp_path / "tokens"),
+            db=db,
+            client=FakeGoogleDocsClient(),  # type: ignore[arg-type]
+        )
+    )
+
+    reply = agent.handle_text("chat", "update this file tenant names to Dylan and Ruth")
+
+    assert "Prepared Google Doc update preview." in reply
+    assert "copy the document" not in reply
+    assert "[tenant_names] -> Dylan and Ruth" in reply
+    request_id = reply.split("Use /approve ", 1)[1].split(" ", 1)[0]
+    request = db.get_approval_request(request_id)
+    assert request is not None
+    assert request.payload["document"] == "doc-123"
+    assert request.payload["copy_before_update"] is False
     db.close()

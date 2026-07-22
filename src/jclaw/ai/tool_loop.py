@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +18,7 @@ from jclaw.tools.base import (
 )
 
 LOGGER = logging.getLogger(__name__)
+APPROVAL_REQUEST_RE = re.compile(r"\breq_[A-Za-z0-9]+\b")
 
 
 class RunInterruptedError(RuntimeError):
@@ -386,6 +388,20 @@ class AgentToolLoopMixin:
                         steps=steps,
                     )
                 if next_decision.type is DecisionType.ANSWER:
+                    invalid_request_ids = self._invalid_approval_request_ids(next_decision.answer)
+                    if invalid_request_ids:
+                        self._append_execution_trace_event(
+                            chat_id,
+                            "controller_answer_rejected",
+                            "Controller answer referenced approval request id(s) that do not exist.",
+                            {"invalid_request_ids": invalid_request_ids},
+                        )
+                        self._set_execution_trace_status(chat_id, "blocked")
+                        return (
+                            "I did not create an approval request for this update. "
+                            "The latest tool step only inspected the document, so there is no request to approve yet. "
+                            "Please retry the update request."
+                        )
                     retrospective_followup = self._next_decision_after_retrospective(
                         chat_id,
                         text,
@@ -607,3 +623,10 @@ class AgentToolLoopMixin:
             f"Stopped after exhausting the current {task_kind} step budget ({step_budget} tool steps). "
             f"Reply `continue` if you want me to continue with {extra_steps} more tool steps."
         )
+
+    def _invalid_approval_request_ids(self, text: str) -> list[str]:
+        invalid: list[str] = []
+        for request_id in sorted(set(APPROVAL_REQUEST_RE.findall(str(text)))):
+            if self.db.get_approval_request(request_id) is None:
+                invalid.append(request_id)
+        return invalid
